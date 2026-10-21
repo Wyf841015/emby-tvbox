@@ -1,0 +1,6 @@
+#!/bin/bash
+# 卸载时停掉服务并清掉 socket
+SOCK="${TRIM_APPDEST}/tvboxhub.sock"
+[ -f "${TRIM_PKGVAR}/app.pid" ] && kill "$(cat "${TRIM_PKGVAR}/app.pid")" 2>/dev/null
+rm -f "${SOCK}"
+echo "tvboxhub uninstalled" >> "${TRIM_PKGVAR}/info.log" 2>/dev/null

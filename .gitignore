@@ -18,3 +18,11 @@ spider-hub/out/
 spider-hub/lib/
 spider-hub/spiders/
 spider-hub/hub.json
+
+# 打包产物（30MB，走 FnDepot/网盘分发）
+tvboxhub.fpk
+fpk-src/ui/jre/
+fpk-src/ui/lib/
+fpk-src/ui/spiders/
+fpk-src/ui/plugin/
+fpk-src/bin/

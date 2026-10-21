@@ -1,0 +1,7 @@
+#!/bin/bash
+# 安装后：给内置 JRE 补执行权限
+APP="${TRIM_APPDEST}"
+mkdir -p "${TRIM_PKGVAR}"
+chmod -R +x "${APP}/ui/jre/bin" 2>/dev/null
+ln -sfn "${APP}/ui/images" "${APP}/ui/images" 2>/dev/null
+echo "tvboxhub installed: ${TRIM_APPVER}" >> "${TRIM_PKGVAR}/info.log"

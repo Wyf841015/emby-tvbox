@@ -1,0 +1,16 @@
+{
+  ".url": {
+    "tvboxhub.Application": {
+      "title": "TVBox 中转",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "url": "/app/tvboxhub",
+      "gatewaySocket": "tvboxhub.sock",
+      "gatewayPrefix": "/app/tvboxhub",
+      "allUsers": true,
+      "control": {
+        "accessPerm": "editable"
+      }
+    }
+  }
+}

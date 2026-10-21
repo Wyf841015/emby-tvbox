@@ -1,0 +1,68 @@
+#!/bin/bash
+# TVBox 中转 —— spider-hub 启动脚本
+LOG_FILE="${TRIM_PKGVAR}/info.log"
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+APP="${TRIM_APPDEST}"
+PORT=8098
+SOCK="${APP}/tvboxhub.sock"
+
+mkdir -p "${TRIM_PKGVAR}"
+export TRM_PKGVAR="${TRIM_PKGVAR}"
+
+log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"; }
+
+# 优先用内置 JRE，其次系统 java
+JAVA="${APP}/ui/jre/bin/java"
+[ -x "$JAVA" ] || JAVA="$(command -v java 2>/dev/null)"
+if [ -z "$JAVA" ] || [ ! -x "$JAVA" ]; then
+    log_msg "ERROR: 找不到 java（内置 JRE 缺失，系统也没有）"
+    exit 1
+fi
+
+SPIDER_JAR="$(find "${APP}/ui/spiders" -maxdepth 1 -name '*.jar' 2>/dev/null | head -1)"
+
+start_process() {
+    if status; then return 0; fi
+    log_msg "Starting (java=$JAVA, spider=${SPIDER_JAR:-none})"
+    # -Xverify:none: dex2jar 生成的字节码过不了 JVM 校验（VerifyError）
+    nohup "$JAVA" -Xverify:none -Xmx512m \
+        -Dfile.encoding=UTF-8 \
+        -cp "${APP}/ui/hub.jar:${APP}/ui/lib/*" \
+        hub.Hub \
+        --port "${PORT}" \
+        --socket "${SOCK}" \
+        --prefix "/app/tvboxhub" \
+        --config "${TRIM_PKGVAR}/hub.json" \
+        --jar-dir "${APP}/ui/lib" \
+        --plugin-dll "${APP}/ui/plugin/TvBox.dll" \
+        --ui-dir "${APP}/ui" \
+        ${SPIDER_JAR:+--spider-jar "$SPIDER_JAR"} \
+        >> "${LOG_FILE}" 2>&1 &
+    echo $! > "${PID_FILE}"
+    sleep 2
+    if status; then log_msg "Started ok (pid=$(cat ${PID_FILE}))"; else log_msg "ERROR: 启动失败，看上面的日志"; fi
+}
+
+stop_process() {
+    if [ -f "${PID_FILE}" ]; then
+        PID=$(cat "${PID_FILE}")
+        kill "$PID" 2>/dev/null
+        sleep 1
+        kill -9 "$PID" 2>/dev/null
+        rm -f "${PID_FILE}"
+        log_msg "Stopped"
+    fi
+    rm -f "${SOCK}"
+}
+
+status() {
+    [ -f "${PID_FILE}" ] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null
+}
+
+case "$1" in
+    start)   start_process ;;
+    stop)    stop_process ;;
+    restart) stop_process; start_process ;;
+    status)  status && echo "running" || echo "stopped" ;;
+    *)       start_process ;;
+esac

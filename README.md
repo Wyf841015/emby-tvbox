@@ -225,3 +225,55 @@ emby-tvbox/
 
 本项目只做协议转换，不提供、不存储、不分发任何音视频内容。
 源由使用者自行配置，内容合法性由使用者负责。仅供个人学习和技术研究使用。
+
+---
+
+## fnOS 应用（tvboxhub.fpk）
+
+整个东西打成了一个 fnOS 应用：spider 中转服务 + Web 配置界面 + Emby 插件一键安装。
+
+### 安装
+
+fnOS 应用中心 → 手动安装 → 选 `tvboxhub.fpk`（30.5 MB，内置 Java 运行时，**不需要另外装 Java**）。
+
+装完打开应用，Web 界面里：
+
+1. 填 TVBox 配置地址 → 「保存并加载」→ 会自动列出所有 `csp_XXX` spider 站点
+2. 「检测本机 Emby」→ 自动找到 Emby 数据目录（也可手工填）
+3. 填剧集输出目录（strm 根目录，例如 `/vol1/media/tvbox`）
+4. 点「安装插件到 Emby」→ DLL 复制到 `<Emby数据目录>/plugins/`，插件配置自动写好
+5. 重启一次 Emby → 插件生效，去媒体库添加该输出目录并扫描
+
+### 包里有什么
+
+| 路径 | 内容 |
+|---|---|
+| `ui/index.html` | Web 配置界面（同时通过 fnOS 网关 `/app/tvboxhub` 和 TCP 8098 提供） |
+| `ui/hub.jar` | spider-hub（38 个类，含 Spider 基类 + Android stub） |
+| `ui/jre/` | jlink 裁剪的 Java 21 运行时，42 MB（含 `jdk.httpserver`、`jdk.crypto.ec`） |
+| `ui/lib/` | okhttp / gson / okio / kotlin-stdlib / org.json |
+| `ui/spiders/lmw-classes.jar` | dex2jar 转出来的 spider 集合（5.4 MB，2660 个站点实现） |
+| `ui/plugin/TvBox.dll` | Emby 插件本体（94 KB） |
+| `cmd/main` | 启动脚本：起 hub，绑 TCP 8098 + Unix socket `tvboxhub.sock` |
+
+### 服务端点
+
+- **TCP 8098** —— 局域网访问 + Emby 插件连（插件配置里的 `SpiderHubUrl` 填这个）
+- **Unix socket** `${TRIM_APPDEST}/tvboxhub.sock` —— fnOS 网关 `/app/tvboxhub` 走这条
+
+两个端点共用同一套路由（socket 前端反向代理到 TCP），保证功能完全一致。
+
+### 重新打包
+
+```bash
+cd fpk-src
+# 更新插件 DLL / hub 代码后
+cp ../TvBox.Plugin/bin/Release/TvBox.dll ui/plugin/
+(cd ../spider-hub/out && jar cf $OLDPWD/../fpk-src/ui/hub.jar .)
+fnpack build .
+```
+
+fnpack 硬性要求（踩过的坑）：
+- `bin/` 空目录必须存在
+- `cmd/` 下 9 个脚本缺一不可：`main`、`install_init`、`install_callback`、`upgrade_init`、`upgrade_callback`、`uninstall_init`、`uninstall_callback`、`config_init`、`config_callback`
+- `ICON.PNG`(64×64) + `ICON_256.PNG`(256×256) 必须在根目录，直角满铺正方形

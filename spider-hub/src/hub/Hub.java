@@ -42,15 +42,21 @@ public class Hub {
 
     static SpiderPool pool = new SpiderPool();
     static ExecutorService workers = Executors.newFixedThreadPool(8);
+    static UnixHttp unix;
     static Path dataFile;
     static Map<String, Object> settings = new LinkedHashMap<>();
     static long started = System.currentTimeMillis();
+    static Path pluginDll;      // TvBox.dll（安装包里带的）
+    static Path uiDir;          // Web 界面目录
+    static int tcpPort = 8098;  // Unix 前端的反代目标
 
     public static void main(String[] args) throws Exception {
         int port = 8098;
         String jarDir = null;
         String spiderJar = null;
         Path configFile = Path.of("hub.json");
+        String socketPath = null;
+        String hubPrefix = "";
 
         for (int i = 0; i < args.length; i++) {
             String a = args[i];
@@ -59,6 +65,10 @@ public class Hub {
                 case "--config": configFile = Path.of(args[++i]); break;
                 case "--spider-jar": spiderJar = args[++i]; break;
                 case "--jar-dir": jarDir = args[++i]; break;
+                case "--socket": socketPath = args[++i]; break;
+                case "--plugin-dll": pluginDll = Path.of(args[++i]); break;
+                case "--ui-dir": uiDir = Path.of(args[++i]); break;
+                case "--prefix": hubPrefix = args[++i]; break;
                 case "--help":
                     System.out.println("用法: java hub.Hub --port 8098 --config hub.json --spider-jar /path/classes.jar --jar-dir /path/lib");
                     return;
@@ -66,6 +76,10 @@ public class Hub {
                     System.out.println("未知参数: " + a);
             }
         }
+
+        tcpPort = port;
+        if (uiDir == null && Files.isDirectory(Path.of("web"))) uiDir = Path.of("web");
+        System.setProperty("hub.prefix", hubPrefix);
 
         dataFile = configFile;
         loadSettings();
@@ -99,7 +113,32 @@ public class Hub {
         server.createContext("/", Hub::handle);
         server.setExecutor(Executors.newFixedThreadPool(16));
         server.start();
-        System.out.println("spider-hub 已启动: http://0.0.0.0:" + port + "/");
+        System.out.println("TCP 监听: http://0.0.0.0:" + port + "/");
+
+        // Unix socket 前端：fnOS 网关只认 /var/apps/<app>/target/<app>.sock
+        // 实现方式是反向代理到本地 TCP 端口，避免重构路由
+        if (socketPath != null) {
+            try {
+                final String prefix = hubPrefix;
+                unix = new UnixHttp(Path.of(socketPath), (method, path, rawQuery, body) -> {
+                    String p = path;
+                    if (!prefix.isEmpty() && p.startsWith(prefix)) {
+                        p = p.substring(prefix.length());
+                        if (p.isEmpty()) p = "/";
+                        if (!p.startsWith("/")) p = "/" + p;
+                    }
+                    String url = "http://127.0.0.1:" + tcpPort + p
+                            + (rawQuery == null || rawQuery.isEmpty() ? "" : "?" + rawQuery);
+                    return proxy(method, url, body);
+                });
+                unix.start();
+                System.out.println("Unix socket 监听: " + socketPath + "  prefix=" + prefix);
+            } catch (Exception e) {
+                System.out.println("Unix socket 监听失败: " + e.getMessage());
+            }
+        }
+
+        System.out.println("spider-hub 已启动");
     }
 
     // ───────────────────────── 路由 ─────────────────────────
@@ -233,6 +272,48 @@ public class Hub {
                 }
                 int n = reload(url);
                 sendJson(ex, 200, ok("已加载 " + n + " 个 spider 站点"));
+                return;
+            }
+            case "/api/emby/detect": {
+                List<Object> list = new ArrayList<>();
+                for (EmbyManager.Instance i : EmbyManager.detect(str(settings.get("embyPath")))) {
+                    list.add(i.toMap());
+                }
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("ok", true);
+                m.put("found", list.size());
+                m.put("instances", list);
+                m.put("dll", pluginDll == null ? null
+                        : (Files.isRegularFile(pluginDll) ? pluginDll.toString() + " (" + Files.size(pluginDll) + " bytes)" : "缺失"));
+                sendJson(ex, 200, m);
+                return;
+            }
+            case "/api/emby/status": {
+                String pd = q.getOrDefault("programdata", str(settings.get("embyPath")));
+                if (pd == null || pd.isEmpty()) { sendJson(ex, 200, fail("还没选 Emby 目录")); return; }
+                Map<String, Object> m = EmbyManager.status(pd);
+                m.put("ok", true);
+                m.put("programdata", pd);
+                sendJson(ex, 200, m);
+                return;
+            }
+            case "/api/emby/install": {
+                Map<String, String> req = parseForm(readBody(ex));
+                String pd = firstNonEmpty(req.get("programdata"), str(settings.get("embyPath")));
+                if (pd == null || pd.isEmpty()) { sendJson(ex, 200, fail("还没选 Emby 目录")); return; }
+                if (pluginDll == null || !Files.isRegularFile(pluginDll)) {
+                    sendJson(ex, 200, fail("安装包里没有 TvBox.dll")); return;
+                }
+                Map<String, Object> r = EmbyManager.install(pd, Files.readAllBytes(pluginDll), buildPluginXml(req));
+                if (Boolean.TRUE.equals(r.get("ok"))) { settings.put("embyPath", pd); saveSettings(); }
+                sendJson(ex, 200, r);
+                return;
+            }
+            case "/api/emby/uninstall": {
+                Map<String, String> req = parseForm(readBody(ex));
+                String pd = firstNonEmpty(req.get("programdata"), str(settings.get("embyPath")));
+                if (pd == null || pd.isEmpty()) { sendJson(ex, 200, fail("还没选 Emby 目录")); return; }
+                sendJson(ex, 200, EmbyManager.uninstall(pd));
                 return;
             }
             default:
@@ -475,6 +556,93 @@ public class Hub {
         return o == null ? null : String.valueOf(o);
     }
 
+    /** Unix 前端把请求反代到本地 TCP。 */
+    static UnixHttp.Resp proxy(String method, String url, String body) {
+        try {
+            java.net.http.HttpClient c = java.net.http.HttpClient.newBuilder()
+                    .connectTimeout(java.time.Duration.ofSeconds(10)).build();
+            java.net.http.HttpRequest.Builder b = java.net.http.HttpRequest.newBuilder(java.net.URI.create(url))
+                    .timeout(java.time.Duration.ofSeconds(180));
+            if ("POST".equalsIgnoreCase(method)) {
+                b.POST(java.net.http.HttpRequest.BodyPublishers.ofString(body == null ? "" : body,
+                        StandardCharsets.UTF_8));
+            } else {
+                b.GET();
+            }
+            java.net.http.HttpResponse<byte[]> resp = c.send(b.build(),
+                    java.net.http.HttpResponse.BodyHandlers.ofByteArray());
+            UnixHttp.Resp r = new UnixHttp.Resp();
+            r.code = resp.statusCode();
+            String ct = resp.headers().firstValue("content-type").orElse("text/plain; charset=utf-8");
+            r.contentType = ct;
+            r.body = resp.body();
+            return r;
+        } catch (Exception e) {
+            return UnixHttp.Resp.of("proxy 失败: " + e).code(502);
+        }
+    }
+
+    /** body 既支持 JSON 也支持 a=b&c=d。 */
+    static Map<String, String> parseForm(String body) {
+        Map<String, String> m = new LinkedHashMap<>();
+        if (body == null || body.isBlank()) return m;
+        String t = body.trim();
+        if (t.startsWith("{")) {
+            try {
+                Object o = SpiderPool.Json.parse(t);
+                if (o instanceof Map) {
+                    for (Map.Entry<?, ?> e : ((Map<?, ?>) o).entrySet()) {
+                        Object v = e.getValue();
+                        m.put(String.valueOf(e.getKey()), v == null ? "" : String.valueOf(v));
+                    }
+                }
+            } catch (Exception ignore) {
+            }
+            return m;
+        }
+        for (String kv : t.split("&")) {
+            int i = kv.indexOf('=');
+            if (i > 0) m.put(dec(kv.substring(0, i)), dec(kv.substring(i + 1)));
+        }
+        return m;
+    }
+
+    /** 生成插件配置 XML——装插件时顺手写好，用户不用再进 Emby 手填。 */
+    static String buildPluginXml(Map<String, String> req) {
+        String outputRoot = firstNonEmpty(req.get("outputRoot"), "");
+        if (outputRoot.isEmpty()) return null;
+        String configUrl = firstNonEmpty(req.get("configUrl"), str(settings.get("configUrl")), "");
+        String hubUrl = firstNonEmpty(req.get("hubUrl"), str(settings.get("publicUrl")), "");
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
+        sb.append("<PluginConfiguration xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" ")
+          .append("xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\">\n");
+        sb.append("  <ConfigUrl>").append(esc(configUrl)).append("</ConfigUrl>\n");
+        sb.append("  <SpiderHubUrl>").append(esc(hubUrl)).append("</SpiderHubUrl>\n");
+        sb.append("  <OutputRoot>").append(esc(outputRoot)).append("</OutputRoot>\n");
+        sb.append("  <EmbyBaseUrl></EmbyBaseUrl>\n");
+        sb.append("  <UseProxy>true</UseProxy>\n");
+        sb.append("  <AllowPrivateHosts>true</AllowPrivateHosts>\n");
+        sb.append("  <MaxPagesPerCategory>1</MaxPagesPerCategory>\n");
+        sb.append("  <RequestDelayMs>200</RequestDelayMs>\n");
+        sb.append("  <TimeoutSeconds>45</TimeoutSeconds>\n");
+        sb.append("  <EnableScheduledSync>false</EnableScheduledSync>\n");
+        sb.append("  <SyncIntervalHours>12</SyncIntervalHours>\n");
+        sb.append("  <CleanupOrphans>false</CleanupOrphans>\n");
+        sb.append("</PluginConfiguration>\n");
+        return sb.toString();
+    }
+
+    static String esc(String v) {
+        return v == null ? "" : v.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    }
+
+    static String firstNonEmpty(String... vals) {
+        for (String v : vals) if (v != null && !v.isEmpty()) return v;
+        return "";
+    }
+
     // ───────────────────────── 配置持久化 ─────────────────────────
 
     static void loadSettings() {
@@ -509,6 +677,10 @@ public class Hub {
 
     static String ui() {
         try {
+            if (uiDir != null) {
+                Path u = uiDir.resolve("index.html");
+                if (Files.isRegularFile(u)) return Files.readString(u, StandardCharsets.UTF_8);
+            }
             // 优先读 jar 同目录 web/index.html（方便改），否则读 classpath
             Path p = Path.of("web", "index.html");
             if (Files.isRegularFile(p)) return Files.readString(p, StandardCharsets.UTF_8);
