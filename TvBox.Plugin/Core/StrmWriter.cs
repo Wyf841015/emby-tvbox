@@ -37,6 +37,24 @@ namespace TvBox.Plugin.Core
         /// <summary>把原始播放地址改写成实际写进 strm 的地址（用于挂代理）。</summary>
         public Func<string, string> UrlRewriter { get; set; }
 
+        /// <summary>写 movie.nfo / tvshow.nfo（Emby 优先读本地元数据，刮削失败也有简介）。</summary>
+        public bool WriteNfo { get; set; } = true;
+
+        /// <summary>把源站封面下载成同目录 poster.jpg。</summary>
+        public bool DownloadPoster { get; set; } = true;
+
+        /// <summary>海报大小上限（字节），超过就跳过。</summary>
+        public int PosterMaxBytes { get; set; } = 4 * 1024 * 1024;
+
+        /// <summary>图片下载器（由 SyncService 注入：带超时、大小上限、UA）。</summary>
+        public Func<string, byte[]> FetchImage { get; set; }
+
+        /// <summary>单次同步最多删多少个 strm（防误删保险，0 = 不限）。</summary>
+        public int MaxDeletePerRun { get; set; } = 300;
+
+        /// <summary>本次因超上限而没删的数量（给同步汇总提示用）。</summary>
+        public int DeletesSkipped { get; private set; }
+
         public StrmWriter(string root, Action<string> log = null)
         {
             _root = root;
@@ -99,7 +117,13 @@ namespace TvBox.Plugin.Core
             var folder = SafeName(TitleWithYear(item.Name, item.Year));
             var dir = Path.Combine(MoviesRoot, folder);
             var file = Path.Combine(dir, folder + ".strm");
-            return WriteStrmFile(file, ep.Url);
+            var outcome = WriteStrmFile(file, ep.Url);
+            if (!string.IsNullOrEmpty(outcome.Path))
+            {
+                EnsureNfo(dir, item, false);
+                EnsurePoster(dir, item.Pic);
+            }
+            return outcome;
         }
 
         /// <summary>
@@ -146,7 +170,117 @@ namespace TvBox.Plugin.Core
                 if (!string.IsNullOrEmpty(epTitle)) name.Append(" - ").Append(SafeName(epTitle));
                 results.Add(WriteStrmFile(Path.Combine(seasonDir, name + ".strm"), ep.Url));
             }
+
+            if (results.Any(r => !string.IsNullOrEmpty(r.Path)))
+            {
+                EnsureNfo(showDir, item, true);
+                EnsurePoster(showDir, item.Pic);
+            }
             return results;
+        }
+
+        // ───────────────────── 元数据（nfo / 海报）─────────────────────
+
+        /// <summary>
+        /// 写 nfo。Emby 只要在条目目录里看到 movie.nfo / tvshow.nfo，就优先用本地
+        /// 元数据，不再依赖 TMDB 按中文名匹配 —— tvbox 源的名字常带「丨蓝光秒播」
+        /// 这种装饰，刮削失败概率很高，nfo 是最稳的兜底。
+        /// </summary>
+        private void EnsureNfo(string dir, VodItem item, bool isSeries)
+        {
+            if (!WriteNfo || string.IsNullOrWhiteSpace(dir)) return;
+            try
+            {
+                var title = CleanTitle(item.Name);
+                var year = ExtractYear(item.Year) ?? YearFromTitle(item.Name);
+                var sb = new StringBuilder();
+                sb.Append("<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n");
+                sb.Append(isSeries ? "<tvshow>\n" : "<movie>\n");
+                sb.Append("  <title>").Append(Xml(title)).Append("</title>\n");
+                sb.Append("  <originaltitle>").Append(Xml(item.Name ?? title)).Append("</originaltitle>\n");
+                if (!string.IsNullOrEmpty(year)) sb.Append("  <year>").Append(Xml(year)).Append("</year>\n");
+                if (!string.IsNullOrWhiteSpace(item.TypeName))
+                {
+                    sb.Append("  <genre>").Append(Xml(item.TypeName)).Append("</genre>\n");
+                    sb.Append("  <tag>").Append(Xml(item.TypeName)).Append("</tag>\n");
+                }
+                if (!string.IsNullOrWhiteSpace(item.Area))
+                    sb.Append("  <country>").Append(Xml(item.Area)).Append("</country>\n");
+                if (!string.IsNullOrWhiteSpace(item.Remarks))
+                    sb.Append("  <tagline>").Append(Xml(item.Remarks)).Append("</tagline>\n");
+                if (!string.IsNullOrWhiteSpace(item.Content))
+                    sb.Append("  <plot>").Append(Xml(item.Content)).Append("</plot>\n");
+                if (!string.IsNullOrWhiteSpace(item.Director))
+                    sb.Append("  <director>").Append(Xml(item.Director)).Append("</director>\n");
+                foreach (var a in SplitNames(item.Actor))
+                {
+                    sb.Append("  <actor><name>").Append(Xml(a)).Append("</name></actor>\n");
+                }
+                // 标记来源，便于日后排查「这条是哪个站来的」
+                sb.Append("  <uniqueid type=\"tvbox\" default=\"true\">")
+                  .Append(Xml("tvbox-" + (item.Id ?? ""))).Append("</uniqueid>\n");
+                sb.Append(isSeries ? "</tvshow>\n" : "</movie>\n");
+
+                var file = Path.Combine(dir, isSeries ? "tvshow.nfo" : "movie.nfo");
+                var content = sb.ToString();
+                if (File.Exists(file) && File.ReadAllText(file) == content) return;
+                Directory.CreateDirectory(dir);
+                File.WriteAllText(file, content, new UTF8Encoding(false));
+            }
+            catch (Exception ex)
+            {
+                _log("写 nfo 失败 " + dir + ": " + ex.Message);
+            }
+        }
+
+        /// <summary>下载海报。已经有 poster.png 的就跳过，避免每轮重复下载。</summary>
+        private void EnsurePoster(string dir, string picUrl)
+        {
+            if (!DownloadPoster || FetchImage == null || string.IsNullOrWhiteSpace(dir)) return;
+            if (string.IsNullOrWhiteSpace(picUrl)) return;
+            try
+            {
+                var existing = Directory.Exists(dir)
+                    ? Directory.GetFiles(dir, "poster.*").FirstOrDefault()
+                    : null;
+                if (!string.IsNullOrEmpty(existing) && new FileInfo(existing).Length > 1024) return;
+
+                var bytes = FetchImage(picUrl);
+                if (bytes == null || bytes.Length < 1024) return;
+                if (PosterMaxBytes > 0 && bytes.Length > PosterMaxBytes) return;
+
+                // 按魔数决定扩展名，免得 png 存成 .jpg 让 Emby 认错
+                var ext = ".jpg";
+                if (bytes.Length > 8 && bytes[0] == 0x89 && bytes[1] == 0x50) ext = ".png";
+                else if (bytes.Length > 12 && bytes[0] == (byte)'R' && bytes[1] == (byte)'I'
+                         && bytes[8] == (byte)'W' && bytes[9] == (byte)'E') ext = ".webp";
+
+                Directory.CreateDirectory(dir);
+                File.WriteAllBytes(Path.Combine(dir, "poster" + ext), bytes);
+            }
+            catch (Exception ex)
+            {
+                _log("下载海报失败 " + picUrl + ": " + ex.Message);
+            }
+        }
+
+        private static string Xml(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return string.Empty;
+            return s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;")
+                    .Replace("\"", "&quot;").Replace("'", "&apos;");
+        }
+
+        /// <summary>演员串常见分隔符：逗号 / 顿号 / 斜杠 / 竖线。</summary>
+        private static IEnumerable<string> SplitNames(string s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) yield break;
+            foreach (var part in s.Split(new[] { ',', '，', '、', '/', '|', ';', '；' },
+                         StringSplitOptions.RemoveEmptyEntries))
+            {
+                var t = part.Trim();
+                if (t.Length > 0 && t.Length <= 40) yield return t;
+            }
         }
 
         private WriteOutcome WriteStrmFile(string file, string url)
@@ -206,6 +340,20 @@ namespace TvBox.Plugin.Core
                 {
                     _log($"扫描 {root} 失败: {ex.Message}");
                     continue;
+                }
+
+                // 防误删保险：一次性删太多通常意味着路径/命名规则被改动过（换根目录、
+                // 改了命名方案），直接全删会让 Emby 整个库变空。超过上限就停手并报错。
+                int cap = MaxDeletePerRun;
+                int wouldDelete = files.Count(f => !keep.Contains(f)
+                        && (!useManifest || owned.Contains(f)));
+                if (cap > 0 && wouldDelete > cap)
+                {
+                    DeletesSkipped = wouldDelete;
+                    LastError = $"本次要删 {wouldDelete} 个 strm，超过上限 {cap}，已跳过清理"
+                              + "（确认无误后把「单次删除上限」调大或临时设为 0）";
+                    _log(LastError);
+                    return 0;
                 }
 
                 foreach (var f in files)

@@ -600,6 +600,25 @@ namespace TvBox.Plugin.Api
             }
         }
 
+        /// <summary>判断 URL 的 host 是否在逗号分隔的域名清单里（支持子域后缀匹配）。</summary>
+        private static bool HostInList(string url, string list)
+        {
+            if (string.IsNullOrWhiteSpace(url) || string.IsNullOrWhiteSpace(list)) return false;
+            try
+            {
+                var host = new Uri(url).Host;
+                foreach (var raw in list.Split(new[] { ',', '，', ';', '；', ' ' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var d = raw.Trim().TrimStart('.').ToLowerInvariant();
+                    if (d.Length == 0) continue;
+                    var h = host.ToLowerInvariant();
+                    if (h == d || h.EndsWith("." + d, StringComparison.Ordinal)) return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
         private object GetCore(StreamProxy req)
         {
             var rawUrl = SyncService.Base64UrlDecode(req?.U);
@@ -612,6 +631,25 @@ namespace TvBox.Plugin.Api
 
             var referer = SyncService.Base64UrlDecode(req?.R);
             var cfg = P?.Configuration;
+
+            // ── 302 直链模式 ──
+            // proxy（默认）：全部流量经 NAS 中转，能补 Referer/UA、能重写 HLS 分片地址。
+            // redirect：直接 302 到源站，NAS 只做跳转不转发字节（省带宽/CPU）。
+            // auto：按 RedirectHosts 白名单决定，但 m3u8 一律走代理 —— 分片地址里
+            //       通常还要补同样的防盗链头，302 出去后客户端会裸连失败。
+            var streamMode = (cfg?.StreamMode ?? "proxy").Trim().ToLowerInvariant();
+            if (streamMode == "redirect" || streamMode == "auto")
+            {
+                var isM3u8 = rawUrl.IndexOf(".m3u8", StringComparison.OrdinalIgnoreCase) >= 0;
+                var inList = HostInList(rawUrl, cfg?.RedirectHosts);
+                var allow302 = streamMode == "redirect" || inList;
+                if (allow302 && !isM3u8)
+                {
+                    var redirect = Redirect302(rawUrl);
+                    if (redirect != null) return redirect;
+                    // 302 构造失败就照常走代理（绝不返回坏响应）
+                }
+            }
 
             try
             {
@@ -732,6 +770,35 @@ namespace TvBox.Plugin.Api
             var host = P?.ApplicationHost;
             if (host == null) throw new InvalidOperationException("插件未初始化");
             return host.Resolve<IHttpResultFactory>();
+        }
+
+        /// <summary>
+        /// 构造一个 302 响应。Emby 的 API 走的是自己的 MediaBrowser.Model.Services，
+        /// 没有 ServiceStack 的 HttpResult 可用，所以用 Factory 拿到底层结果对象，
+        /// 再通过 IHttpResult（状态码）+ IHasHeaders（Location 头）两个接口拼出来。
+        /// </summary>
+        private object Redirect302(string url)
+        {
+            try
+            {
+                var built = Factory().GetResult(Request,
+                    new MemoryStream(Array.Empty<byte>()), "text/plain; charset=utf-8", null);
+                var ok = false;
+                if (built is MediaBrowser.Model.Services.IHttpResult hr)
+                {
+                    try { hr.StatusCode = System.Net.HttpStatusCode.Redirect; ok = true; } catch { }
+                }
+                if (built is MediaBrowser.Model.Services.IHasHeaders hh)
+                {
+                    try { hh.Headers["Location"] = url; ok = true; } catch { }
+                }
+                return ok ? built : null;
+            }
+            catch (Exception ex)
+            {
+                try { P?.Logger.Debug("构造 302 失败，回落代理: " + ex.Message); } catch { }
+                return null;
+            }
         }
 
         private object PlainText(int status, string text)

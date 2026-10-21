@@ -37,6 +37,8 @@ public class SpiderPool {
          * 但把分享链接换成直链需要夸克/115/迅雷等账号，没有账号就永远播不了。
          */
         public boolean netdisk;
+        /** 这个站点自己的 spider jar（TVBox 配置里的 site.jar）。空 = 用全局 jar。 */
+        public String jar;
         public volatile String lastError;
         public volatile long lastOk;
         /** 最近一次探测（homeContent）拿到的分类数、列表条目数。 */
@@ -55,6 +57,7 @@ public class SpiderPool {
             m.put("api", api);
             m.put("class", cls);
             m.put("netdisk", netdisk);
+            m.put("jar", jar);          // 站点自带 spider jar（没设就是 null）
             m.put("ext", ext.length() > 200 ? ext.substring(0, 200) + "…" : ext);
             m.put("ok", lastOk > 0 && lastError == null);
             m.put("lastError", lastError);
@@ -73,6 +76,10 @@ public class SpiderPool {
     private final Map<String, Spider> instances = new ConcurrentHashMap<>();
     private final Map<String, String> loadErrors = new LinkedHashMap<>();
     private ClassLoader spiderLoader;
+    /** 站点自带 jar 的 ClassLoader（按 jar URL 缓存，父加载器是 spiderLoader）。 */
+    private final Map<String, ClassLoader> jarLoaders = new ConcurrentHashMap<>();
+    /** jar URL → 本地缓存文件；由 Hub 注入（负责下载 + 缓存 + 镜像回退）。 */
+    public java.util.function.Function<String, File> jarResolver;
 
     public Collection<Site> allSites() {
         return sites.values();
@@ -121,6 +128,9 @@ public class SpiderPool {
             site.api = str(s.get("api"));
             Object ext = s.get("ext");
             site.ext = ext == null ? "" : (ext instanceof String ? (String) ext : Json.stringify(ext));
+            // 站点自带 jar：TVBox 配置里很常见（多仓里各子仓各带一份 spider.jar），
+            // 不认这个字段 → ClassNotFoundException，整站等于不存在。
+            site.jar = str(s.get("jar"));
 
             if (site.key == null || site.key.isEmpty()) site.key = site.name;
             if (site.key == null) continue;
@@ -287,12 +297,20 @@ public class SpiderPool {
             cached = instances.get(key);
             if (cached != null) return cached;
 
-            Class<?> c;
-            try {
-                c = Class.forName(site.cls, true, spiderLoader);
-            } catch (Throwable t) {
-                record(key, "类加载失败: " + rootMsg(t));
-                throw new Exception("类加载失败(" + site.cls + "): " + rootMsg(t), t);
+            Class<?> c = null;
+            Throwable lastErr = null;
+            // 先用站点自带的 jar（如果有），再用全局 jar 兜底
+            for (ClassLoader ld : loadersFor(site)) {
+                try {
+                    c = Class.forName(site.cls, true, ld);
+                    break;
+                } catch (Throwable t) {
+                    lastErr = t;
+                }
+            }
+            if (c == null) {
+                record(key, "类加载失败: " + rootMsg(lastErr));
+                throw new Exception("类加载失败(" + site.cls + "): " + rootMsg(lastErr), lastErr);
             }
 
             Object obj;
@@ -315,6 +333,32 @@ public class SpiderPool {
             instances.put(key, spider);
             return spider;
         }
+    }
+
+    /**
+     * 该站点可用的 ClassLoader 列表：站点自带 jar 优先，全局 jar 兜底。
+     * 父加载器是全局 spiderLoader，所以基类（Spider / android stub）都能解析。
+     */
+    private List<ClassLoader> loadersFor(Site site) {
+        List<ClassLoader> out = new ArrayList<>();
+        if (site.jar != null && !site.jar.isBlank() && jarResolver != null) {
+            ClassLoader ld = jarLoaders.computeIfAbsent(site.jar, url -> {
+                try {
+                    File f = jarResolver.apply(url);
+                    if (f == null || !f.isFile()) {
+                        System.err.println("[spider] 站点 jar 取不到: " + url);
+                        return spiderLoader;
+                    }
+                    return new URLClassLoader(new URL[] { f.toURI().toURL() }, spiderLoader);
+                } catch (Throwable t) {
+                    System.err.println("[spider] 站点 jar 加载失败: " + url + " → " + rootMsg(t));
+                    return spiderLoader;
+                }
+            });
+            out.add(ld);
+        }
+        if (!out.contains(spiderLoader)) out.add(spiderLoader);
+        return out;
     }
 
     /** 记录一次成功。 */

@@ -125,6 +125,30 @@ namespace TvBox.Plugin
         /// <summary>
         /// 每个源的已知失效记录（"siteKey"），同步时跳过。源挂了是常态，别每次都白跑。
         /// </summary>
+        /// <summary>写 nfo：把源站的简介/类型/地区/演员写成 movie.nfo / tvshow.nfo。Emby 优先读本地元数据，按中文名刮削失败也不会没简介没海报</summary>
+        public bool WriteNfo { get; set; } = true;
+
+        /// <summary>下载海报：把源站封面存成条目目录下的 poster.jpg</summary>
+        public bool DownloadPoster { get; set; } = true;
+
+        /// <summary>海报大小上限（MB），超过就跳过</summary>
+        public int PosterMaxMb { get; set; } = 4;
+
+        /// <summary>增量同步：列表侧信息（名称/备注/年份）没变且在上次同步有效期内的条目，直接跳过详情请求</summary>
+        public bool IncrementalSync { get; set; } = true;
+
+        /// <summary>增量有效期（小时）：超过这个时间就重新拉一次详情，保证新集能补上</summary>
+        public int IncrementalHours { get; set; } = 12;
+
+        /// <summary>播放模式：proxy=插件代理转发（默认，能补 Referer/UA、能重写 HLS 分片）；redirect=302 直链不占 NAS 带宽；auto=按下方域名清单判断，m3u8 一律走代理</summary>
+        public string StreamMode { get; set; } = "proxy";
+
+        /// <summary>302 直链域名清单（逗号分隔，可留空）。auto 模式下命中的域名走 302，其余走代理</summary>
+        public string RedirectHosts { get; set; } = string.Empty;
+
+        /// <summary>单次同步最多删除多少个 strm（防误删保险，0 = 不限）</summary>
+        public int MaxDeletePerRun { get; set; } = 300;
+
         public List<string> DeadSites { get; set; } = new List<string>();
     }
 }

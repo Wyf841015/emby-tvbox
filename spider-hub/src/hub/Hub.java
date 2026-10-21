@@ -48,6 +48,10 @@ import com.sun.net.httpserver.HttpServer;
 public class Hub {
 
     static SpiderPool pool = new SpiderPool();
+    static {
+        // 站点自带 jar 的解析器（下载 + 缓存）；必须在任何 pool.get(key) 之前设置
+        pool.jarResolver = Hub::downloadJar;
+    }
     /** /api/save 允许写的键（不白名单化会被塞任意垃圾，比如 {"bad json":null}）。 */
     static final java.util.Set<String> SAVE_KEYS = new java.util.HashSet<>(Arrays.asList(
             "configUrl", "embyPath", "embyBaseUrl", "outputRoot", "publicUrl", "spiderJar", "embyToken"));
@@ -254,6 +258,31 @@ public class Hub {
     static void handleApi(HttpExchange ex, String path) throws Exception {
         Map<String, String> q = query(ex.getRequestURI().getRawQuery());
         switch (path) {
+            case "/api/sites/fail": {        // 插件同步时上报「这个站又失败了」
+                String body = readBody(ex);
+                Object ob = SpiderPool.Json.parse(body);
+                if (!(ob instanceof Map)) { sendJson(ex, 200, fail("请求体必须是 JSON 对象")); return; }
+                String key = str(((Map<?, ?>) ob).get("key"));
+                if (key == null || key.isBlank()) { sendJson(ex, 200, fail("缺少 key")); return; }
+                int n = noteSiteFailure(key);
+                clearProbeOnFail(key);
+                maybeAutoRemove(key, n);
+                Map<String, Object> m = ok("已记录失败 " + n + " 次");
+                m.put("key", key);
+                m.put("fails", n);
+                sendJson(ex, 200, m);
+                return;
+            }
+            case "/api/sites/ok": {          // 插件同步成功后再报一次（清计数）
+                String body = readBody(ex);
+                Object ob = SpiderPool.Json.parse(body);
+                if (ob instanceof Map) {
+                    String key = str(((Map<?, ?>) ob).get("key"));
+                    if (key != null && !key.isBlank()) clearSiteFailure(key);
+                }
+                sendJson(ex, 200, ok(""));
+                return;
+            }
             case "/api/sites/sync": {       // 勾选/取消「同步这个站点」
                 String body = readBody(ex);
                 Object ob = SpiderPool.Json.parse(body);
@@ -600,6 +629,7 @@ public class Hub {
                             "分类 " + nClass + " / 列表 " + nList, ms);
                     pool.markData(key, nClass, nList);          // 有数据才算可用
                     rememberProbe(key, nClass, nList, null);    // 落盘，重启后还在
+                    clearSiteFailure(key);                      // 探测成功 → 失败计数清零
                     Map<String, Object> m = new LinkedHashMap<>();
                     m.put("ok", true);
                     m.put("classes", nClass);
@@ -612,6 +642,8 @@ public class Hub {
                     if (rec) record("探测站点", key, false, String.valueOf(e.getMessage()), ms);
                     pool.markData(key, 0, 0);   // 记下探测时间，界面才能区分「无数据」和「未测」
                     rememberProbe(key, 0, 0, String.valueOf(e.getMessage()));
+                    // 连续失败达到阈值的死站自动移出同步名单，免得每轮同步都去撞墙
+                    maybeAutoRemove(key, noteSiteFailure(key));
                     Map<String, Object> m = fail(String.valueOf(e.getMessage()));
                     m.put("ms", ms);
                     sendJson(ex, 200, m);
@@ -1043,16 +1075,8 @@ public class Hub {
             body = Files.readString(p, StandardCharsets.UTF_8);
         }
         body = body.trim();
-        // 多仓：{urls:[...]} → 取第一个可用子仓（完整多仓展开在 Emby 插件侧做）
-        Object root = null;
-        try { root = SpiderPool.Json.parse(body); } catch (Exception ignore) { }
-        if (root instanceof Map && ((Map<?, ?>) root).get("urls") instanceof List) {
-            List<?> urls = (List<?>) ((Map<?, ?>) root).get("urls");
-            if (urls.isEmpty()) throw new Exception("多仓里没有子仓");
-            String sub = String.valueOf(((Map<?, ?>) urls.get(0)).get("url"));
-            body = fetch(sub);
-            System.out.println("多仓 → 取第一个子仓: " + sub);
-        }
+        // 多仓：{urls:[...]} → 全部子仓展开合并（和 Emby 插件侧行为一致）
+        body = expandMultiRepo(body);
         pool.loadFromConfig(body, url);
         System.out.println("已加载 " + pool.size() + " 个 spider 站点");
         restoreProbeState();
@@ -1286,6 +1310,241 @@ public class Hub {
         HttpResponse<String> r = EMBY_HTTP.send(b.build(),
                 HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
         return r.body();
+    }
+
+    /**
+     * 多仓展开：{urls:[...]} → 逐个拉子仓并合并 sites（按 key 去重，先到先得）。
+     *
+     * 以前这里只取第一个子仓，注释写「完整多仓展开在插件侧做」。但插件展开后，
+     * 会把所有子仓里的 csp 站都改写成 http://127.0.0.1:8098/v/&lt;key&gt;/api.php/...
+     * 交给 hub；hub 不认识那些 key，就回「没有这个站点」，同步日志里只显示
+     * 「0 个条目」，完全看不出是配置没加载。
+     *
+     * 实测（tushen6/Tomorrow/lmw.json，16 个子仓）：
+     *   第一子仓 100 站（hub 原本只加载这 94 个 csp）
+     *   第 3 子仓  40 站（39 个 csp，33 个 hub 不认识）
+     *   第 4 子仓  99 站（99 个 csp，94 个 hub 不认识）
+     * 也就是一大半站点白丢。这里改成全量展开。
+     *
+     * 子仓是并发拉的：很多子仓域名已失效，串行会把启动拖成分钟级。
+     */
+    static String expandMultiRepo(String body) throws Exception {
+        Object root;
+        try { root = SpiderPool.Json.parse(body); }
+        catch (Exception e) { return body; }
+        if (!(root instanceof Map)) return body;
+        Object urlsObj = ((Map<?, ?>) root).get("urls");
+        if (!(urlsObj instanceof List)) return body;                 // 不是多仓，原样返回
+
+        final List<String> subs = new ArrayList<>();
+        for (Object o : (List<?>) urlsObj) {
+            String u = null;
+            if (o instanceof Map) {
+                Object v = ((Map<?, ?>) o).get("url");
+                u = (v == null) ? null : String.valueOf(v);
+            } else if (o != null) {
+                u = String.valueOf(o);
+            }
+            if (u != null && !u.isBlank() && !"null".equals(u)) subs.add(u);
+        }
+        if (subs.isEmpty()) throw new Exception("多仓里没有子仓");
+
+        System.out.println("多仓：开始展开 " + subs.size() + " 个子仓");
+        java.util.concurrent.ExecutorService workers2 =
+                java.util.concurrent.Executors.newFixedThreadPool(Math.min(6, subs.size()));
+        List<java.util.concurrent.Future<Object[]>> futs = new ArrayList<>();
+        for (final String sub : subs) {
+            futs.add(workers2.submit(() -> {
+                try {
+                    Object parsed = SpiderPool.Json.parse(fetch(sub));
+                    if (!(parsed instanceof Map)) return new Object[] { sub, null, "不是 JSON 对象" };
+                    Object sites = ((Map<?, ?>) parsed).get("sites");
+                    if (!(sites instanceof List)) return new Object[] { sub, null, "没有 sites" };
+                    return new Object[] { sub, sites, null, parsed };
+                } catch (Exception e) {
+                    return new Object[] { sub, null, brief(e) };
+                }
+            }));
+        }
+
+        List<Object> merged = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        int okRepos = 0, badRepos = 0, dupSkipped = 0;
+        for (java.util.concurrent.Future<Object[]> f : futs) {
+            Object[] r;
+            try {
+                r = f.get(90, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (Exception e) {
+                badRepos++;
+                continue;
+            }
+            String sub = String.valueOf(r[0]);
+            Object sites = r[1];
+            if (sites == null) {
+                badRepos++;
+                System.out.println("   子仓失败: " + hostOf(sub) + " → " + r[2]);
+                continue;
+            }
+            // 子仓级 jar：TVBox 多仓的子仓常带 "spider"/"jar" 字段，是这个子仓所有站点的
+            // 默认 spider jar。不注入下去，站点类就找不到（实测 97/189 站缺类）。
+            String repoJar = null;
+            for (String fieldName : new String[] { "spider", "jar", "spiderJar" }) {
+                Object v = ((Map<?, ?>) r[3]).get(fieldName);
+                if (v instanceof String && !((String) v).isBlank()) { repoJar = (String) v; break; }
+            }
+            if (repoJar != null) repoJar = resolveUrl(sub, repoJar);
+
+            int n = 0;
+            for (Object o : (List<?>) sites) {
+                if (!(o instanceof Map)) continue;
+                Map<?, ?> sm = (Map<?, ?>) o;
+                Object k = sm.get("key");
+                String key = (k == null) ? "" : String.valueOf(k);
+                if (key.isBlank() || "null".equals(key)) continue;
+                if (!seen.add(key)) { dupSkipped++; continue; }
+                Object ownJar = sm.get("jar");
+                if ((ownJar == null || String.valueOf(ownJar).isBlank()) && repoJar != null) {
+                    Map<String, Object> copy = new LinkedHashMap<>();
+                    for (Map.Entry<?, ?> e : sm.entrySet()) copy.put(String.valueOf(e.getKey()), e.getValue());
+                    copy.put("jar", repoJar);
+                    merged.add(copy);
+                } else {
+                    merged.add(o);
+                }
+                n++;
+            }
+            okRepos++;
+            System.out.println("   子仓 OK: " + hostOf(sub) + " → " + n + " 站");
+        }
+        workers2.shutdownNow();
+
+        if (merged.isEmpty())
+            throw new Exception("多仓展开后没有任何站点（" + okRepos + " 个子仓成功 / " + badRepos + " 个失败）");
+
+        Map<String, Object> cfg = new LinkedHashMap<>();
+        cfg.put("sites", merged);
+        System.out.println("多仓展开完成: " + okRepos + " 个子仓成功 / " + badRepos + " 个失败，"
+                + "合并 " + merged.size() + " 个站点（去重跳过 " + dupSkipped + " 个同名 key）");
+        return SpiderPool.Json.stringify(cfg);
+    }
+
+    // ───────────── 站点自带 spider jar 的下载与缓存 ─────────────
+
+    /** 站点 jar 的本地缓存目录：&lt;PKGVAR&gt;/data/jars（和 info.log/app.pid 同一个父目录）。 */
+    static Path jarCacheDir() throws Exception {
+        Path base = (dataFile != null && dataFile.getParent() != null)
+                ? dataFile.getParent() : Path.of(System.getProperty("java.io.tmpdir", "/tmp"));
+        Path dir = base.resolve("data").resolve("jars");
+        Files.createDirectories(dir);
+        return dir;
+    }
+
+    static String sha1Hex(String text) throws Exception {
+        java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-1");
+        byte[] d = md.digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        StringBuilder sb = new StringBuilder();
+        for (byte b : d) sb.append(String.format("%02x", b));
+        return sb.toString();
+    }
+
+    /**
+     * 去掉 TVBox 配置里的校验后缀：「url;md5;abc123」→「url」。
+     * 不剥掉会拿着带 ;md5;... 的地址去下载，必然 404。
+     */
+    static String stripTvBoxSuffix(String url) {
+        if (url == null) return null;
+        int i = url.indexOf(";md5;");
+        if (i > 0) url = url.substring(0, i);
+        i = url.indexOf(";");
+        if (i > 0 && !url.substring(0, i).endsWith(";")) {
+            String rest = url.substring(i);
+            // 只剥形如 ;xxx 的协议后缀，别把带分号的正常 URL 弄坏
+            if (rest.matches("^;[A-Za-z]+;?.*$")) url = url.substring(0, i);
+        }
+        return url.trim();
+    }
+
+    /** 相对路径按所属配置地址解析（"spider": "./spider.jar" 这类写法很常见）。 */
+    static String resolveUrl(String base, String ref) {
+        if (ref == null) return null;
+        ref = stripTvBoxSuffix(ref);
+        if (ref.startsWith("http://") || ref.startsWith("https://")) return ref;
+        try {
+            return java.net.URI.create(base).resolve(ref).toString();
+        } catch (Exception e) {
+            return ref;
+        }
+    }
+
+    /** 判断一个下载下来的「jar」能不能被 JVM 直接当 jar 用（dex/APK 不行）。 */
+    static boolean isJvmLoadableJar(byte[] data) {
+        if (data == null || data.length < 4) return false;
+        // dex 文件魔数 "dex\n"
+        if (data[0] == 'd' && data[1] == 'e' && data[2] == 'x') return false;
+        boolean zip = data[0] == 'P' && data[1] == 'K';
+        if (!zip) return false;
+        try (java.util.zip.ZipInputStream zin =
+                     new java.util.zip.ZipInputStream(new java.io.ByteArrayInputStream(data))) {
+            java.util.zip.ZipEntry e;
+            boolean hasClass = false;
+            while ((e = zin.getNextEntry()) != null) {
+                String n = e.getName();
+                if ("classes.dex".equals(n) || n.startsWith("classes") && n.endsWith(".dex")) return false;  // APK
+                if (n.endsWith(".class")) hasClass = true;
+            }
+            return hasClass;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 下载（带镜像回退）站点 jar 并缓存；失败返回 null，调用方退回全局 jar。 */
+    static File downloadJar(String url) {
+        url = stripTvBoxSuffix(url);
+        try {
+            String name = sha1Hex(url) + ".jar";
+            Path target = jarCacheDir().resolve(name);
+            if (Files.isRegularFile(target) && Files.size(target) > 4096) return target.toFile();
+
+            java.util.List<String> candidates = new ArrayList<>();
+            candidates.add(url);
+            candidates.addAll(mirrorsOf(url));
+            candidates.add("https://gh-proxy.org/" + url);
+            candidates.add("https://gh-proxy.com/" + url);
+
+            HttpClient cli = HttpClient.newBuilder()
+                    .connectTimeout(Duration.ofSeconds(6))
+                    .followRedirects(HttpClient.Redirect.NORMAL).build();
+            for (String u : candidates) {
+                try {
+                    HttpResponse<byte[]> r = cli.send(
+                            HttpRequest.newBuilder(java.net.URI.create(u))
+                                    .timeout(Duration.ofSeconds(60)).GET().build(),
+                            HttpResponse.BodyHandlers.ofByteArray());
+                    if (r.statusCode() != 200 || r.body() == null || r.body().length < 4096) continue;
+                    if (r.body().length > 80 * 1024 * 1024) {
+                        System.out.println("站点 jar 超过 80MB，跳过: " + u);
+                        continue;
+                    }
+                    // TVBox 生态里的 "spider jar" 有两种：真 jar，和 APK/dex 包。
+                    // dex 包（含 classes.dex）JVM 的 URLClassLoader 加载不了，
+                    // 必须先 dex2jar 转换。这里明确识别出来，别让它表现为看不懂的
+                    // ClassNotFoundException。
+                    if (!isJvmLoadableJar(r.body())) {
+                        System.out.println("站点 jar 是 APK/dex 格式，JVM 无法直接加载（需 dex2jar 转换）→ 退回全局 jar: " + u);
+                        continue;
+                    }
+                    Files.write(target, r.body());
+                    System.out.println("已缓存站点 jar: " + u + " (" + (r.body().length / 1024) + " KB)");
+                    return target.toFile();
+                } catch (Exception e) { /* 试下一个镜像 */ }
+            }
+            System.out.println("站点 jar 下载失败（将退回全局 jar）: " + url);
+            return null;
+        } catch (Exception e) {
+            System.out.println("站点 jar 处理异常: " + url + " → " + e.getMessage());
+            return null;
+        }
     }
 
     static String fetch(String url) throws Exception {
@@ -1558,6 +1817,58 @@ public class Hub {
 
 
     // ───────────── 探测结果持久化（界面「测试」列在重启后不清空）─────────────
+
+    // ───────────── 站点连续失败计数（死站自动退避）─────────────
+
+    /** settings["siteFail"] = {"站点key": 连续失败次数}。 */
+    @SuppressWarnings("unchecked")
+    static synchronized int noteSiteFailure(String key) {
+        if (key == null || key.isBlank()) return 0;
+        Object cur = settings.get("siteFail");
+        Map<String, Object> m = (cur instanceof Map)
+                ? (Map<String, Object>) cur : new LinkedHashMap<String, Object>();
+        int n = (int) num(m.get(key)) + 1;
+        m.put(key, n);
+        settings.put("siteFail", m);
+        saveSettings();
+        return n;
+    }
+
+    @SuppressWarnings("unchecked")
+    static synchronized void clearSiteFailure(String key) {
+        if (key == null || key.isBlank()) return;
+        Object cur = settings.get("siteFail");
+        if (!(cur instanceof Map)) return;
+        Map<String, Object> m = (Map<String, Object>) cur;
+        if (m.remove(key) != null) {
+            settings.put("siteFail", m);
+            saveSettings();
+        }
+    }
+
+    /** 失败时顺手把探测结果也标成失败，界面立刻能看出来。 */
+    static void clearProbeOnFail(String key) {
+        try { rememberProbe(key, 0, 0, "同步失败（插件上报）"); } catch (Exception ignore) { }
+        try { pool.markData(key, 0, 0); } catch (Exception ignore) { }
+    }
+
+    /**
+     * 连续失败达到阈值（默认 3，settings.autoDisableAfter 可调，0 关掉）就把站点
+     * 从同步名单里摘掉，并在操作记录里留痕。探测成功会清零计数，但不会自动加回名单
+     * （用户可能在界面上手动移出过，自动加回会抢用户的决定）。
+     */
+    static void maybeAutoRemove(String key, int fails) {
+        int limit = (int) num(settings.get("autoDisableAfter"));
+        if (limit <= 0) limit = 3;
+        if (fails < limit) return;
+        java.util.LinkedHashSet<String> set = new java.util.LinkedHashSet<>(syncSiteKeys());
+        if (!set.remove(key)) return;
+        settings.put("syncSites", new ArrayList<>(set));
+        saveSettings();
+        record("自动移出同步", key, false,
+                "连续失败 " + fails + " 次，已从同步名单移除（修好后在站点页手动加回）", 0);
+        System.out.println("站点 " + key + " 连续失败 " + fails + " 次 → 已自动移出同步名单");
+    }
 
     /**
      * 把一条探测结果写进 settings["probe"] 并落盘。

@@ -39,6 +39,8 @@ namespace TvBox.Plugin.Core
         public string Area { get; set; }
         public string TypeName { get; set; }
         public string Content { get; set; }
+        public string Actor { get; set; }
+        public string Director { get; set; }
         public List<VodLine> Lines { get; set; } = new List<VodLine>();
 
         /// <summary>总集数（所有线路里最多的那条）。</summary>
@@ -255,6 +257,8 @@ namespace TvBox.Plugin.Core
                 Id = GetStringFlexible(el, "vod_id", "id"),
                 Name = GetStringFlexible(el, "vod_name", "name"),
                 Pic = GetStringFlexible(el, "vod_pic", "pic", "vod_pic_thumb"),
+                Actor = GetStringFlexible(el, "vod_actor", "actor"),
+                Director = GetStringFlexible(el, "vod_director", "director"),
                 Remarks = GetStringFlexible(el, "vod_remarks", "remarks", "note"),
                 Year = GetStringFlexible(el, "vod_year", "year"),
                 Area = GetStringFlexible(el, "vod_area", "area"),

@@ -50,6 +50,8 @@ namespace TvBox.Plugin.Core
     public class SyncService
     {
         private readonly Action<string> _log;
+        /// <summary>本轮增量状态（RunAsync 里创建）。</summary>
+        private SyncState _state;
         private readonly SemaphoreSlim _gate = new SemaphoreSlim(1, 1);
         /// <summary>最近一次 strm 写失败的原因。放字段上是因为写入发生在站点循环的 helper 里，
         /// 而汇总代码在另一个作用域。</summary>
@@ -184,6 +186,12 @@ namespace TvBox.Plugin.Core
                 });
 
                 var keep = new HashSet<string>(StringComparer.Ordinal);
+                var state = SyncState.Load(outputRoot, _log);
+                state.Prune();
+                if (cfg.IncrementalSync)
+                    _log("增量同步: 开（有效期 " + Math.Max(0, cfg.IncrementalHours) + " 小时，已知条目 "
+                         + state.Count + " 个）");
+                _state = state;
 
                 using (var http = CreateClient(cfg))
                 {
@@ -236,6 +244,24 @@ namespace TvBox.Plugin.Core
                     Update(p => { p.SiteTotal = sites.Count; p.Stage = "同步站点"; });
 
                     var writer = new StrmWriter(outputRoot, m => _log("[strm] " + m));
+                    writer.WriteNfo = cfg.WriteNfo;
+                    writer.DownloadPoster = cfg.DownloadPoster;
+                    writer.PosterMaxBytes = Math.Max(0, cfg.PosterMaxMb) * 1024 * 1024;
+                    writer.MaxDeletePerRun = cfg.MaxDeletePerRun;
+                    if (cfg.DownloadPoster)
+                    {
+                        // 海报下载：独立 HttpClient（短超时），失败不影响 strm 写入
+                        var imgHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(Math.Max(5, cfg.TimeoutSeconds)) };
+                        try
+                        {
+                            if (!string.IsNullOrWhiteSpace(cfg.UserAgent))
+                                imgHttp.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", cfg.UserAgent);
+                        }
+                        catch { }
+                        writer.FetchImage = url => FetchImageBytes(imgHttp, url, writer.PosterMaxBytes);
+                        _log("元数据: nfo=" + (cfg.WriteNfo ? "开" : "关")
+                             + " 海报=" + (cfg.DownloadPoster ? "开" : "关"));
+                    }
                     if (cfg.UseProxy && !string.IsNullOrWhiteSpace(embyBaseUrlForProxy))
                     {
                         var baseUrl = embyBaseUrlForProxy.TrimEnd('/');
@@ -261,6 +287,7 @@ namespace TvBox.Plugin.Core
                         {
                             var n = await SyncOneSiteAsync(site, cfg, writer, keep, ct, summary).ConfigureAwait(false);
                             _log($"   {site.DisplayName}: {n} 个条目");
+                            if (n > 0) await ReportSiteAsync(cfg, site.Key, true, ct).ConfigureAwait(false);
                         }
                         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                         catch (Exception ex)
@@ -268,6 +295,7 @@ namespace TvBox.Plugin.Core
                             summary.SitesFailed++;
                             summary.Errors++;
                             _log($"   站点失败: {ex.Message}");
+                            await ReportSiteAsync(cfg, site.Key, false, ct).ConfigureAwait(false);
                             Update(p => { p.Errors++; p.LastError = site.DisplayName + ": " + ex.Message; });
                         }
                     }
@@ -280,8 +308,14 @@ namespace TvBox.Plugin.Core
                         writer.SaveManifest(keep);          // 记下我们拥有的文件，下次清理以此为准
                         summary.Removed = removed;
                         _log($"清理了 {removed} 个失效 strm、{removedDirs} 个空目录");
+                        if (writer.DeletesSkipped > 0)
+                            _log("⚠️ " + writer.LastError);
                     }
                 }
+
+                try { state.Save(force: true); } catch { }
+                if (state.SkippedHits > 0)
+                    _log("增量同步命中: " + state.SkippedHits + " 个条目直接跳过详情请求");
 
                 var written = Math.Max(0, summary.Items - summary.Skipped);
                 summary.Detail = $"站点 {summary.Sites}（失败 {summary.SitesFailed}），条目 {summary.Items}"
@@ -305,6 +339,7 @@ namespace TvBox.Plugin.Core
             }
             finally
             {
+                try { _state?.Save(force: true); } catch { }   // 取消/异常路径也要落盘
                 Update(p => { p.Running = false; p.FinishedUtc = DateTime.UtcNow; });
                 try { _cts?.Dispose(); } catch { }
                 _cts = null;
@@ -448,6 +483,8 @@ namespace TvBox.Plugin.Core
                     if (cfg.MaxItemsPerRun > 0 && summary.Items >= cfg.MaxItemsPerRun) break;
                     if (string.IsNullOrWhiteSpace(item.Id)) continue;
                     seen++;
+                    // 增量：列表侧指纹没变且还在有效期内 → 详情都不拉
+                    if (TrySkipByIncremental(cfg, site, item, keep, summary)) continue;
                     try
                     {
                         var details = await client.GetDetailAsync(site, new[] { item.Id }, ct).ConfigureAwait(false);
@@ -483,6 +520,7 @@ namespace TvBox.Plugin.Core
                             }
                             var outs = writer.WriteSeries(name, detail, line);
                             foreach (var o in outs) if (!string.IsNullOrEmpty(o.Path)) keep.Add(o.Path);
+                            RecordIncremental(site, item, detail, outs);
                             int added = outs.Count(o => o.Created || o.Updated);
                             summary.Episodes += added;
                             summary.Unchanged += outs.Count(o => !string.IsNullOrEmpty(o.Path) && !o.Created && !o.Updated);
@@ -506,6 +544,7 @@ namespace TvBox.Plugin.Core
                             }
                             var o = writer.WriteMovie(name, detail, line);
                             if (!string.IsNullOrEmpty(o.Path)) keep.Add(o.Path);
+                            RecordIncremental(site, item, detail, new[] { o });
                             if (o.Created || o.Updated)
                             {
                                 summary.Items++;
@@ -582,6 +621,81 @@ namespace TvBox.Plugin.Core
         private static bool Contains(List<string> set, string key) =>
             key != null && set.Any(x => string.Equals(x, key, StringComparison.OrdinalIgnoreCase));
 
+        // ───────────────────── 增量 / 元数据 / 汇报 小工具 ─────────────────────
+
+        /// <summary>增量命中：把上次写出的文件并进 keep 并计数，返回 true 表示可以跳过详情请求。</summary>
+        private bool TrySkipByIncremental(PluginConfiguration cfg, TvBoxSite site, VodItem listed,
+                                          HashSet<string> keep, SyncSummary summary)
+        {
+            if (_state == null || !cfg.IncrementalSync || listed == null || string.IsNullOrEmpty(listed.Id))
+                return false;
+            if (!_state.TrySkip(site.Key, listed.Id, SyncState.Signature(listed), cfg.IncrementalHours, out var cached))
+                return false;
+            foreach (var cp in cached) keep.Add(cp);
+            summary.Items++;
+            summary.Unchanged++;
+            Update(pp => pp.ItemsWritten++);
+            return true;
+        }
+
+        /// <summary>写完记录增量状态（列表侧指纹 + 实际写出的路径）。</summary>
+        private void RecordIncremental(TvBoxSite site, VodItem listed, VodItem detail, IEnumerable<WriteOutcome> outs)
+        {
+            if (_state == null) return;
+            var baseItem = listed ?? detail;
+            if (baseItem == null || string.IsNullOrEmpty(baseItem.Id)) return;
+            var paths = (outs ?? Enumerable.Empty<WriteOutcome>())
+                        .Where(o => !string.IsNullOrEmpty(o.Path)).Select(o => o.Path);
+            _state.Record(site.Key, baseItem.Id, SyncState.Signature(baseItem), paths);
+        }
+
+        /// <summary>海报下载（同步调用，带大小上限，失败返回 null）。</summary>
+        private static byte[] FetchImageBytes(HttpClient http, string url, int maxBytes)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(url)) return null;
+                using (var resp = http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead)
+                                    .GetAwaiter().GetResult())
+                {
+                    if (!resp.IsSuccessStatusCode) return null;
+                    var len = resp.Content.Headers.ContentLength;
+                    if (maxBytes > 0 && len.HasValue && len.Value > maxBytes) return null;
+                    using (var st = resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult())
+                    using (var ms = new MemoryStream())
+                    {
+                        var buf = new byte[64 * 1024];
+                        int n;
+                        while ((n = st.Read(buf, 0, buf.Length)) > 0)
+                        {
+                            ms.Write(buf, 0, n);
+                            if (maxBytes > 0 && ms.Length > maxBytes) return null;
+                        }
+                        return ms.ToArray();
+                    }
+                }
+            }
+            catch { return null; }
+        }
+
+        /// <summary>把站点成功/失败汇报给 hub（hub 侧据此做死站退避：连续失败自动移出同步）。</summary>
+        private async Task ReportSiteAsync(PluginConfiguration cfg, string key, bool ok, CancellationToken ct)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(cfg?.SpiderHubUrl) || string.IsNullOrWhiteSpace(key)) return;
+                var url = cfg.SpiderHubUrl.TrimEnd('/') + (ok ? "/api/sites/ok" : "/api/sites/fail");
+                using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(6) })
+                using (var content = new StringContent(
+                    System.Text.Json.JsonSerializer.Serialize(new { key }),
+                    System.Text.Encoding.UTF8, "application/json"))
+                {
+                    await http.PostAsync(url, content, ct).ConfigureAwait(false);
+                }
+            }
+            catch { /* 汇报失败绝不能影响同步 */ }
+        }
+
         // ───────────────────── 单站点同步 ─────────────────────
 
         private async Task<int> SyncOneSiteAsync(
@@ -615,6 +729,7 @@ namespace TvBox.Plugin.Core
                     ct.ThrowIfCancellationRequested();
 
                     var ids = new List<string>();
+                    var listedById = new Dictionary<string, VodItem>(StringComparer.Ordinal);
                     for (int page = 1; page <= maxPages; page++)
                     {
                         PagedResult pr;
@@ -631,7 +746,11 @@ namespace TvBox.Plugin.Core
                         }
 
                         foreach (var it in pr.Items)
-                            if (!string.IsNullOrEmpty(it.Id)) ids.Add(it.Id);
+                            if (!string.IsNullOrEmpty(it.Id))
+                            {
+                                ids.Add(it.Id);
+                                listedById[it.Id] = it;      // 增量判据要用列表侧的名称/备注/年份
+                            }
 
                         if (pr.Items.Count == 0) break;
                         if (pr.PageCount > 0 && page >= pr.PageCount) break;
@@ -640,8 +759,12 @@ namespace TvBox.Plugin.Core
 
                     if (ids.Count == 0) continue;
 
-                    // 去重后分批拉详情（ac=detail 支持多 id 逗号分隔）
-                    var distinct = ids.Distinct().ToList();
+                    // 去重后先做增量过滤，再分批拉详情（ac=detail 支持多 id 逗号分隔）
+                    var distinct = ids.Distinct()
+                        .Where(id => !TrySkipByIncremental(cfg, site,
+                                        listedById.TryGetValue(id, out var li) ? li : null, keep, summary))
+                        .ToList();
+                    if (distinct.Count == 0) continue;
                     foreach (var batch in Chunk(distinct, 20))
                     {
                         ct.ThrowIfCancellationRequested();
@@ -685,6 +808,8 @@ namespace TvBox.Plugin.Core
                                     line = new VodLine { Name = line.Name, Episodes = live };
                                 }
                                 var outs = writer.WriteSeries(site.DisplayName, item, line);
+                                listedById.TryGetValue(item.Id ?? "", out var listedItem);
+                                RecordIncremental(site, listedItem, item, outs);
                                 var added = outs.Count(o => o.Created || o.Updated);
                                 var same = outs.Count(o => !string.IsNullOrEmpty(o.Path) && !o.Created && !o.Updated);
                                 foreach (var o in outs)
@@ -721,6 +846,8 @@ namespace TvBox.Plugin.Core
                                     }
                                 }
                                 var o = writer.WriteMovie(site.DisplayName, item, line);
+                                listedById.TryGetValue(item.Id ?? "", out var listedMovie);
+                                RecordIncremental(site, listedMovie, item, new[] { o });
                                 if (!string.IsNullOrEmpty(o.Path)) keep.Add(o.Path);
                                 if (!string.IsNullOrEmpty(o.Path))   // 存在即可（含内容未变）
                                 {

@@ -50,12 +50,23 @@ start_process() {
     SPIDER_JAR="$(find "${APP}/ui/spiders" -maxdepth 1 -name '*.jar' 2>/dev/null | head -1)"
     log_msg "Starting (java=${JAVA}, spider=${SPIDER_JAR:-none})"
 
-    # -Xverify:none 必带：dex2jar 生成的字节码过不了 JVM 校验（VerifyError）
-    bash -c "'${JAVA}' -Xverify:none -Xmx512m -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -cp '${APP}/ui/hub.jar:${APP}/ui/lib/*' hub.Hub --port ${PORT} --socket '${SOCK}' --prefix /app/tvboxhub --config '${TRIM_PKGVAR}/hub.json' --jar-dir '${APP}/ui/lib' --plugin-dll '${APP}/ui/plugin/TvBox.dll' --ui-dir '${APP}/ui' ${SPIDER_JAR:+--spider-jar '$SPIDER_JAR'}" >> "${LOG_FILE}" 2>&1 &
+    # 交给 run-hub.sh 守护：
+    #   · JVM 在 GC 段错误里崩过（G1SATBMarkQueueSet::filter），需要自动拉起
+    #   · 启动参数在守护脚本里（SerialGC + ExitOnOutOfMemoryError，绕开 G1 那条路径）
+    # run-hub.sh 和本脚本同目录：fnOS 里 cmd/ 在 /var/apps/<app>/cmd，
+    # 而 APP(TRIM_APPDEST) 指的是 /vol3/@appcenter/<app>，两者不是一回事。
+    SELF_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+    RUNNER="${SELF_DIR}/run-hub.sh"
+    [ -f "$RUNNER" ] || RUNNER="${APP}/cmd/run-hub.sh"
+    if [ ! -f "$RUNNER" ]; then
+        log_msg "ERROR: 缺少 ${RUNNER}"
+        return 1
+    fi
+    bash "$RUNNER" "$JAVA" "$APP" "${TRIM_PKGVAR}" "${LOG_FILE}" "$SPIDER_JAR" >> "${LOG_FILE}" 2>&1 &
 
     pid=$!
     printf "%s" "$pid" > "${PID_FILE}"
-    log_msg "pid=$pid"
+    log_msg "supervisor pid=$pid"
 
     # 等 socket 出现（最多 15 秒），确认真的起得来
     local count=0
@@ -81,16 +92,20 @@ stop_process() {
     if [ -f "${PID_FILE}" ]; then
         pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
         if [ -n "$pid" ] && kill -0 "${pid}" 2>/dev/null; then
-            log_msg "send TERM to PID:${pid}"
+            log_msg "send TERM to supervisor PID:${pid}"
             kill -TERM "${pid}" 2>/dev/null
             local count=0
-            while kill -0 "${pid}" 2>/dev/null && [ $count -lt 10 ]; do
+            while kill -0 "${pid}" 2>/dev/null && [ $count -lt 12 ]; do
                 sleep 1; count=$((count + 1))
             done
             if kill -0 "${pid}" 2>/dev/null; then
-                log_msg "send KILL to PID:${pid}"
+                log_msg "send KILL to supervisor PID:${pid}"
                 kill -KILL "${pid}" 2>/dev/null
             fi
+            # supervisor 被打死时子 java 可能变孤儿，兜底再收一遍
+            pkill -TERM -f "hub.Hub --port ${PORT}" 2>/dev/null || true
+            sleep 1
+            pkill -KILL -f "hub.Hub --port ${PORT}" 2>/dev/null || true
         fi
         rm -f "${PID_FILE}"
     fi
