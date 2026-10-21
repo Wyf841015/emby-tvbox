@@ -157,7 +157,12 @@
             var PLUGIN_ID = '7f3c1d92-4a6b-4c8e-9f21-8b5d3a72c104';
 
             function api() {
-                return window.ApiClient;
+                // Emby 的插件页片段是被注入到宿主页面的，ApiClient 可能在 window、
+                // 也可能只在 window.parent / window.top 上（iframe 场景）。
+                try { if (window.ApiClient) return window.ApiClient; } catch (e) { }
+                try { if (window.parent && window.parent.ApiClient) return window.parent.ApiClient; } catch (e) { }
+                try { if (window.top && window.top.ApiClient) return window.top.ApiClient; } catch (e) { }
+                return null;
             }
 
             // 插件的免登录路由要带共享令牌（Emby 4.9 里 Request 属性没被注入，
@@ -218,12 +223,23 @@
                 return cfg;
             }
 
+            var _loadTries = 0;
+
             function load() {
-                if (!api()) return;
-                api().getPluginConfiguration(PLUGIN_ID).then(function (cfg) {
+                // 片段是宿主页加载完之后才注入的，ApiClient 不一定马上就有 —— 轮询等它。
+                var a = api();
+                if (!a) {
+                    if (_loadTries++ < 40) setTimeout(load, 200);
+                    else setText('tvboxStatus', '拿不到 Emby 的 ApiClient，无法读取配置。刷新一下页面试试。');
+                    return;
+                }
+                setText('tvboxStatus', '正在读取配置…');
+                a.getPluginConfiguration(PLUGIN_ID).then(function (cfg) {
                     hubToken = (cfg && cfg.HubToken) ? cfg.HubToken : '';
                     fill(cfg);
                     refreshStatus();
+                }).catch(function (e) {
+                    setText('tvboxStatus', '读取配置失败: ' + (e && e.message ? e.message : e));
                 });
             }
 
@@ -302,14 +318,17 @@
                 });
             }
 
-            document.addEventListener('pageshow', function (e) {
-                if (e.target && e.target.id === 'TvBoxConfigPage') load();
-            });
-            document.addEventListener('pagebeforeshow', function (e) {
-                if (e.target && e.target.id === 'TvBoxConfigPage') load();
-            });
+            // Emby 切到这个页面时会触发 pageshow；target 不一定是本片段，所以放行所有情况
+            document.addEventListener('pageshow', function () { if (_inited) load(); });
+            document.addEventListener('pagebeforeshow', function () { if (_inited) load(); });
 
-            document.addEventListener('DOMContentLoaded', function () {
+            // ⚠️ 这个页面是「片段」，Emby 在宿主页加载完之后才把它插进来 ——
+            // 那一刻 DOMContentLoaded 早就触发过了，所以绝不能只挂在那个事件上，
+            // 否则表单永远是空的（用户看到的就是"插件侧不显示配置内容"）。
+            var _inited = false;
+            function init() {
+                if (_inited) return;
+                _inited = true;
                 var form = document.getElementById('tvboxForm');
                 if (form) form.addEventListener('submit', save);
                 var b1 = document.getElementById('btnSources');
@@ -320,10 +339,14 @@
                 if (b3) b3.addEventListener('click', refreshStatus);
                 var b4 = document.getElementById('btnStop');
                 if (b4) b4.addEventListener('click', stopSync);
-                setTimeout(function () {
-                    if (document.getElementById('TvBoxConfigPage') && api()) load();
-                }, 300);
-            });
+                load();
+            }
+
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', init);
+            } else {
+                init();                      // 片段注入场景走这里
+            }
         })();
     </script>
 </div>
