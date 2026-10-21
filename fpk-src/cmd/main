@@ -51,7 +51,7 @@ start_process() {
     log_msg "Starting (java=${JAVA}, spider=${SPIDER_JAR:-none})"
 
     # -Xverify:none 必带：dex2jar 生成的字节码过不了 JVM 校验（VerifyError）
-    bash -c "'${JAVA}' -Xverify:none -Xmx512m -Dfile.encoding=UTF-8 -cp '${APP}/ui/hub.jar:${APP}/ui/lib/*' hub.Hub --port ${PORT} --socket '${SOCK}' --prefix /app/tvboxhub --config '${TRIM_PKGVAR}/hub.json' --jar-dir '${APP}/ui/lib' --plugin-dll '${APP}/ui/plugin/TvBox.dll' --ui-dir '${APP}/ui' ${SPIDER_JAR:+--spider-jar '$SPIDER_JAR'}" >> "${LOG_FILE}" 2>&1 &
+    bash -c "'${JAVA}' -Xverify:none -Xmx512m -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -cp '${APP}/ui/hub.jar:${APP}/ui/lib/*' hub.Hub --port ${PORT} --socket '${SOCK}' --prefix /app/tvboxhub --config '${TRIM_PKGVAR}/hub.json' --jar-dir '${APP}/ui/lib' --plugin-dll '${APP}/ui/plugin/TvBox.dll' --ui-dir '${APP}/ui' ${SPIDER_JAR:+--spider-jar '$SPIDER_JAR'}" >> "${LOG_FILE}" 2>&1 &
 
     pid=$!
     printf "%s" "$pid" > "${PID_FILE}"

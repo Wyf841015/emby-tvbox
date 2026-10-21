@@ -288,7 +288,9 @@ public class Hub {
                     return;
                 }
                 int n = reload(url);
-                sendJson(ex, 200, ok("已加载 " + n + " 个 spider 站点"));
+                Map<String, Object> okm = ok("已加载 " + n + " 个 spider 站点");
+                okm.put("via", lastFetchedVia);
+                sendJson(ex, 200, okm);
                 return;
             }
             case "/api/emby/detect": {
@@ -490,17 +492,83 @@ public class Hub {
         return pool.size();
     }
 
+    /** 上一次成功使用的地址（镜像回退后能看出走的是哪条）。 */
+    static volatile String lastFetchedVia = null;
+
+    /**
+     * 取配置。国内直连 raw.githubusercontent.com 经常不通
+     * （域名只返回 AAAA 记录，本机 IPv6 不通时一直挂到超时），所以直连失败自动走镜像。
+     */
     static String fetch(String url) throws Exception {
+        StringBuilder log = new StringBuilder();
+        try {
+            String body = fetchDirect(url, 5);
+            lastFetchedVia = url;
+            return body;
+        } catch (Exception e) {
+            log.append("直连失败(").append(brief(e)).append(")");
+        }
+        for (String m : mirrorsOf(url)) {
+            try {
+                String body = fetchDirect(m, 25);
+                lastFetchedVia = m;
+                System.out.println("镜像可用: " + m);
+                return body;
+            } catch (Exception e) {
+                log.append("；").append(hostOf(m)).append("失败(").append(brief(e)).append(")");
+            }
+        }
+        throw new Exception("配置地址取不到 → " + log);
+    }
+
+    /** 给一个 URL 生成候选镜像。 */
+    static java.util.List<String> mirrorsOf(String url) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("^https?://raw\\.githubusercontent\\.com/([^/]+)/([^/]+)/([^/]+)/(.+)$")
+                .matcher(url);
+        if (m.find()) {
+            String user = m.group(1), repo = m.group(2), branch = m.group(3), path = m.group(4);
+            String raw = url.startsWith("http://") ? url.replaceFirst("^http://", "https://") : url;
+            out.add("https://ghproxy.net/" + raw);
+            out.add("https://gh-proxy.com/" + raw);
+            out.add("https://cdn.jsdelivr.net/gh/" + user + "/" + repo + "@" + branch + "/" + path);
+            out.add("https://fastly.jsdelivr.net/gh/" + user + "/" + repo + "@" + branch + "/" + path);
+            out.add("https://gcore.jsdelivr.net/gh/" + user + "/" + repo + "@" + branch + "/" + path);
+            return out;
+        }
+        if (url.contains("github.com") || url.contains("githubusercontent.com")) {
+            out.add("https://ghproxy.net/" + url);
+            out.add("https://gh-proxy.com/" + url);
+        }
+        return out;
+    }
+
+    static String fetchDirect(String url, int connectSec) throws Exception {
         java.net.http.HttpClient c = java.net.http.HttpClient.newBuilder()
                 .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
-                .connectTimeout(java.time.Duration.ofSeconds(15)).build();
+                .connectTimeout(java.time.Duration.ofSeconds(connectSec)).build();
         java.net.http.HttpRequest r = java.net.http.HttpRequest.newBuilder(java.net.URI.create(url))
-                .timeout(java.time.Duration.ofSeconds(40))
+                .timeout(java.time.Duration.ofSeconds(connectSec * 2L))
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/130.0.0.0 Safari/537.36")
+                .header("Accept", "*/*")
                 .GET().build();
         java.net.http.HttpResponse<String> resp = c.send(r, java.net.http.HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
         if (resp.statusCode() != 200) throw new Exception("HTTP " + resp.statusCode());
+        if (resp.body() == null || resp.body().isBlank()) throw new Exception("空响应");
         return resp.body();
+    }
+
+    static String hostOf(String url) {
+        try { return java.net.URI.create(url).getHost(); } catch (Exception e) { return url; }
+    }
+
+    static String brief(Throwable e) {
+        Throwable x = e;
+        while (x.getCause() != null && x.getCause() != x) x = x.getCause();
+        String s = x.getClass().getSimpleName();
+        if (x.getMessage() != null) s += ": " + x.getMessage();
+        return s.length() > 80 ? s.substring(0, 80) : s;
     }
 
     // ───────────────────────── HTTP 基础 ─────────────────────────
