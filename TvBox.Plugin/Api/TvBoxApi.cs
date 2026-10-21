@@ -800,6 +800,7 @@ namespace TvBox.Plugin.Api
                 {
                     case "png": case "jpg": case "jpeg": case "gif":
                     case "webp": case "bmp": case "svg": case "ico":
+                    case "image": case "avif": case "heic":
                     case "css": case "js": case "html": case "htm": case "json":
                         return true;
                     default:

@@ -33,6 +33,8 @@ namespace TvBox.Plugin.Core
         public int Items { get; set; }
         public int Episodes { get; set; }
         public int Removed { get; set; }
+        /// <summary>内容没变化、文件已在磁盘上的条目数（重复同步时大量出现）。</summary>
+        public int Unchanged { get; set; }
         public int Errors { get; set; }
         /// <summary>处理过但没写进去的条目数（含写失败）。</summary>
         public int Skipped { get; set; }
@@ -104,6 +106,44 @@ namespace TvBox.Plugin.Core
         /// <summary>
         /// 执行一次同步。返回 false 表示已有一个同步在跑，本次被忽略。
         /// </summary>
+        /// <summary>
+        /// 逐集校验，返回真正能播的分集列表。并发 6，整体失败不影响其它集。
+        /// </summary>
+        private static async Task<List<VodEpisode>> FilterPlayableEpisodesAsync(
+            CmsClient client, List<VodEpisode> episodes, CancellationToken ct, Action<string> onDead)
+        {
+            var result = new List<VodEpisode>();
+            if (episodes == null || episodes.Count == 0) return result;
+
+            var sem = new SemaphoreSlim(6);
+            var flags = new bool[episodes.Count];
+            var tasks = new List<Task>();
+            for (int i = 0; i < episodes.Count; i++)
+            {
+                int idx = i;
+                tasks.Add(Task.Run(async () =>
+                {
+                    await sem.WaitAsync(ct).ConfigureAwait(false);
+                    try
+                    {
+                        var (ok, why) = await client.VerifyPlayableAsync(episodes[idx]?.Url, ct).ConfigureAwait(false);
+                        flags[idx] = ok;
+                        if (!ok) onDead?.Invoke(why);
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch { flags[idx] = false; }
+                    finally { sem.Release(); }
+                }, ct));
+            }
+            try { await Task.WhenAll(tasks).ConfigureAwait(false); }
+            catch (OperationCanceledException) { throw; }
+            finally { sem.Dispose(); }
+
+            for (int i = 0; i < episodes.Count; i++)
+                if (flags[i]) result.Add(episodes[i]);
+            return result;
+        }
+
         public async Task<bool> RunAsync(
             PluginConfiguration cfg,
             string outputRoot,
@@ -242,8 +282,9 @@ namespace TvBox.Plugin.Core
                 var written = Math.Max(0, summary.Items - summary.Skipped);
                 summary.Detail = $"站点 {summary.Sites}（失败 {summary.SitesFailed}），条目 {summary.Items}"
                                + $"（写入 {written}，跳过 {summary.Skipped}），分集 {summary.Episodes}，"
+                               + (summary.Unchanged > 0 ? $"（其中 {summary.Unchanged} 个内容未变）" : "")
                                + $"清理 {summary.Removed}，错误 {summary.Errors}";
-                if (summary.Items > 0 && written == 0)
+                if (summary.Items > 0 && written == 0 && summary.Unchanged == 0)
                     summary.Detail += "  ⚠️ 全部条目都没写进磁盘"
                                     + (string.IsNullOrEmpty(_lastWriteError)
                                         ? "（检查输出目录是否存在且 Emby 用户可写）"
@@ -420,20 +461,27 @@ namespace TvBox.Plugin.Core
                         {
                             if (cfg.VerifyPlayUrl)
                             {
-                                var firstEp = line.Episodes[0]?.Url;
-                                var (pok, why) = await client.VerifyPlayableAsync(firstEp, ct).ConfigureAwait(false);
-                                if (!pok)
+                                // 逐集校验：一个源里经常是"前几集能播、后面几集全是图片广告"，
+                                // 只验首集会放过大量死地址（实测 40 个样本里就有 1 个是 17 集坏了）。
+                                int dead = 0;
+                                var live = await FilterPlayableEpisodesAsync(
+                                    client, line.Episodes, ct, _ => dead++).ConfigureAwait(false);
+                                if (live.Count == 0)
                                 {
                                     summary.Skipped++; Update(p => p.ItemsSkipped++);
-                                    _log("     [" + (item.Name ?? item.Id) + "] 跳过：" + line.Episodes.Count + " 集但首集不可用（" + why + "）");
+                                    _log("     [" + (item.Name ?? item.Id) + "] 跳过：" + line.Episodes.Count + " 集全部不可用");
                                     if (cfg.RequestDelayMs > 0) await Task.Delay(cfg.RequestDelayMs, ct).ConfigureAwait(false);
                                     continue;
                                 }
+                                if (dead > 0)
+                                    _log("     [" + (item.Name ?? item.Id) + "] " + line.Episodes.Count + " 集里有 " + dead + " 集不可用，只写能播的 " + live.Count + " 集");
+                                line = new VodLine { Name = line.Name, Episodes = live };
                             }
                             var outs = writer.WriteSeries(name, detail, line);
                             foreach (var o in outs) if (!string.IsNullOrEmpty(o.Path)) keep.Add(o.Path);
                             int added = outs.Count(o => o.Created || o.Updated);
                             summary.Episodes += added;
+                            summary.Unchanged += outs.Count(o => !string.IsNullOrEmpty(o.Path) && !o.Created && !o.Updated);
                             summary.Items++;
                             Update(p => { p.ItemsWritten++; p.EpisodesWritten += added; });
                             if (added > 0) written++;
@@ -613,15 +661,36 @@ namespace TvBox.Plugin.Core
 
                             if (item.IsSeries)
                             {
+                                // 逐集校验（这条才是"有分类"的主路径，之前只校验了无分类降级路径）
+                                if (cfg.VerifyPlayUrl)
+                                {
+                                    int dead = 0;
+                                    var live = await FilterPlayableEpisodesAsync(
+                                        client, line.Episodes, ct, _ => dead++).ConfigureAwait(false);
+                                    if (live.Count == 0)
+                                    {
+                                        summary.Items++;
+                                        summary.Skipped++;
+                                        Update(p => p.ItemsSkipped++);
+                                        _log("     [" + (item.Name ?? item.Id) + "] 跳过：" + line.Episodes.Count + " 集全部不可用");
+                                        continue;
+                                    }
+                                    if (dead > 0)
+                                        _log("     [" + (item.Name ?? item.Id) + "] " + line.Episodes.Count
+                                             + " 集里 " + dead + " 集不可用，只写能播的 " + live.Count + " 集");
+                                    line = new VodLine { Name = line.Name, Episodes = live };
+                                }
                                 var outs = writer.WriteSeries(site.DisplayName, item, line);
                                 var added = outs.Count(o => o.Created || o.Updated);
+                                var same = outs.Count(o => !string.IsNullOrEmpty(o.Path) && !o.Created && !o.Updated);
                                 foreach (var o in outs)
                                     if (!string.IsNullOrEmpty(o.Path)) keep.Add(o.Path);
-                                if (added > 0)
+                                if (added + same > 0)   // 内容没变也是成功：文件在磁盘上
                                 {
                                     written++;
                                     summary.Items++;
                                     summary.Episodes += added;
+                                    summary.Unchanged += same;
                                     Update(p => { p.ItemsWritten++; p.EpisodesWritten += added; });
                                 }
                                 else
@@ -634,7 +703,7 @@ namespace TvBox.Plugin.Core
                             {
                                 var o = writer.WriteMovie(site.DisplayName, item, line);
                                 if (!string.IsNullOrEmpty(o.Path)) keep.Add(o.Path);
-                                if (o.Created || o.Updated)
+                                if (!string.IsNullOrEmpty(o.Path))   // 存在即可（含内容未变）
                                 {
                                     written++;
                                     summary.Items++;

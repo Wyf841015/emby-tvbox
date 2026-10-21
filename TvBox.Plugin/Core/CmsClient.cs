@@ -294,20 +294,26 @@ namespace TvBox.Plugin.Core
                 var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
                 if (!body.Contains("#EXTM3U")) return (false, "不是 m3u8");
 
-                // 取第一个非注释行（可能是子播放列表，也可能是分片）
+                // 扫整张播放列表：真实的媒体分片和"伪装成图片"的死分片要区分开。
+                // 只认第一个分片会漏掉"前几集正常、后面整集都是图片"的源（实测有这种）。
                 string first = null;
+                int mediaCount = 0, imageCount = 0;
                 foreach (var raw in body.Split('\n'))
                 {
                     var line = raw.Trim();
                     if (line.Length == 0 || line.StartsWith("#")) continue;
-                    first = line; break;
+                    var pathOnly = line.Split('?')[0].ToLowerInvariant();
+                    bool isImage = false;
+                    foreach (var ext in ImgExts)
+                        if (pathOnly.EndsWith(ext)) { isImage = true; break; }
+                    if (isImage) { imageCount++; continue; }
+                    mediaCount++;
+                    if (first == null) first = line;
                 }
-                if (first == null) return (false, "播放列表里没有分片");
-
-                // 图片后缀 = 广告/诱饵，源已经坏了
-                var probe = first.Split('?')[0].ToLowerInvariant();
-                foreach (var ext in new[] { ".png", ".jpg", ".jpeg", ".gif", ".webp" })
-                    if (probe.EndsWith(ext)) return (false, "分片是图片（" + ext + "），源已失效");
+                if (mediaCount == 0)
+                    return (false, imageCount > 0
+                        ? "整张播放列表都是图片分片（" + imageCount + " 个），源已失效"
+                        : "播放列表里没有分片");
 
                 // 相对/绝对地址统一，再取一次第一个分片
                 string segUrl = first;
@@ -336,6 +342,9 @@ namespace TvBox.Plugin.Core
                 return (false, "校验异常: " + ex.GetType().Name);
             }
         }
+
+        private static readonly string[] ImgExts =
+            { ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico", ".image", ".avif", ".heic" };
 
         private static bool IsMediaContentType(string ct)
         {
