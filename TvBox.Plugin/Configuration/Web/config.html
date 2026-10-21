@@ -129,6 +129,9 @@
                     <button is="emby-button" type="button" class="raised" id="btnStatus">
                         <span>刷新状态</span>
                     </button>
+                    <button is="emby-button" type="button" class="raised" id="btnStop">
+                        <span>停止同步</span>
+                    </button>
                 </div>
 
                 <div id="tvboxStatus" class="fieldDescription" style="margin-top:1em;white-space:pre-wrap"></div>
@@ -257,6 +260,13 @@
                 });
             }
 
+            function stopSync() {
+                api().ajax({ type: 'POST', url: url('Stop') }).then(function (r) {
+                    setText('tvboxStatus', (r && r.Message) || '已请求停止');
+                    setTimeout(refreshStatus, 1200);
+                });
+            }
+
             function startSync() {
                 setText('tvboxStatus', '正在启动同步…');
                 api().ajax({
@@ -284,6 +294,8 @@
                 if (b2) b2.addEventListener('click', startSync);
                 var b3 = document.getElementById('btnStatus');
                 if (b3) b3.addEventListener('click', refreshStatus);
+                var b4 = document.getElementById('btnStop');
+                if (b4) b4.addEventListener('click', stopSync);
                 setTimeout(function () {
                     if (document.getElementById('TvBoxConfigPage') && api()) load();
                 }, 300);

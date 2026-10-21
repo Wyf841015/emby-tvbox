@@ -203,6 +203,25 @@ namespace TvBox.Plugin.Core
                 }
             }
 
+            // 真实源的子仓大量返回网页而不是 JSON（域名过期变导航页、被运营商/安全软件拦截等）。
+            // 这时候报 JSON 语法错误对用户毫无意义，直接说清楚。
+            if (trimmed.StartsWith("<", StringComparison.Ordinal))
+            {
+                string hint = "返回的是网页（HTML），不是 TVBox 配置";
+                if (trimmed.IndexOf("360-analysis-id", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    trimmed.IndexOf("拦截", StringComparison.OrdinalIgnoreCase) >= 0)
+                    hint += "，看起来被安全软件/运营商拦截了";
+                else if (trimmed.IndexOf("<title>", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    var a = trimmed.IndexOf("<title>", StringComparison.OrdinalIgnoreCase) + 7;
+                    var b = trimmed.IndexOf("</title>", a, StringComparison.OrdinalIgnoreCase);
+                    if (b > a && b - a < 60)
+                        hint += "，页面标题：" + trimmed.Substring(a, b - a).Trim();
+                    hint += "。多半是配置地址已失效，跳到了导航页/首页";
+                }
+                throw new InvalidDataException($"{hint}（{origin ?? "内联"}）");
+            }
+
             TvBoxConfigDocument doc;
             try
             {

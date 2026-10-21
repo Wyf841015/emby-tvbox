@@ -29,6 +29,11 @@ namespace TvBox.Plugin.Api
     {
     }
 
+    [Route("/TvBox/Stop", "POST", Summary = "停止正在进行的同步")]
+    public class StopSync : IReturn<SimpleResult>
+    {
+    }
+
     [Route("/TvBox/Probe", "GET", Summary = "探测单个站点的分类和条目数")]
     public class ProbeSite : IReturn<ProbeResult>
     {
@@ -222,6 +227,21 @@ namespace TvBox.Plugin.Api
             });
 
             return new SimpleResult { Success = true, Message = "同步已在后台开始，进度看下面的状态" };
+        }
+
+        // ── 停止同步 ──
+        public object Post(StopSync req)
+        {
+            var p = P;
+            if (p == null) return new SimpleResult { Message = "插件未初始化" };
+            if (!p.SyncService.IsRunning)
+                return new SimpleResult { Success = false, Message = "当前没有正在运行的同步" };
+            var ok = p.SyncService.RequestStop();
+            return new SimpleResult
+            {
+                Success = ok,
+                Message = ok ? "已请求停止，当前条目结束后会退出" : "停止请求未生效（可能刚好结束）",
+            };
         }
 
         // ── 单站探测（排错用）──

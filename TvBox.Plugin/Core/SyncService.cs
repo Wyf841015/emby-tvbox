@@ -45,6 +45,7 @@ namespace TvBox.Plugin.Core
     {
         private readonly Action<string> _log;
         private readonly SemaphoreSlim _gate = new SemaphoreSlim(1, 1);
+        private CancellationTokenSource _cts;
         private readonly object _stateLock = new object();
 
         public SyncProgress Progress { get; } = new SyncProgress();
@@ -57,6 +58,16 @@ namespace TvBox.Plugin.Core
         public bool IsRunning
         {
             get { lock (_stateLock) return Progress.Running; }
+        }
+
+        /// <summary>请求停止当前同步。正在进行的条目会跑完，下一个检查点退出。</summary>
+        public bool RequestStop()
+        {
+            var cts = _cts;
+            if (cts == null || cts.IsCancellationRequested) return false;
+            try { cts.Cancel(); } catch { return false; }
+            _log("收到停止请求，将在当前条目结束后退出");
+            return true;
         }
 
         private void Update(Action<SyncProgress> mutate)
@@ -99,6 +110,10 @@ namespace TvBox.Plugin.Core
                 return false;
             }
 
+            _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var token = _cts.Token;
+            var summary = new SyncSummary();
+
             try
             {
                 Update(p =>
@@ -117,14 +132,13 @@ namespace TvBox.Plugin.Core
                     p.FinishedUtc = DateTime.MinValue;
                 });
 
-                var summary = new SyncSummary();
                 var keep = new HashSet<string>(StringComparer.Ordinal);
 
                 using (var http = CreateClient(cfg))
                 {
                     // ── 1. 拉配置 ──
                     var loader = new TvBoxConfigLoader(http, m => _log("[config] " + m));
-                    var doc = await loader.LoadAsync(cfg.ConfigUrl, ct).ConfigureAwait(false);
+                    var doc = await loader.LoadAsync(cfg.ConfigUrl, token).ConfigureAwait(false);
                     foreach (var w in doc.LoadWarnings) _log("[config] 警告: " + w);
 
                     // ── 2. 过滤站点 ──
@@ -192,9 +206,18 @@ namespace TvBox.Plugin.Core
                 Finish(summary, cfg, saveConfig);
                 return true;
             }
+            catch (OperationCanceledException)
+            {
+                _log("同步已停止");
+                summary.Detail = $"已手动停止（站点 {Progress.SiteIndex}/{Progress.SiteTotal}，条目 {summary.Items}，分集 {summary.Episodes}）";
+                Finish(summary, cfg, saveConfig);
+                return true;
+            }
             finally
             {
                 Update(p => { p.Running = false; p.FinishedUtc = DateTime.UtcNow; });
+                try { _cts?.Dispose(); } catch { }
+                _cts = null;
                 _gate.Release();
             }
         }
