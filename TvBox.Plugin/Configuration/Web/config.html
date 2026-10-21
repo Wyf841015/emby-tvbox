@@ -42,6 +42,17 @@
                 </div>
 
                 <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="spiderHubUrl">spider-hub 中转地址</label>
+                    <input id="spiderHubUrl" type="text" is="emby-input"
+                           placeholder="http://192.168.1.10:8098" />
+                    <div class="fieldDescription">
+                        填了之后，配置里 <code>type:3 / api:csp_XXX</code> 的 spider 站点会被自动改写成
+                        <code>&lt;hub&gt;/v/&lt;key&gt;/api.php/provide/vod/</code>，当作普通采集站同步。
+                        留空 = 跳过所有 spider 站点。
+                    </div>
+                </div>
+
+                <div class="inputContainer">
                     <label class="inputLabel inputLabelUnfocused" for="referer">播放 Referer</label>
                     <input id="referer" type="text" is="emby-input" placeholder="留空 = 站点根地址" />
                     <div class="fieldDescription">很多采集站的 m3u8 会校验 Referer，遇到 403 时在这里填源站地址。</div>
@@ -161,6 +172,7 @@
             function fill(cfg) {
                 var map = {
                     configUrl: 'ConfigUrl', outputRoot: 'OutputRoot', embyBaseUrl: 'EmbyBaseUrl',
+                    spiderHubUrl: 'SpiderHubUrl',
                     referer: 'Referer', siteWhitelist: 'SiteWhitelist', siteBlacklist: 'SiteBlacklist',
                     siteNameFilter: 'SiteNameFilter', maxPagesPerCategory: 'MaxPagesPerCategory',
                     maxItemsPerRun: 'MaxItemsPerRun', requestDelayMs: 'RequestDelayMs',
@@ -185,6 +197,7 @@
                 cfg.ConfigUrl = v('configUrl').trim();
                 cfg.OutputRoot = v('outputRoot').trim();
                 cfg.EmbyBaseUrl = v('embyBaseUrl').trim();
+                cfg.SpiderHubUrl = v('spiderHubUrl').trim();
                 cfg.Referer = v('referer').trim();
                 cfg.SiteWhitelist = v('siteWhitelist').trim();
                 cfg.SiteBlacklist = v('siteBlacklist').trim();

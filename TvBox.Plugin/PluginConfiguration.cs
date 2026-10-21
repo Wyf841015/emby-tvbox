@@ -19,6 +19,14 @@ namespace TvBox.Plugin
         public string ConfigUrl { get; set; } = string.Empty;
 
         /// <summary>
+        /// spider-hub 中转地址，例如 http://127.0.0.1:8098。
+        /// 填了之后，配置里 type:3 + api:csp_XXX 的 spider 站点会被自动改写成
+        /// &lt;hub&gt;/v/&lt;key&gt;/api.php/provide/vod/ 当作普通采集站同步。
+        /// 留空 = 跳过所有 spider 站点。
+        /// </summary>
+        public string SpiderHubUrl { get; set; } = string.Empty;
+
+        /// <summary>
         /// 只同步这些站点的 key（逗号分隔）。留空 = 同步全部受支持的站点。
         /// </summary>
         public string SiteWhitelist { get; set; } = string.Empty;

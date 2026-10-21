@@ -141,6 +141,10 @@ namespace TvBox.Plugin.Core
                     var doc = await loader.LoadAsync(cfg.ConfigUrl, token).ConfigureAwait(false);
                     foreach (var w in doc.LoadWarnings) _log("[config] 警告: " + w);
 
+                    var hubCount = TvBoxConfigLoader.ApplySpiderHub(doc, cfg.SpiderHubUrl);
+                    if (hubCount > 0)
+                        _log($"[hub] {hubCount} 个 spider 站点已改走中转: {cfg.SpiderHubUrl}");
+
                     // ── 2. 过滤站点 ──
                     var sites = SelectSites(doc.Sites, cfg).ToList();
                     summary.Sites = sites.Count;

@@ -162,6 +162,7 @@ namespace TvBox.Plugin.Api
                     var loader = new TvBoxConfigLoader(http);
                     var doc = loader.LoadAsync(cfg.ConfigUrl, CancellationToken.None)
                                     .GetAwaiter().GetResult();
+                    TvBoxConfigLoader.ApplySpiderHub(doc, cfg.SpiderHubUrl);
 
                     var result = new SourcesResult
                     {

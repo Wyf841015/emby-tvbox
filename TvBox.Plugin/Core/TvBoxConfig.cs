@@ -176,6 +176,30 @@ namespace TvBox.Plugin.Core
             return ParseText(text, ref_);
         }
 
+        /// <summary>
+        /// 把 type:3 + csp_XXX 的 spider 站点重写成 spider-hub 的 MacCMS 采集地址。
+        /// 改写后它们就是标准 type:1 站点，后续同步逻辑完全复用，无需特殊分支。
+        /// </summary>
+        public static int ApplySpiderHub(TvBoxConfigDocument doc, string hubUrl)
+        {
+            if (doc?.Sites == null || string.IsNullOrWhiteSpace(hubUrl)) return 0;
+            var hub = hubUrl.Trim().TrimEnd('/');
+            int n = 0;
+            foreach (var site in doc.Sites)
+            {
+                if (site == null) continue;
+                var api = site.Api ?? "";
+                if (site.Type != 3 || !api.StartsWith("csp_", StringComparison.OrdinalIgnoreCase)) continue;
+                if (string.IsNullOrWhiteSpace(site.Key)) continue;
+
+                site.Type = 1;   // 当成 CMS JSON 采集站
+                site.Api = hub + "/v/" + Uri.EscapeDataString(site.Key) + "/api.php/provide/vod/";
+                site.Jar = null;
+                n++;
+            }
+            return n;
+        }
+
         /// <summary>解析配置文本，自动识别 base64。</summary>
         public static TvBoxConfigDocument ParseText(string text, string origin = null)
         {

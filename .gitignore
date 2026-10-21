@@ -14,3 +14,7 @@ lib/
 strm/
 *.log
 spider-host/out/
+spider-hub/out/
+spider-hub/lib/
+spider-hub/spiders/
+spider-hub/hub.json
