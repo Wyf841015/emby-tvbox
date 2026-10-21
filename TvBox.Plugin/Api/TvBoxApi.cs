@@ -63,6 +63,7 @@ namespace TvBox.Plugin.Api
     public class WriteProbeResult
     {
         public bool Ok { get; set; }
+        public string Message { get; set; }
         public string User { get; set; }
         public string Error { get; set; }
         public System.Collections.Generic.List<WriteProbeItem> Items { get; set; }
@@ -470,6 +471,65 @@ namespace TvBox.Plugin.Api
                 return new SimpleResult { Success = false, Message = "保存失败: " + ex.Message };
             }
             return new SimpleResult { Success = true, Message = changed + " 项已保存" };
+        }
+
+        // ── 输出目录可写性实测（只有 Emby 自己的身份才能回答这个问题）──
+        public object Get(ProbeWrite req)
+        {
+            var p = P;
+            if (!HubOk(req?.Token)) return new WriteProbeResult { Ok = false, Message = "token 无效" };
+            if (req == null || string.IsNullOrWhiteSpace(req.Path))
+                return new WriteProbeResult { Ok = false, Message = "缺少 Path 参数" };
+
+            var root = req.Path.Trim().TrimEnd('/');
+            var targets = new List<string> { root, root + "/movies", root + "/tv" };
+            var items = new List<WriteProbeItem>();
+            bool allOk = true;
+
+            foreach (var dir in targets)
+            {
+                var it = new WriteProbeItem { Path = dir };
+                try
+                {
+                    it.Exists = Directory.Exists(dir);
+                    if (!it.Exists) Directory.CreateDirectory(dir);   // 不存在就试着建，建不了也算结论
+                    var probe = Path.Combine(dir, ".tvbox-write-probe-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+                    File.WriteAllText(probe, "probe");
+                    File.Delete(probe);
+                    it.Writable = true;
+                }
+                catch (Exception ex)
+                {
+                    it.Writable = false;
+                    it.Error = ex.GetType().Name + ": " + ex.Message;
+                    allOk = false;
+                }
+                items.Add(it);
+            }
+
+            string user;
+            try { user = System.Security.Principal.WindowsIdentity.GetCurrent().Name; }
+            catch { user = Environment.UserName; }
+
+            return new WriteProbeResult
+            {
+                Ok = allOk,
+                User = user + " (uid=" + SafeUid() + ")",
+                Message = allOk ? "三个目录都能写" : "有目录写不进去",
+                Items = items,
+            };
+        }
+
+        /// <summary>Linux 下取当前进程 uid，方便确认是不是 Emby 的身份。</summary>
+        private static string SafeUid()
+        {
+            try
+            {
+                foreach (var line in File.ReadAllLines("/proc/self/status"))
+                    if (line.StartsWith("Uid:")) return line.Substring(4).Trim().Split('\t', ' ')[0];
+            }
+            catch { }
+            return "?";
         }
 
         // ── 单站探测（排错用）──

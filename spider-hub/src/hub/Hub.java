@@ -619,6 +619,37 @@ public class Hub {
                 sendJson(ex, 200, m);
                 return;
             }
+            case "/api/emby/prepare-output": {   // 以 root 建目录并把属主交给 Emby
+                String probePath = q.get("path");
+                if (probePath == null || probePath.isEmpty()) {
+                    // 也接受 JSON body（前端用的是 POST body）
+                    try {
+                        Object ob = SpiderPool.Json.parse(readBody(ex));
+                        if (ob instanceof Map) probePath = str(((Map<?, ?>) ob).get("path"));
+                    } catch (Exception ignore) {
+                    }
+                }
+                probePath = firstNonEmpty(probePath, str(settings.get("outputRoot")));
+                if (probePath == null || probePath.isEmpty()) { sendJson(ex, 200, fail("缺少 path")); return; }
+                Map<String, Object> m = EmbyManager.prepareOutputDir(probePath, currentEmbyPath());
+                record("准备输出目录", probePath, Boolean.TRUE.equals(m.get("ok")), str(m.get("msg")), 0);
+                sendJson(ex, 200, m);
+                return;
+            }
+            case "/api/emby/probe-as-emby": {    // 以 Emby 身份实测（root su 过去）
+                String pth = q.get("path");
+                if (pth == null || pth.isEmpty()) {
+                    try {
+                        Object ob = SpiderPool.Json.parse(readBody(ex));
+                        if (ob instanceof Map) pth = str(((Map<?, ?>) ob).get("path"));
+                    } catch (Exception ignore) {
+                    }
+                }
+                if (pth == null || pth.isEmpty()) { sendJson(ex, 200, fail("缺少 path")); return; }
+                Map<String, Object> m = EmbyManager.probeAsEmby(pth, currentEmbyPath());
+                sendJson(ex, 200, m);
+                return;
+            }
             case "/api/emby/write-check": {
                 String base = embyBase();
                 if (base == null) { sendJson(ex, 200, fail("还没连上 Emby")); return; }

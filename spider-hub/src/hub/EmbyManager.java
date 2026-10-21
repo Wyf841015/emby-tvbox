@@ -680,6 +680,157 @@ public class EmbyManager {
         }
     }
 
+    /**
+     * 准备输出目录：建 movies/ 和 tv/，并把属主交给 Emby 的运行用户。
+     *
+     * 为什么由 hub（root）来建：插件是 Emby 身份跑的，如果父目录还没给权限，
+     * 它连"创建目录"这一步都做不了。root 先建好并把 owner 改成 plugins 目录的
+     * owner（也就是 Emby 用户），插件随后直接往里写就行。
+     */
+    public static Map<String, Object> prepareOutputDir(String path, String programdata) {
+        Map<String, Object> r = new LinkedHashMap<>();
+        try {
+            if (!underMediaRoots(path)) {
+                r.put("ok", false);
+                r.put("msg", "只允许在 /volN、/mnt、/media、/home、/srv 下建输出目录");
+                return r;
+            }
+            Path root = Path.of(path).toAbsolutePath().normalize();
+            Files.createDirectories(root);
+            Path movies = root.resolve("movies");
+            Path tv = root.resolve("tv");
+            Files.createDirectories(movies);
+            Files.createDirectories(tv);
+
+            // 属主对齐到 Emby 用户（plugins 目录的 owner）
+            String plugins = null;
+            if (programdata != null && !programdata.isEmpty()) plugins = programdata + "/plugins";
+            java.nio.file.attribute.UserPrincipal owner = null;
+            java.nio.file.attribute.GroupPrincipal group = null;
+            if (plugins != null && Files.isDirectory(Path.of(plugins))) {
+                owner = Files.getOwner(Path.of(plugins));
+                try {
+                    group = Files.readAttributes(Path.of(plugins),
+                            java.nio.file.attribute.PosixFileAttributes.class).group();
+                } catch (Exception ignore) {
+                }
+            }
+            if (owner != null) {
+                adopt(root, owner, group, true);
+            }
+            r.put("ok", true);
+            r.put("msg", "已准备 " + root + "（movies/tv 已建，属主 " + (owner == null ? "未改" : owner.getName()) + "）");
+            r.put("path", root.toString());
+            r.put("owner", owner == null ? null : owner.getName());
+        } catch (Exception e) {
+            r.put("ok", false);
+            r.put("msg", "准备失败: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+        }
+        return r;
+    }
+
+    /** 递归把属主/组设成指定用户（目录 775、文件 664）。 */
+    private static void adopt(Path start, java.nio.file.attribute.UserPrincipal owner,
+                              java.nio.file.attribute.GroupPrincipal group, boolean recursive) throws Exception {
+        java.util.List<Path> paths = new ArrayList<>();
+        paths.add(start);
+        if (recursive && Files.isDirectory(start)) {
+            try (java.util.stream.Stream<Path> st = Files.walk(start)) {
+                st.forEach(paths::add);
+            }
+        }
+        for (Path p : paths) {
+            try {
+                java.nio.file.Files.setOwner(p, owner);
+                if (group != null) {
+                    Files.getFileAttributeView(p, java.nio.file.attribute.PosixFileAttributeView.class)
+                         .setGroup(group);
+                }
+                String perm = Files.isDirectory(p) ? "rwxrwxr-x" : "rw-rw-r--";
+                Files.setPosixFilePermissions(p, java.nio.file.attribute.PosixFilePermissions.fromString(perm));
+            } catch (Exception ignore) {
+            }
+        }
+    }
+
+    /**
+     * 以 Emby 运行用户的身份实测目录可写性（hub 是 root，可以 su 过去）。
+     *
+     * 为什么必须这样测：fnOS 卷是 trimacl，`ls` 的权限位不代表真实可写性；
+     * 只有真正切到那个 uid 写一次，才知道插件能不能把 strm 落盘。
+     */
+    public static Map<String, Object> probeAsEmby(String path, String programdata) {
+        Map<String, Object> r = new LinkedHashMap<>();
+        java.util.List<Map<String, Object>> items = new ArrayList<>();
+        boolean allOk = true;
+        String user = pluginsOwner(programdata);
+        if (user == null) {
+            r.put("ok", false);
+            r.put("msg", "找不到 plugins 目录的属主，没法确定 Emby 运行用户");
+            return r;
+        }
+        for (String dir : new String[]{path, path + "/movies", path + "/tv"}) {
+            Map<String, Object> it = new LinkedHashMap<>();
+            it.put("path", dir);
+            String script = "mkdir -p '" + dir + "' 2>/dev/null; "
+                    + "p='" + dir + "/.tvbox-probe-$$'; "
+                    + "if touch \"$p\" 2>/tmp/.tvbox_probe_err && echo ok > \"$p\" 2>>/tmp/.tvbox_probe_err; "
+                    + "then rm -f \"$p\"; echo WRITABLE; else echo FAILED; fi; "
+                    + "cat /tmp/.tvbox_probe_err 2>/dev/null; rm -f /tmp/.tvbox_probe_err";
+            String out = runAs(user, script);
+            boolean ok = out.contains("WRITABLE");
+            it.put("writable", ok);
+            if (!ok) {
+                allOk = false;
+                String err = out.replace("WRITABLE", "").replace("FAILED", "").trim();
+                if (err.contains("may not be used by non-root")) {
+                    err = "hub 没有以 root 运行，没法切到 " + user + " 身份实测";
+                }
+                it.put("error", err);
+            }
+            items.add(it);
+        }
+        r.put("ok", allOk);
+        r.put("user", user);
+        r.put("items", items);
+        r.put("msg", allOk ? ("以 " + user + " 身份三个目录都能写") : ("以 " + user + " 身份有目录写不进去"));
+        return r;
+    }
+
+    /** plugins 目录的属主 = Emby 运行用户。 */
+    static String pluginsOwner(String programdata) {
+        try {
+            if (programdata == null) return null;
+            Path plugins = Path.of(programdata).resolve("plugins");
+            if (!Files.isDirectory(plugins)) return null;
+            return Files.getOwner(plugins).getName();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 以指定用户执行一段 sh，返回 stdout+stderr。 */
+    static String runAs(String user, String script) {
+        try {
+            ProcessBuilder pb;
+            if (Files.isExecutable(Path.of("/usr/sbin/runuser"))) {
+                pb = new ProcessBuilder("/usr/sbin/runuser", "-u", user, "--", "/bin/sh", "-c", script);
+            } else {
+                pb = new ProcessBuilder("/bin/su", "-s", "/bin/sh", user, "-c", script);
+            }
+            pb.redirectErrorStream(true);
+            Process pr = pb.start();
+            String out = new String(pr.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            if (!pr.waitFor(20, java.util.concurrent.TimeUnit.SECONDS)) {
+                pr.destroyForcibly();
+                return "TIMEOUT";
+            }
+            return out;
+        } catch (Exception e) {
+            return "ERROR " + e.getClass().getSimpleName() + ": " + e.getMessage();
+        }
+    }
+
     /** 输出目录白名单：只允许落在数据卷 / 常见媒体挂载点下。 */
     public static boolean underMediaRoots(String path) {
         try {
