@@ -253,6 +253,42 @@ public class Hub {
     static void handleApi(HttpExchange ex, String path) throws Exception {
         Map<String, String> q = query(ex.getRequestURI().getRawQuery());
         switch (path) {
+            case "/api/sites/sync": {       // 勾选/取消「同步这个站点」
+                String body = readBody(ex);
+                Object ob = SpiderPool.Json.parse(body);
+                if (!(ob instanceof Map)) { sendJson(ex, 200, fail("请求体必须是 JSON 对象")); return; }
+                Map<?, ?> in = (Map<?, ?>) ob;
+
+                java.util.LinkedHashSet<String> set = new java.util.LinkedHashSet<>(syncSiteKeys());
+                Object keysObj = in.get("keys");
+                java.util.List<String> targets = new ArrayList<>();
+                if (keysObj instanceof List) {
+                    for (Object k : (List<?>) keysObj) if (k != null) targets.add(String.valueOf(k));
+                } else if (in.get("key") != null) {
+                    targets.add(String.valueOf(in.get("key")));
+                }
+                boolean on = Boolean.TRUE.equals(in.get("sync"))
+                        || "1".equals(str(in.get("sync"))) || "true".equalsIgnoreCase(str(in.get("sync")));
+
+                for (String k : targets) {
+                    if (on) set.add(k); else set.remove(k);
+                }
+                settings.put("syncSites", new ArrayList<>(set));
+                saveSettings();
+                record("同步站点选择", (on ? "加入 " : "移出 ") + targets.size() + " 个", true, "", 0);
+                Map<String, Object> m = ok((on ? "已加入同步 " : "已移出同步 ") + targets.size() + " 个站点，共 " + set.size() + " 个");
+                m.put("sites", new ArrayList<>(set));
+                sendJson(ex, 200, m);
+                return;
+            }
+            case "/api/sync-sites": {       // 插件用：拿用户勾选的站点
+                java.util.Set<String> set = syncSiteKeys();
+                Map<String, Object> m = ok("");
+                m.put("sites", new ArrayList<>(set));
+                m.put("count", set.size());
+                sendJson(ex, 200, m);
+                return;
+            }
             case "/api/netdisk": {          // 是否允许网盘类源（默认关）
                 String v = q.get("allow");
                 if (v != null) {
@@ -317,9 +353,12 @@ public class Hub {
                 boolean withNetdisk = "1".equals(q.getOrDefault("netdisk", "0"));
                 List<Object> list = new ArrayList<>();
                 int hidden = 0;
+                java.util.Set<String> picked = syncSiteKeys();
                 for (SpiderPool.Site s : pool.allSites()) {
                     if (s.netdisk && !withNetdisk) { hidden++; continue; }
-                    list.add(s.toMap());
+                    Map<String, Object> row = s.toMap();
+                    row.put("sync", picked.contains(s.key));
+                    list.add(row);
                 }
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("ok", true);
@@ -1037,6 +1076,17 @@ public class Hub {
     }
 
     /** Emby 基地址：优先用配置，其次直探常见端口，最后从 system.xml 读端口。 */
+    /** 用户勾选要同步的站点 key 集合。空集合 = 没勾过（当作"全部直连站"）。 */
+    @SuppressWarnings("unchecked")
+    static java.util.LinkedHashSet<String> syncSiteKeys() {
+        java.util.LinkedHashSet<String> set = new java.util.LinkedHashSet<>();
+        Object v = settings.get("syncSites");
+        if (v instanceof List) {
+            for (Object o : (List<Object>) v) if (o != null) set.add(String.valueOf(o));
+        }
+        return set;
+    }
+
     static String embyBase() {
         String saved = str(settings.get("embyBaseUrl"));
         if (saved != null && !saved.isEmpty()) return saved.replaceAll("/+$", "");

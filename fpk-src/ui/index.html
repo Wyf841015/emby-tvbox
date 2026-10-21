@@ -204,8 +204,17 @@
         <span class="pill" id="netdiskPill">—</span>
         <span class="hint" style="margin:0">网盘类源（继承 catvod 的 Pan 基类）没账号拿不到直链，默认解析阶段就排除</span>
       </div>
-      <div id="siteTable"><div class="empty">还没有站点。先去「配置」标签填一个源地址。</div></div>
+      <div class="row" style="margin-bottom:8px;gap:8px;flex-wrap:wrap">
+        <button class="primary" onclick="bulkSync(true)">把可用站点全部加入同步</button>
+        <button onclick="bulkSync(false)">全部移出同步</button>
+        <span class="hint" style="margin:0" id="syncSummaryHint">—</span>
+      </div>
+      <h3 style="margin:14px 0 8px;font-size:14px">✅ 会同步的站点 <span class="pill" id="syncCountPill">0</span></h3>
+      <div id="siteTableSync"><div class="empty">还没有勾选站点。在下面「未加入同步」里点「加入」。</div></div>
 
+      <h3 style="margin:18px 0 8px;font-size:14px">⏸ 未加入同步的站点 <span class="pill" id="noSyncCountPill">0</span></h3>
+      <div id="siteTable"><div class="empty">还没有站点。先去「配置」标签填一个源地址。</div></div>
+      </div>
       <div class="panel" style="margin:14px 0 0;background:#0c1526">
         <h2 style="font-size:13px">探测结果</h2>
         <div id="resultBox" class="empty">点站点行里的「首页 / 分类 / 采集」看返回</div>
@@ -569,31 +578,78 @@ function filteredSites() {
 
 function renderSites() {
   var list = filteredSites();
-  var box = document.getElementById('siteTable');
-  if (!list.length) {
-    box.innerHTML = '<div class="empty">' + (sites.length ? '没有匹配的站点' : '还没有站点。先去「配置」标签填一个源地址。') + '</div>';
-    return;
+  var sync = list.filter(function (s) { return s.sync; });
+  var nosync = list.filter(function (s) { return !s.sync; });
+
+  var p1 = document.getElementById('syncCountPill');
+  if (p1) p1.textContent = sync.length;
+  var p2 = document.getElementById('noSyncCountPill');
+  if (p2) p2.textContent = nosync.length;
+  var hint = document.getElementById('syncSummaryHint');
+  if (hint) {
+    hint.textContent = sites.length
+      ? ('共 ' + sites.length + ' 个站点，已勾选 ' + sites.filter(function (s) { return s.sync; }).length + ' 个参与同步')
+      : '';
   }
-  var html = '<table><thead><tr><th>状态</th><th>类型</th><th>名称</th><th>key / class</th><th>采集地址</th><th>操作</th></tr></thead><tbody>';
-  list.forEach(function (s, i) {
+
+  function row(s) {
     var st = s.ok ? 'ok' : (s.lastError ? 'bad' : 'unk');
-    html += '<tr>' +
+    return '<tr>' +
       '<td><span class="st ' + st + '"></span>' + (s.ok ? '可用' : (s.lastError ? '失败' : '未测')) + '</td>' +
       '<td>' + (s.netdisk ? '<span class="pill bad">网盘</span>' : '<span class="pill ok">直连</span>') + '</td>' +
       '<td>' + esc(s.name || '') + '</td>' +
-      '<td><code>' + esc(s.key) + '</code><br><span style="color:var(--dim);font-size:11.5px">' +
-        esc((s.class || '').replace('com.github.catvod.spider.', 'spider.')) + '</span></td>' +
-      '<td><code style="font-size:11.5px">/v/' + encodeURIComponent(s.key) + '/api.php/provide/vod/</code>' +
-        (s.lastError ? '<div class="err" title="' + esc(s.lastError) + '">' + esc(s.lastError) + '</div>' : '') + '</td>' +
-      '<td style="white-space:nowrap">' +
-        '<button class="tiny" onclick="testHome(' + i + ')">首页</button> ' +
-        '<button class="tiny" onclick="testCategory(' + i + ')">分类</button> ' +
-        '<button class="tiny" onclick="testCms(' + i + ')">采集</button>' +
-      '</td></tr>';
-  });
-  html += '</tbody></table>';
-  box.innerHTML = html;
-  box._list = list;
+      '<td><code>' + esc(s.key) + '</code></td>' +
+      '<td>' + (s.sync
+        ? '<button onclick="setSiteSync(\'' + escJs(s.key) + '\', false)">移出同步</button>'
+        : '<button class="primary" onclick="setSiteSync(\'' + escJs(s.key) + '\', true)">加入同步</button>') + '</td>' +
+      '</tr>';
+  }
+  var head = '<table><thead><tr><th>测试</th><th>类型</th><th>站点</th><th>key</th><th>操作</th></tr></thead><tbody>';
+
+  var boxSync = document.getElementById('siteTableSync');
+  if (boxSync) {
+    boxSync.innerHTML = sync.length
+      ? head + sync.map(row).join('') + '</tbody></table>'
+      : '<div class="empty">还没有勾选站点。在下面「未加入同步」里点「加入」。</div>';
+  }
+  var boxNo = document.getElementById('siteTable');
+  if (boxNo) {
+    boxNo.innerHTML = nosync.length
+      ? head + nosync.map(row).join('') + '</tbody></table>'
+      : '<div class="empty">全部都已在同步列表里。</div>';
+  }
+}
+
+// 勾选/取消一个站点是否参与同步（写回 hub，插件同步时读这份名单）
+function setSiteSync(key, on) {
+  api('api/sites/sync', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: key, sync: on })
+  }).then(function (d) {
+    if (!d.ok) { toast(d.msg || '操作失败', 'bad'); return; }
+    toast(d.msg || '已更新', 'ok');
+    loadSites();
+  }).catch(function (e) { toast('失败: ' + (e && e.message ? e.message : e), 'bad'); });
+}
+
+// 批量：把所有「可用」站点加入同步，或全部移出
+function bulkSync(on) {
+  var targets = on
+    ? sites.filter(function (s) { return !s.sync && !s.netdisk && s.ok; }).map(function (s) { return s.key; })
+    : sites.filter(function (s) { return s.sync; }).map(function (s) { return s.key; });
+  if (!targets.length) { toast(on ? '没有「可用且未勾选」的站点（先跑一遍批量探测）' : '当前没有勾选的站点', 'bad'); return; }
+  if (!confirm((on ? '加入同步 ' : '移出同步 ') + targets.length + ' 个站点？')) return;
+  api('api/sites/sync', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ keys: targets, sync: on })
+  }).then(function (d) {
+    toast(d.msg || '已更新', d.ok ? 'ok' : 'bad');
+    loadSites();
+  }).catch(function (e) { toast('失败: ' + e, 'bad'); });
+}
+
+function escJs(s) {
+  return String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
 function currentSite(i) {

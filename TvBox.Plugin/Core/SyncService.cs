@@ -159,12 +159,23 @@ namespace TvBox.Plugin.Core
                         _log($"[netdisk] hub 报告 {netdiskKeys.Count} 个网盘源，名字兜底再识别 {fallback} 个，将在解析阶段排除");
                     }
 
+                    // 站点页勾选的名单（用户按测试情况自己选），优先于本地白名单
+                    HashSet<string> pickedSites = null;
+                    if (!string.IsNullOrWhiteSpace(cfg.SpiderHubUrl))
+                    {
+                        _logStatic = _log;
+                        pickedSites = await FetchSyncSitesAsync(cfg.SpiderHubUrl, http, token).ConfigureAwait(false);
+                        if (pickedSites != null)
+                            _log($"[sync] 站点页勾选了 {pickedSites.Count} 个站点"
+                                 + (pickedSites.Count == 0 ? "（没勾，按全部直连站同步）" : ""));
+                    }
+
                     var hubCount = TvBoxConfigLoader.ApplySpiderHub(doc, cfg.SpiderHubUrl);
                     if (hubCount > 0)
                         _log($"[hub] {hubCount} 个 spider 站点已改走中转: {cfg.SpiderHubUrl}");
 
                     // ── 2. 过滤站点 ──
-                    var sites = SelectSites(doc.Sites, cfg, netdiskKeys).ToList();
+                    var sites = SelectSites(doc.Sites, cfg, netdiskKeys, pickedSites).ToList();
                     summary.Sites = sites.Count;
                     summary.NetdiskExcluded = Math.Max(0, doc.Sites.Count(s => s.Supported) - sites.Count);
                     _log($"配置里共 {doc.Sites.Count} 个站点"
@@ -308,6 +319,42 @@ namespace TvBox.Plugin.Core
 
         private static Action<string> _logStatic;
 
+        /// <summary>
+        /// 问 spider-hub 用户勾选了哪些站点（站点页的两个表格就是这份数据）。
+        /// 这正是"每次同步都是固定 3 个站"的解法：名单由页面决定，不由配置写死。
+        /// 返回 null 表示 hub 不可达，调用方退回本地白名单。
+        /// </summary>
+        public static async Task<HashSet<string>> FetchSyncSitesAsync(
+            string hubUrl, HttpClient http, CancellationToken ct)
+        {
+            if (string.IsNullOrWhiteSpace(hubUrl)) return null;
+            try
+            {
+                var url = hubUrl.Trim().TrimEnd('/') + "/api/sync-sites";
+                using (var resp = await http.GetAsync(url, HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false))
+                {
+                    if (!resp.IsSuccessStatusCode) return null;
+                    var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                    using (var doc = System.Text.Json.JsonDocument.Parse(json))
+                    {
+                        if (!doc.RootElement.TryGetProperty("sites", out var arr)
+                            || arr.ValueKind != System.Text.Json.JsonValueKind.Array)
+                            return null;
+                        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var el in arr.EnumerateArray())
+                            if (el.ValueKind == System.Text.Json.JsonValueKind.String)
+                                set.Add(el.GetString());
+                        return set;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logStatic?.Invoke("[sync] 取站点页勾选失败（退回本地白名单）: " + ex.Message);
+                return null;
+            }
+        }
+
         /// <summary>拿不到 hub 名单时的兜底判定（同名规则也在 hub 侧用）。</summary>
         public static bool LooksLikeNetdisk(string api, string name)
         {
@@ -437,6 +484,10 @@ namespace TvBox.Plugin.Core
 
         public static IEnumerable<TvBoxSite> SelectSites(IEnumerable<TvBoxSite> all, PluginConfiguration cfg,
                                                          HashSet<string> netdiskKeys)
+            => SelectSites(all, cfg, netdiskKeys, null);
+
+        public static IEnumerable<TvBoxSite> SelectSites(IEnumerable<TvBoxSite> all, PluginConfiguration cfg,
+                                                         HashSet<string> netdiskKeys, HashSet<string> pickedSites)
         {
             var white = SplitCsv(cfg.SiteWhitelist);
             var black = SplitCsv(cfg.SiteBlacklist);
@@ -454,7 +505,12 @@ namespace TvBox.Plugin.Core
                 }
                 if (dead.Contains(s.Key ?? "")) continue;
                 if (black.Count > 0 && Contains(black, s.Key)) continue;
-                if (white.Count > 0 && !Contains(white, s.Key)) continue;
+                // 站点页勾选优先：勾了就同步勾的，没勾过才回退到本地白名单
+                if (pickedSites != null && pickedSites.Count > 0)
+                {
+                    if (!pickedSites.Contains(s.Key ?? "")) continue;
+                }
+                else if (white.Count > 0 && !Contains(white, s.Key)) continue;
                 if (nameFilters.Count > 0 &&
                     !nameFilters.Any(f => (s.DisplayName ?? "").IndexOf(f, StringComparison.OrdinalIgnoreCase) >= 0))
                     continue;
