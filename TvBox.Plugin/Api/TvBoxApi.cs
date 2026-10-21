@@ -490,8 +490,16 @@ namespace TvBox.Plugin.Api
             try { if (Response != null) Response.StatusCode = status; } catch { }
             try
             {
-                return Factory().GetResult(Request,
+                var built = Factory().GetResult(Request,
                     new MemoryStream(Encoding.UTF8.GetBytes(text)), "text/plain; charset=utf-8", null);
+                // ⚠️ Response / Request 这两个属性在 Emby 4.9 里都没被注入（同 HubOk 那个坑），
+                // 所以靠 Response.StatusCode 设状态码是无效的 —— 实测所有错误都返回 200。
+                // 改成设到工厂返回的 IHttpResult 上，这个才是真正被写回响应的对象。
+                if (built is MediaBrowser.Model.Services.IHttpResult hr)
+                {
+                    try { hr.StatusCode = (System.Net.HttpStatusCode)status; } catch { }
+                }
+                return built;
             }
             catch (Exception ex)
             {
@@ -601,27 +609,46 @@ namespace TvBox.Plugin.Api
             catch { return null; }
         }
 
-        /// <summary>SSRF 防护：默认不允许代理到本机/内网地址（AllowPrivateHosts 可放行）。</summary>
+        /// <summary>
+        /// SSRF 防护。这里分成两档：
+        ///   档一（永久拦截，AllowPrivateHosts 也放不开）：localhost / 127.0.0.0/8 /
+        ///         ::1 / 169.254.0.0/16（含云元数据 169.254.169.254）/ 0.0.0.0。
+        ///         /TvBox/Stream 是免登录的（Emby 播放 strm 不带 token），
+        ///         放开这一档等于给任何人一个打本机、打内网元数据的代理。
+        ///   档二（可配放行）：10/8、172.16/12、192.168/16 —— TVBox 有些源就在内网。
+        /// </summary>
         private bool IsBlockedHost(string url)
         {
-            if (P?.Configuration?.AllowPrivateHosts == true) return false;
+            bool allowPrivate = P?.Configuration?.AllowPrivateHosts == true;
             try
             {
                 var u = new Uri(url);
                 var host = u.Host;
                 if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return true;
+                if (host.Equals("localhost.localdomain", StringComparison.OrdinalIgnoreCase)) return true;
+
                 if (System.Net.IPAddress.TryParse(host, out var ip))
                 {
+                    if (System.Net.IPAddress.IsLoopback(ip)) return true;          // 127/8、::1
+                    if (ip.Equals(System.Net.IPAddress.Any) || ip.Equals(System.Net.IPAddress.IPv6Any)) return true;
+
                     var b = ip.GetAddressBytes();
                     if (b.Length == 4)
                     {
-                        if (b[0] == 10) return true;
-                        if (b[0] == 127) return true;
-                        if (b[0] == 169 && b[1] == 254) return true;
-                        if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return true;
-                        if (b[0] == 192 && b[1] == 168) return true;
+                        if (b[0] == 0) return true;
+                        if (b[0] == 169 && b[1] == 254) return true;               // link-local + 云元数据
+                        if (!allowPrivate)
+                        {
+                            if (b[0] == 10) return true;
+                            if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return true;
+                            if (b[0] == 192 && b[1] == 168) return true;
+                        }
+                        return false;
                     }
-                    return ip.Equals(System.Net.IPAddress.IPv6Loopback);
+                    // IPv6：fe80::/10 link-local、fc00::/7 ULA
+                    if ((b[0] & 0xFE) == 0xFC) return !allowPrivate;
+                    if (b[0] == 0xFE && (b[1] & 0xC0) == 0x80) return true;
+                    return false;
                 }
                 return false;
             }

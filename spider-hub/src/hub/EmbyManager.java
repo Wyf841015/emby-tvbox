@@ -319,6 +319,51 @@ public class EmbyManager {
 
     // ───────────────────────── 安装 / 卸载 / 状态 ─────────────────────────
 
+    /**
+     * 安装前的 programdata 校验。返回 null = 通过，否则是拒绝原因。
+     *
+     * 为什么要这道关：hub 以 root 运行，install() 会往传入目录写 DLL 和 XML。
+     * 不校验就等于给任何能调到这个接口的人一个「root 往任意目录写文件」的原语
+     * （实测传 /tmp/evil_emby 就能落地 root:root 的文件）。
+     */
+    public static String validateProgramdata(String programdata) {
+        if (programdata == null || programdata.isBlank()) return "路径为空";
+        Path p;
+        try {
+            p = Path.of(programdata.trim()).toAbsolutePath().normalize();
+        } catch (Exception e) {
+            return "路径非法";
+        }
+        if (!Files.isDirectory(p)) return "目录不存在: " + p;
+
+        // 硬拒绝系统目录，防止有人传 /etc /root /usr 这些地方
+        for (String bad : new String[]{"/etc", "/root", "/usr", "/bin", "/sbin", "/lib", "/lib64",
+                "/boot", "/dev", "/proc", "/sys", "/var/lib", "/var/run"}) {
+            if (p.toString().equals(bad) || p.toString().startsWith(bad + "/")) {
+                return "不允许写入系统目录: " + bad;
+            }
+        }
+
+        // 必须是个真 Emby 数据目录：已初始化（config/system.xml）
+        if (!Files.isRegularFile(p.resolve("config").resolve("system.xml"))) {
+            return "这不是已初始化的 Emby 数据目录（缺 config/system.xml）—— 先在 Emby 应用里启动一次";
+        }
+
+        // 必须有 Emby 的痕迹：plugins 目录，或者是本机检测出来的实例
+        boolean hasPlugins = Files.isDirectory(p.resolve("plugins"));
+        boolean detected = false;
+        try {
+            for (Instance i : detect(null)) {
+                if (Path.of(i.programdata).toAbsolutePath().normalize().equals(p)) { detected = true; break; }
+            }
+        } catch (Exception ignore) {
+        }
+        if (!hasPlugins && !detected) {
+            return "目录里没有 plugins/，也不像是本机检测到的 Emby 实例";
+        }
+        return null;
+    }
+
     public static Map<String, Object> install(String programdata, byte[] dllBytes, String configXml) {
         Map<String, Object> r = new LinkedHashMap<>();
         try {
@@ -386,6 +431,12 @@ public class EmbyManager {
 
             // 准备输出目录并交给 Emby 用户
             String or = extractTag(configXml, "OutputRoot");
+            if (or != null && or.startsWith("/") && !underMediaRoots(or)) {
+                // 本进程是 root，会创建目录并递归 chown；不能让它往 /etc /usr 这类地方建
+                r.put("ok", false);
+                r.put("msg", "输出目录必须在 /vol*、/mnt、/media、/home 下，当前: " + or);
+                return r;
+            }
             if (or != null && or.startsWith("/")) {
                 try {
                     Path outDir = Path.of(or);
@@ -608,6 +659,21 @@ public class EmbyManager {
         if (s.contains("://")) return null;
         if (s.contains("..")) return null;
         return s;
+    }
+
+    /** 输出目录白名单：只允许落在数据卷 / 常见媒体挂载点下。 */
+    public static boolean underMediaRoots(String path) {
+        try {
+            Path p = Path.of(path).toAbsolutePath().normalize();
+            String s = p.toString();
+            if (s.matches("^/vol[0-9]+(/.*)?$")) return true;
+            for (String ok : new String[]{"/mnt", "/media", "/home", "/srv"}) {
+                if (s.equals(ok) || s.startsWith(ok + "/")) return true;
+            }
+            return false;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /** 从 XML 里抠一个标签值。 */

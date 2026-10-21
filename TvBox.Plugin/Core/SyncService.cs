@@ -34,6 +34,8 @@ namespace TvBox.Plugin.Core
         public int Episodes { get; set; }
         public int Removed { get; set; }
         public int Errors { get; set; }
+        /// <summary>处理过但没写进去的条目数（含写失败）。</summary>
+        public int Skipped { get; set; }
         public string Detail { get; set; } = "";
     }
 
@@ -45,6 +47,9 @@ namespace TvBox.Plugin.Core
     {
         private readonly Action<string> _log;
         private readonly SemaphoreSlim _gate = new SemaphoreSlim(1, 1);
+        /// <summary>最近一次 strm 写失败的原因。放字段上是因为写入发生在站点循环的 helper 里，
+        /// 而汇总代码在另一个作用域。</summary>
+        private volatile string _lastWriteError;
         private CancellationTokenSource _cts;
         private readonly object _stateLock = new object();
 
@@ -201,12 +206,21 @@ namespace TvBox.Plugin.Core
                     {
                         Update(p => p.Stage = "清理失效条目");
                         var removed = writer.CleanupOrphans(keep, out var removedDirs);
+                        writer.SaveManifest(keep);          // 记下我们拥有的文件，下次清理以此为准
                         summary.Removed = removed;
                         _log($"清理了 {removed} 个失效 strm、{removedDirs} 个空目录");
                     }
                 }
 
-                summary.Detail = $"站点 {summary.Sites}（失败 {summary.SitesFailed}），条目 {summary.Items}，分集 {summary.Episodes}，清理 {summary.Removed}，错误 {summary.Errors}";
+                var written = Math.Max(0, summary.Items - summary.Skipped);
+                summary.Detail = $"站点 {summary.Sites}（失败 {summary.SitesFailed}），条目 {summary.Items}"
+                               + $"（写入 {written}，跳过 {summary.Skipped}），分集 {summary.Episodes}，"
+                               + $"清理 {summary.Removed}，错误 {summary.Errors}";
+                if (summary.Items > 0 && written == 0)
+                    summary.Detail += "  ⚠️ 全部条目都没写进磁盘"
+                                    + (string.IsNullOrEmpty(_lastWriteError)
+                                        ? "（检查输出目录是否存在且 Emby 用户可写）"
+                                        : "：" + _lastWriteError);
                 Finish(summary, cfg, saveConfig);
                 return true;
             }
@@ -361,7 +375,7 @@ namespace TvBox.Plugin.Core
                                 else
                                 {
                                     summary.Items++;
-                                    Update(p => p.ItemsSkipped++);
+                                    { summary.Skipped++; Update(p => p.ItemsSkipped++); if (!string.IsNullOrEmpty(writer.LastError)) _lastWriteError = writer.LastError; }
                                 }
                             }
                             else
@@ -378,7 +392,7 @@ namespace TvBox.Plugin.Core
                                 else
                                 {
                                     summary.Items++;
-                                    Update(p => p.ItemsSkipped++);
+                                    { summary.Skipped++; Update(p => p.ItemsSkipped++); if (!string.IsNullOrEmpty(writer.LastError)) _lastWriteError = writer.LastError; }
                                 }
                             }
 

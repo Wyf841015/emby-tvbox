@@ -48,13 +48,19 @@ import com.sun.net.httpserver.HttpServer;
 public class Hub {
 
     static SpiderPool pool = new SpiderPool();
-    static ExecutorService workers = Executors.newFixedThreadPool(8);
+    /** /api/save 允许写的键（不白名单化会被塞任意垃圾，比如 {"bad json":null}）。 */
+    static final java.util.Set<String> SAVE_KEYS = new java.util.HashSet<>(Arrays.asList(
+            "configUrl", "embyPath", "embyBaseUrl", "outputRoot", "publicUrl", "spiderJar", "embyToken"));
+
+    static ExecutorService workers = Executors.newFixedThreadPool(24);
     static UnixHttp unix;
 
     // ── 操作记录（扫描/添加/安装等），落盘到 PKGVAR/history.json ──
     static final java.util.List<Map<String, Object>> history = new java.util.ArrayList<>();
     static final int HISTORY_MAX = 300;
     static Path historyFile;
+    /** PKGVAR/data：允许本地配置文件读取的唯一位置。 */
+    static Path dataDir;
 
     /** 记一条操作。 */
     static synchronized void record(String action, String target, boolean ok, String detail, long ms) {
@@ -134,6 +140,8 @@ public class Hub {
         System.setProperty("hub.prefix", hubPrefix);
 
         dataFile = configFile;
+    dataDir = (configFile.toAbsolutePath().getParent() == null ? Path.of("data")
+            : configFile.toAbsolutePath().getParent().resolve("data"));
         historyFile = configFile.toAbsolutePath().getParent() == null
                 ? Path.of("history.json")
                 : configFile.toAbsolutePath().getParent().resolve("history.json");
@@ -171,13 +179,16 @@ public class Hub {
         for (int i = 0; i < 10 && unix == null; i++) {
             int tryPort = port + i;
             try {
-                HttpServer server = HttpServer.create(new InetSocketAddress(tryPort), 0);
+                // 只绑回环：插件和本机都在同一台机器上，走 127.0.0.1 足够。
+                // 绑 0.0.0.0 会让局域网任何主机无鉴权调用全部 /api
+                //（含 install/save/history clear），而本进程是 root。
+                HttpServer server = HttpServer.create(new InetSocketAddress(java.net.InetAddress.getLoopbackAddress(), tryPort), 0);
                 server.createContext("/", Hub::handle);
                 server.setExecutor(Executors.newFixedThreadPool(16));
                 server.start();
                 tcpPort = tryPort;
                 tcpOk = true;
-                System.out.println("TCP 监听: http://0.0.0.0:" + tryPort + "/" + (i > 0 ? "（端口顺延）" : ""));
+                System.out.println("TCP 监听: http://127.0.0.1:" + tryPort + "/（仅本机）" + (i > 0 ? "（端口顺延）" : ""));
                 break;
             } catch (Exception e) {
                 System.out.println("TCP 端口 " + tryPort + " 不可用: " + e.getMessage());
@@ -329,15 +340,42 @@ public class Hub {
             }
             case "/api/save": {
                 String body = readBody(ex);
-                Object o = SpiderPool.Json.parse(body);
-                if (o instanceof Map) {
-                    for (Map.Entry<?, ?> e : ((Map<?, ?>) o).entrySet()) {
-                        settings.put(String.valueOf(e.getKey()), e.getValue());
-                    }
-                    saveSettings();
+                Object o;
+                try {
+                    o = SpiderPool.Json.parse(body);
+                } catch (Exception pe) {
+                    sendJson(ex, 200, fail("请求体不是合法 JSON: " + pe.getMessage()));
+                    return;
                 }
-                record("保存配置", str(settings.get("configUrl")), true, "配置已写入", 0);
-                sendJson(ex, 200, ok("已保存"));
+                if (!(o instanceof Map)) {
+                    // 以前这里会「解析失败也算保存成功」，用户以为配置生效了其实没有
+                    sendJson(ex, 200, fail("请求体必须是 JSON 对象"));
+                    return;
+                }
+                int applied = 0, rejected = 0;
+                List<String> rejectedKeys = new ArrayList<>();
+                for (Map.Entry<?, ?> e : ((Map<?, ?>) o).entrySet()) {
+                    String k = String.valueOf(e.getKey());
+                    if (!SAVE_KEYS.contains(k)) {           // 只认白名单，别把任意键塞进 settings
+                        rejected++;
+                        if (rejectedKeys.size() < 6) rejectedKeys.add(k);
+                        continue;
+                    }
+                    settings.put(k, e.getValue());
+                    applied++;
+                }
+                if (applied > 0) saveSettings();
+                record("保存配置", str(settings.get("configUrl")), true,
+                        "写入 " + applied + " 项" + (rejected > 0 ? "，忽略 " + rejected + " 项" : ""), 0);
+                Map<String, Object> m;
+                if (applied == 0) {
+                    m = fail("没有可保存的字段（请求体缺少已知配置项）");
+                    if (rejected > 0) m.put("ignored", rejectedKeys);
+                } else {
+                    m = ok("已保存 " + applied + " 项");
+                    if (rejected > 0) m.put("ignored", rejectedKeys);
+                }
+                sendJson(ex, 200, m);
                 return;
             }
             case "/api/reload": {
@@ -366,10 +404,16 @@ public class Hub {
                 return;
             }
             case "/api/history": {
+                // record() 是 static synchronized（类锁），这里必须拿同一把锁做快照，
+                // 否则并发 add/remove 会让序列化过程中抛 ConcurrentModificationException
+                List<Map<String, Object>> snapshot;
+                synchronized (Hub.class) {
+                    snapshot = new ArrayList<>(history);
+                }
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("ok", true);
-                m.put("total", history.size());
-                m.put("records", history);
+                m.put("total", snapshot.size());
+                m.put("records", snapshot);
                 sendJson(ex, 200, m);
                 return;
             }
@@ -392,6 +436,7 @@ public class Hub {
             }
             case "/api/probe": {         // 单站探测（可记录）
                 String key = q.get("key");
+                if (key == null || key.isBlank()) { sendJson(ex, 200, fail("缺少 key 参数")); return; }
                 boolean rec = !"0".equals(q.getOrDefault("record", "1"));
                 long t0 = System.currentTimeMillis();
                 try {
@@ -573,6 +618,14 @@ public class Hub {
                 Map<String, String> req = parseForm(readBody(ex));
                 String pd = firstNonEmpty(req.get("programdata"), str(settings.get("embyPath")));
                 if (pd == null || pd.isEmpty()) { sendJson(ex, 200, fail("还没选 Emby 目录")); return; }
+                // 必须是真的 Emby programdata：本进程以 root 跑，不校验就等于
+                // 给任何调用者一个「往任意目录写文件」的原语。
+                String why = EmbyManager.validateProgramdata(pd);
+                if (why != null) {
+                    record("安装插件", pd, false, why, 0);
+                    sendJson(ex, 200, fail("拒绝安装: " + why));
+                    return;
+                }
                 if (pluginDll == null || !Files.isRegularFile(pluginDll)) {
                     sendJson(ex, 200, fail("安装包里没有 TvBox.dll")); return;
                 }
@@ -593,6 +646,14 @@ public class Hub {
                 Map<String, String> req = parseForm(readBody(ex));
                 String pd = firstNonEmpty(req.get("programdata"), str(settings.get("embyPath")));
                 if (pd == null || pd.isEmpty()) { sendJson(ex, 200, fail("还没选 Emby 目录")); return; }
+                // 必须是真的 Emby programdata：本进程以 root 跑，不校验就等于
+                // 给任何调用者一个「往任意目录写文件」的原语。
+                String why = EmbyManager.validateProgramdata(pd);
+                if (why != null) {
+                    record("安装插件", pd, false, why, 0);
+                    sendJson(ex, 200, fail("拒绝安装: " + why));
+                    return;
+                }
                 Map<String, Object> ru = EmbyManager.uninstall(pd);
                 record("卸载插件", pd, Boolean.TRUE.equals(ru.get("ok")), String.valueOf(ru.get("msg")), 0);
                 sendJson(ex, 200, ru);
@@ -714,7 +775,25 @@ public class Hub {
     // ───────────────────────── 调用工具 ─────────────────────────
 
     /** 带超时调用 spider；失败记录下来并抛出。 */
+    /** 每个站点一把锁：catvod spider 实例内部有可变状态，多线程同时调必然互相踩。 */
+    static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.locks.ReentrantLock> KEY_LOCKS
+            = new java.util.concurrent.ConcurrentHashMap<>();
+
     static String call(String key, Callable<String> task, int timeoutSec) throws Exception {
+        java.util.concurrent.locks.ReentrantLock lock =
+                KEY_LOCKS.computeIfAbsent(String.valueOf(key), k -> new java.util.concurrent.locks.ReentrantLock());
+        // 拿不到锁说明这个站点正在被另一路请求用着，直接排队等（同 key 串行）
+        if (!lock.tryLock(timeoutSec, TimeUnit.SECONDS)) {
+            throw new Exception("站点 " + key + " 正在处理中，请稍后重试");
+        }
+        try {
+            return callUnlocked(key, task, timeoutSec);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    static String callUnlocked(String key, Callable<String> task, int timeoutSec) throws Exception {
         Future<String> f = workers.submit(task);
         try {
             String r = f.get(timeoutSec, TimeUnit.SECONDS);
@@ -734,10 +813,18 @@ public class Hub {
 
     static int reload(String url) throws Exception {
         String body;
-        if (url.startsWith("http")) {
+        if (url.startsWith("http://") || url.startsWith("https://")) {
             body = fetch(url);
         } else {
-            body = Files.readString(Path.of(url), StandardCharsets.UTF_8);
+            // 本地文件只允许读 PKGVAR/data 下的内容。本进程是 root，
+            // 原来这里裸 Path.of(url) 等于一个任意文件读取原语（/etc/shadow 都能读）。
+            Path p = Path.of(url).toAbsolutePath().normalize();
+            Path allowed = dataDir;                       // TRIM_PKGVAR/data
+            if (allowed == null || !p.startsWith(allowed)) {
+                throw new Exception("本地配置只允许放在 " + (allowed == null ? "<PKGVAR>/data" : allowed.toString()) + " 下");
+            }
+            if (!Files.isRegularFile(p)) throw new Exception("文件不存在: " + p);
+            body = Files.readString(p, StandardCharsets.UTF_8);
         }
         body = body.trim();
         // 多仓：{urls:[...]} → 取第一个可用子仓（完整多仓展开在 Emby 插件侧做）
@@ -1070,7 +1157,7 @@ public class Hub {
         sb.append("  <OutputRoot>").append(esc(outputRoot)).append("</OutputRoot>\n");
         sb.append("  <EmbyBaseUrl></EmbyBaseUrl>\n");
         sb.append("  <UseProxy>true</UseProxy>\n");
-        sb.append("  <AllowPrivateHosts>true</AllowPrivateHosts>\n");
+        sb.append("  <AllowPrivateHosts>false</AllowPrivateHosts>\n");   // SSRF：默认不放行内网
         sb.append("  <MaxPagesPerCategory>1</MaxPagesPerCategory>\n");
         sb.append("  <RequestDelayMs>200</RequestDelayMs>\n");
         sb.append("  <TimeoutSeconds>45</TimeoutSeconds>\n");

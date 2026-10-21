@@ -37,10 +37,47 @@ namespace TvBox.Plugin.Core
             _log = log ?? (_ => { });
         }
 
+        /// <summary>最近一次写失败的原因（给同步汇总用，避免「同步成功但没文件」）。</summary>
+        public string LastError { get; private set; }
+
         public string MoviesRoot => Path.Combine(_root, "movies");
         public string TvRoot => Path.Combine(_root, "tv");
 
         public string Root => _root;
+
+        /// <summary>
+        /// 我们写过的文件清单。清理孤儿必须以此为准 —— 只删「清单里有、这次不要了」的，
+        /// 否则 OutputRoot 指到用户已有媒体库时，用户自己的 .strm 会被当孤儿删掉。
+        /// </summary>
+        private string ManifestPath => Path.Combine(_root, ".tvbox-manifest.json");
+
+        private HashSet<string> LoadManifest()
+        {
+            var set = new HashSet<string>(StringComparer.Ordinal);
+            try
+            {
+                if (!File.Exists(ManifestPath)) return set;
+                var txt = File.ReadAllText(ManifestPath);
+                foreach (var p in System.Text.Json.JsonSerializer.Deserialize<List<string>>(txt) ?? new List<string>())
+                    if (!string.IsNullOrWhiteSpace(p)) set.Add(p);
+            }
+            catch (Exception ex) { _log("读 manifest 失败: " + ex.Message); }
+            return set;
+        }
+
+        /// <summary>把本次「应该存在」的文件集合写成清单（下次清理的判据）。</summary>
+        public void SaveManifest(IEnumerable<string> keep)
+        {
+            try
+            {
+                var dir = Path.GetDirectoryName(ManifestPath);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                var list = keep == null ? new List<string>() : keep.ToList();
+                File.WriteAllText(ManifestPath,
+                    System.Text.Json.JsonSerializer.Serialize(list), new UTF8Encoding(false));
+            }
+            catch (Exception ex) { _log("写 manifest 失败: " + ex.Message); }
+        }
 
         // ───────────────────── 写入 ─────────────────────
 
@@ -102,6 +139,7 @@ namespace TvBox.Plugin.Core
             }
             catch (Exception ex)
             {
+                LastError = ex.GetType().Name + ": " + ex.Message;
                 _log($"写 strm 失败 {file}: {ex.Message}");
                 return default;
             }
@@ -118,6 +156,9 @@ namespace TvBox.Plugin.Core
             removedDirs = 0;
             if (keep == null) return 0;
 
+            // 只有清单里出现过、这次又不需要了的文件才删；清单缺失时退化为「只删带本插件代理标记的」
+            var owned = LoadManifest();
+            bool useManifest = owned.Count > 0;
             var removed = 0;
             foreach (var root in new[] { MoviesRoot, TvRoot })
             {
@@ -136,6 +177,17 @@ namespace TvBox.Plugin.Core
                 foreach (var f in files)
                 {
                     if (keep.Contains(f)) continue;
+                    if (useManifest && !owned.Contains(f)) continue;      // 不是我们写的，别碰
+                    if (!useManifest)
+                    {
+                        // 没清单时保守一点：只删内容明显是本插件生成的
+                        try
+                        {
+                            var head = File.ReadAllText(f);
+                            if (head.IndexOf("/TvBox/Stream/", StringComparison.Ordinal) < 0) continue;
+                        }
+                        catch { continue; }
+                    }
                     try
                     {
                         File.Delete(f);
