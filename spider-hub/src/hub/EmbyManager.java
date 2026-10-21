@@ -346,14 +346,17 @@ public class EmbyManager {
                 Files.copy(target, bak, StandardCopyOption.REPLACE_EXISTING);
                 backup = bak.toString();
             }
-            Files.write(target, dllBytes);
+            // 不能直接 Files.write 覆盖：Emby 正在跑，这个 DLL 已被 mmap，
+            // 截断它会触发 SIGBUS 把 Emby 打挂。写成临时文件再原子 rename，
+            // 老 inode 留给运行中的进程，新文件下次启动生效。
+            atomicWrite(target, dllBytes);
 
             String configPath = null;
             if (configXml != null && !configXml.isBlank()) {
                 Path cfgDir = plugins.resolve("configurations");
                 if (!Files.isDirectory(cfgDir)) Files.createDirectories(cfgDir);
                 Path cfg = cfgDir.resolve("TvBox.xml");
-                Files.write(cfg, configXml.getBytes(StandardCharsets.UTF_8));
+                atomicWrite(cfg, configXml.getBytes(StandardCharsets.UTF_8));
                 configPath = cfg.toString();
             }
 
@@ -566,6 +569,21 @@ public class EmbyManager {
         if (s.contains("://")) return null;
         if (s.contains("..")) return null;
         return s;
+    }
+
+    /** 先写同目录临时文件，再原子替换，避免打断正在使用这个文件的进程。 */
+    private static void atomicWrite(Path target, byte[] bytes) throws Exception {
+        Path tmp = target.resolveSibling(target.getFileName() + ".tmp-" + System.nanoTime());
+        Files.write(tmp, bytes);
+        try {
+            Files.setPosixFilePermissions(tmp, java.nio.file.attribute.PosixFilePermissions.fromString("rw-r--r--"));
+        } catch (Exception ignore) {
+        }
+        try {
+            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+        }
     }
 
     private static String explain(Exception e) {

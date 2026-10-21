@@ -14,6 +14,7 @@ namespace TvBox.Plugin.Api
 {
     // ───────────────────── 请求 DTO ─────────────────────
 
+    [Unauthenticated]   // 供 spider-hub 调用，靠 ?token= 校验（见 TvBoxApi.HubOk）
     [Route("/TvBox/Status", "GET", Summary = "获取 TVBox 同步状态")]
     public class GetStatus : IReturn<StatusResult>
     {
@@ -24,11 +25,13 @@ namespace TvBox.Plugin.Api
     {
     }
 
+    [Unauthenticated]
     [Route("/TvBox/Sync", "POST", Summary = "立即开始同步")]
     public class StartSync : IReturn<SimpleResult>
     {
     }
 
+    [Unauthenticated]
     [Route("/TvBox/Stop", "POST", Summary = "停止正在进行的同步")]
     public class StopSync : IReturn<SimpleResult>
     {
@@ -121,11 +124,32 @@ namespace TvBox.Plugin.Api
 
         private static Plugin P => Plugin.Instance;
 
+        /// <summary>
+        /// 免登录路由的共享令牌校验。
+        /// 配置里 HubToken 为空 → 不校验（旧安装兼容）；非空 → 必须带对的 ?token=。
+        /// </summary>
+        private bool HubOk()
+        {
+            try
+            {
+                var cfg = P?.Configuration;
+                if (cfg == null) return false;
+                if (string.IsNullOrWhiteSpace(cfg.HubToken)) return true;
+                var got = Request?.QueryString?["token"];
+                return !string.IsNullOrEmpty(got) && string.Equals(got, cfg.HubToken.Trim(), StringComparison.Ordinal);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         // ── 状态 ──
         public object Get(GetStatus req)
         {
             var p = P;
             if (p == null) return new StatusResult { Stage = "插件未初始化" };
+            if (!HubOk()) return new StatusResult { Stage = "token 无效" };
             var cfg = p.Configuration;
             var pr = p.SyncService.Progress;
             lock (pr)
@@ -203,6 +227,7 @@ namespace TvBox.Plugin.Api
         {
             var p = P;
             if (p == null) return new SimpleResult { Message = "插件未初始化" };
+            if (!HubOk()) return new SimpleResult { Success = false, Message = "token 无效" };
             if (p.SyncService.IsRunning)
                 return new SimpleResult { Success = false, Message = "已有同步在运行" };
 
@@ -249,6 +274,7 @@ namespace TvBox.Plugin.Api
         public object Get(ProbeSite req)
         {
             var p = P;
+            if (!HubOk()) return new SimpleResult { Success = false, Message = "token 无效" };
             if (p == null) return new ProbeResult { Error = "插件未初始化" };
             var cfg = p.Configuration;
             var key = req?.SiteKey;

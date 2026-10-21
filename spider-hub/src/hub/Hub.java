@@ -5,7 +5,14 @@ import java.io.File;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.net.URI;
 import java.net.URLDecoder;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
+import java.util.UUID;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -416,6 +423,68 @@ public class Hub {
                 }
                 return;
             }
+            // ── 同步控制：直接驱动 Emby 里的插件，Web 上就能看到进度 ──
+            case "/api/emby/sync/status": {
+                String base = embyBase();
+                if (base == null) {
+                    sendJson(ex, 200, fail("还没连上 Emby（先在「Emby 插件」页点一次检测）"));
+                    return;
+                }
+                Map<String, Object> m = new LinkedHashMap<>();
+                try {
+                    String body = embyHttp("GET", base + "/TvBox/Status?token=" + embyToken());
+                    m.put("ok", true);
+                    m.put("emby", base);
+                    try {
+                        m.put("status", SpiderPool.Json.parse(body));
+                    } catch (Exception ignore) {
+                        m.put("raw", body);
+                    }
+                } catch (Exception e) {
+                    m.put("ok", false);
+                    m.put("msg", "连不上 Emby: " + explain(e));
+                }
+                sendJson(ex, 200, m);
+                return;
+            }
+            case "/api/emby/sync": {
+                String base = embyBase();
+                if (base == null) { sendJson(ex, 200, fail("还没连上 Emby")); return; }
+                long t0 = System.currentTimeMillis();
+                Map<String, Object> m = new LinkedHashMap<>();
+                try {
+                    String body = embyHttp("POST", base + "/TvBox/Sync?token=" + embyToken());
+                    Object parsed = SpiderPool.Json.parse(body);
+                    m.put("ok", true);
+                    m.put("emby", base);
+                    m.put("result", parsed);
+                    String msg = parsed instanceof Map ? str(((Map<?, ?>) parsed).get("Message")) : null;
+                    record("开始同步", base, true, msg == null ? "已触发" : msg, System.currentTimeMillis() - t0);
+                } catch (Exception e) {
+                    m.put("ok", false);
+                    m.put("msg", "触发失败: " + explain(e));
+                    record("开始同步", base, false, str(m.get("msg")), System.currentTimeMillis() - t0);
+                }
+                sendJson(ex, 200, m);
+                return;
+            }
+            case "/api/emby/sync/stop": {
+                String base = embyBase();
+                if (base == null) { sendJson(ex, 200, fail("还没连上 Emby")); return; }
+                long t0 = System.currentTimeMillis();
+                Map<String, Object> m = new LinkedHashMap<>();
+                try {
+                    String body = embyHttp("POST", base + "/TvBox/Stop?token=" + embyToken());
+                    m.put("ok", true);
+                    m.put("result", SpiderPool.Json.parse(body));
+                    record("停止同步", base, true, "已请求停止", System.currentTimeMillis() - t0);
+                } catch (Exception e) {
+                    m.put("ok", false);
+                    m.put("msg", "停止失败: " + explain(e));
+                }
+                sendJson(ex, 200, m);
+                return;
+            }
             case "/api/emby/libraries": {
                 String pd = q.getOrDefault("programdata", str(settings.get("embyPath")));
                 if (pd == null || pd.isEmpty()) { sendJson(ex, 200, fail("还没选 Emby 目录")); return; }
@@ -462,7 +531,12 @@ public class Hub {
                 long t0 = System.currentTimeMillis();
                 Map<String, Object> r = EmbyManager.install(pd, Files.readAllBytes(pluginDll), buildPluginXml(req));
                 long ms = System.currentTimeMillis() - t0;
-                if (Boolean.TRUE.equals(r.get("ok"))) { settings.put("embyPath", pd); saveSettings(); }
+                if (Boolean.TRUE.equals(r.get("ok"))) {
+                    settings.put("embyPath", pd);
+                    settings.remove("embyBaseUrl");   // 让下次 embyBase() 重新探测
+                    saveSettings();
+                    embyBase();                        // 装完立刻探一次，后面的同步按钮就能用
+                }
                 record("安装插件", pd, Boolean.TRUE.equals(r.get("ok")), String.valueOf(r.get("msg")), ms);
                 sendJson(ex, 200, r);
                 return;
@@ -640,6 +714,76 @@ public class Hub {
      * 取配置。国内直连 raw.githubusercontent.com 经常不通
      * （域名只返回 AAAA 记录，本机 IPv6 不通时一直挂到超时），所以直连失败自动走镜像。
      */
+    // ═══════════ Emby 插件控制（同步触发 / 状态查询 / 停止）═══════════
+
+    static final HttpClient EMBY_HTTP = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(4))
+            .followRedirects(HttpClient.Redirect.NORMAL)
+            .build();
+
+    /** 给 hub 用的共享令牌：装插件时写进 TvBox.xml，之后调免登录路由都要带上。 */
+    static synchronized String embyToken() {
+        String t = str(settings.get("embyToken"));
+        if (t == null || t.isEmpty()) {
+            t = UUID.randomUUID().toString().replace("-", "");
+            settings.put("embyToken", t);
+            saveSettings();
+        }
+        return t;
+    }
+
+    /** Emby 基地址：优先用配置，其次直探常见端口，最后从 system.xml 读端口。 */
+    static String embyBase() {
+        String saved = str(settings.get("embyBaseUrl"));
+        if (saved != null && !saved.isEmpty()) return saved.replaceAll("/+$", "");
+
+        for (int port : new int[]{8096, 8097, 8920}) {
+            String base = "http://127.0.0.1:" + port;
+            try {
+                String s = embyHttp("GET", base + "/System/Info/Public");
+                if (s != null && s.contains("ServerName")) {
+                    settings.put("embyBaseUrl", base);
+                    saveSettings();
+                    return base;
+                }
+            } catch (Exception ignore) {
+            }
+        }
+
+        // 从 Emby 的 system.xml 里读 HttpServerPortNumber
+        String pd = str(settings.get("embyPath"));
+        if (pd != null && !pd.isEmpty()) {
+            try {
+                Path xml = Path.of(pd, "config", "system.xml");
+                if (Files.isRegularFile(xml)) {
+                    String txt = Files.readString(xml, StandardCharsets.UTF_8);
+                    java.util.regex.Matcher m = java.util.regex.Pattern
+                            .compile("<HttpServerPortNumber>(\\d+)</HttpServerPortNumber>").matcher(txt);
+                    if (m.find()) {
+                        String base = "http://127.0.0.1:" + m.group(1);
+                        String s = embyHttp("GET", base + "/System/Info/Public");
+                        if (s != null && s.contains("ServerName")) {
+                            settings.put("embyBaseUrl", base);
+                            saveSettings();
+                            return base;
+                        }
+                    }
+                }
+            } catch (Exception ignore) {
+            }
+        }
+        return null;
+    }
+
+    static String embyHttp(String method, String url) throws Exception {
+        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(20));
+        if ("POST".equalsIgnoreCase(method)) b.POST(HttpRequest.BodyPublishers.noBody());
+        else b.GET();
+        HttpResponse<String> r = EMBY_HTTP.send(b.build(),
+                HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        return r.body();
+    }
+
     static String fetch(String url) throws Exception {
         StringBuilder log = new StringBuilder();
         try {
@@ -783,6 +927,19 @@ public class Hub {
         return sb.toString();
     }
 
+    /** 异常转人话（连不上/超时/404 分开说，别只丢一句 message）。 */
+    static String explain(Exception e) {
+        if (e == null) return "未知错误";
+        Throwable c = e;
+        while (c.getCause() != null && c.getCause() != c) c = c.getCause();
+        String n = c.getClass().getSimpleName();
+        if (c instanceof java.net.http.HttpConnectTimeoutException) return "连接超时（Emby 没起或端口不对）";
+        if (c instanceof java.net.ConnectException) return "连接被拒（Emby 没起或端口不对）";
+        if (c instanceof java.net.http.HttpTimeoutException) return "请求超时（Emby 卡住或正在扫库）";
+        if (c instanceof java.io.IOException) return n + ": " + c.getMessage();
+        return e.getMessage() == null ? e.toString() : e.getMessage();
+    }
+
     static String str(Object o) {
         return o == null ? null : String.valueOf(o);
     }
@@ -851,6 +1008,7 @@ public class Hub {
           .append("xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\">\n");
         sb.append("  <ConfigUrl>").append(esc(configUrl)).append("</ConfigUrl>\n");
         sb.append("  <SpiderHubUrl>").append(esc(hubUrl)).append("</SpiderHubUrl>\n");
+        sb.append("  <HubToken>").append(esc(embyToken())).append("</HubToken>\n");
         sb.append("  <OutputRoot>").append(esc(outputRoot)).append("</OutputRoot>\n");
         sb.append("  <EmbyBaseUrl></EmbyBaseUrl>\n");
         sb.append("  <UseProxy>true</UseProxy>\n");

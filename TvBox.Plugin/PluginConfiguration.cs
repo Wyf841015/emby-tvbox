@@ -41,6 +41,14 @@ namespace TvBox.Plugin
         /// </summary>
         public string SiteNameFilter { get; set; } = string.Empty;
 
+        /// <summary>
+        /// 给 spider-hub 用的共享令牌。
+        /// hub 装插件时会写进这份配置，之后 hub 调 /TvBox/Sync、/TvBox/Status
+        /// 这些免登录路由都要带 ?token=xxx，避免局域网里谁都能触发同步。
+        /// 留空 = 不校验（兼容旧配置）。
+        /// </summary>
+        public string HubToken { get; set; } = string.Empty;
+
         /// <summary>STRM 输出根目录。留空则用 Emby 数据目录下的 tvbox/。</summary>
         public string OutputRoot { get; set; } = string.Empty;
 

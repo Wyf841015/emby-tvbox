@@ -92,6 +92,13 @@
       font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#bfd4f5}
   .empty{color:var(--dim);text-align:center;padding:26px 0;font-size:13px}
   .hint{color:var(--dim);font-size:12px;margin-top:10px;line-height:1.7}
+  .pbar{height:10px;border-radius:999px;background:var(--line);overflow:hidden;margin-top:6px}
+  .pbar-in{height:100%;width:0;border-radius:999px;
+    background:linear-gradient(90deg,var(--accent),var(--cyan),var(--ok));
+    transition:width .45s ease}
+  .pulse{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok);
+    margin-right:6px;animation:pl 1.2s ease-in-out infinite}
+  @keyframes pl{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.8)}}
   .hint code{color:#9ec1ff}
   .toast{position:fixed;right:20px;bottom:20px;background:var(--panel2);border:1px solid var(--line);
          border-left:3px solid var(--accent);padding:12px 16px;border-radius:10px;font-size:13px;
@@ -130,6 +137,7 @@
   <div class="tabs">
     <div class="tab active" data-pane="overview" onclick="switchTab('overview',this)">概览</div>
     <div class="tab" data-pane="sites" onclick="switchTab('sites',this)">站点<span class="n" id="tabSiteCount">0</span></div>
+    <div class="tab" data-pane="sync" onclick="switchTab('sync',this)">同步<span class="n" id="tabSyncDot" style="display:none">●</span></div>
     <div class="tab" data-pane="config" onclick="switchTab('config',this)">配置</div>
     <div class="tab" data-pane="emby" onclick="switchTab('emby',this)">Emby 插件</div>
     <div class="tab" data-pane="logs" onclick="switchTab('logs',this)">操作记录<span class="n" id="tabLogCount">0</span></div>
@@ -189,6 +197,42 @@
         <h2 style="font-size:13px">探测结果</h2>
         <div id="resultBox" class="empty">点站点行里的「首页 / 分类 / 采集」看返回</div>
       </div>
+    </div>
+  </div>
+
+  <!-- ══════════ 同步 ══════════ -->
+  <div class="pane" id="pane-sync">
+    <div class="panel">
+      <h2>同步控制</h2>
+      <div class="row" style="margin-bottom:14px">
+        <button class="primary" id="btnSyncStart" onclick="startSync()">▶ 开始同步</button>
+        <button id="btnSyncStop" onclick="stopSync()">■ 停止同步</button>
+        <button onclick="refreshSyncStatus()">刷新状态</button>
+        <span class="pill" id="syncStatePill">未连接</span>
+      </div>
+      <div class="kv">
+        <div class="k">Emby</div><div class="v" style="font-size:13px"><code id="syncEmby">—</code></div>
+        <div class="k">输出目录</div><div class="v" style="font-size:13px"><code id="syncOut">—</code></div>
+        <div class="k">当前阶段</div><div class="v" style="font-size:14px" id="syncStage">—</div>
+      </div>
+      <div id="syncBarWrap" style="display:none;margin-top:16px">
+        <div class="pbar"><div class="pbar-in" id="syncBar"></div></div>
+        <div class="hint" id="syncBarText"></div>
+      </div>
+      <div class="hint" id="syncTip"></div>
+    </div>
+
+    <div class="cards">
+      <div class="card"><div class="k">已写条目</div><div class="v accent" id="kItems">–</div></div>
+      <div class="card"><div class="k">已写分集</div><div class="v" id="kEps">–</div></div>
+      <div class="card"><div class="k">错误</div><div class="v bad" id="kErrs">–</div></div>
+      <div class="card"><div class="k">上次同步</div><div class="v" id="kLastSync" style="font-size:14px">–</div></div>
+    </div>
+
+    <div class="panel">
+      <h2>同步结果</h2>
+      <div id="syncSummary" class="empty">还没有同步记录</div>
+      <div class="hint" id="syncLastErr"></div>
     </div>
   </div>
 
@@ -367,6 +411,8 @@ function switchTab(name, el) {
   if (name === 'logs') loadLogs();
   if (name === 'overview') loadRecent();
   if (name === 'emby' && !document.getElementById('embyList').dataset.loaded) detectEmby();
+  if (name === 'sync') refreshSyncStatus();
+  else if (typeof syncPollStop === 'function') syncPollStop();
   try { localStorage.setItem('tvboxhub.tab', name); } catch (e) {}
 }
 
@@ -754,6 +800,114 @@ function onLibPick(sel) {
   document.getElementById('pluginHint').textContent =
     '输出目录 ' + p + '（strm 会分到 ' + p + '/movies 和 ' + p + '/tv，Emby 里对应建两个库）';
   document.getElementById('pluginHint').style.color = 'var(--dim)';
+}
+
+
+// ══════════ 同步控制（直接驱动 Emby 里的插件）══════════
+
+var syncPoll = null;
+
+function syncPollStart() {
+  if (syncPoll) return;
+  syncPoll = setInterval(refreshSyncStatus, 1500);
+}
+function syncPollStop() {
+  if (syncPoll) { clearInterval(syncPoll); syncPoll = null; }
+}
+
+function setSyncPill(text, kind) {
+  var el = document.getElementById('syncStatePill');
+  el.textContent = text;
+  el.className = 'pill' + (kind ? ' ' + kind : '');
+}
+
+function refreshSyncStatus() {
+  return api('api/emby/sync/status').then(function (d) {
+    if (!d.ok) {
+      setSyncPill('连不上 Emby', 'bad');
+      document.getElementById('syncStage').textContent = d.msg || '连不上';
+      document.getElementById('syncTip').textContent = d.msg || '';
+      document.getElementById('syncBarWrap').style.display = 'none';
+      syncPollStop();
+      return;
+    }
+    var s = d.status || {};
+    document.getElementById('syncEmby').textContent = d.emby || '—';
+    document.getElementById('syncOut').textContent = s.OutputRoot || '—';
+    document.getElementById('syncStage').textContent = s.Stage || '—';
+
+    document.getElementById('kItems').textContent = (s.ItemsWritten != null ? s.ItemsWritten : '–');
+    document.getElementById('kEps').textContent = (s.EpisodesWritten != null ? s.EpisodesWritten : '–');
+    document.getElementById('kErrs').textContent = (s.Errors != null ? s.Errors : '–');
+    document.getElementById('kLastSync').textContent = s.LastSyncUtc
+      ? String(s.LastSyncUtc).replace('T', ' ').replace(/Z$/, '')
+      : '从未';
+
+    var running = !!s.Running;
+    if (running) {
+      setSyncPill('同步中', 'ok');
+      document.getElementById('tabSyncDot').style.display = '';
+      document.getElementById('syncBarWrap').style.display = '';
+      var total = s.SiteTotal || 0, idx = s.SiteIndex || 0;
+      var pct = total > 0 ? Math.min(100, Math.round(idx * 100 / total)) : 0;
+      document.getElementById('syncBar').style.width = pct + '%';
+      document.getElementById('syncBarText').textContent =
+        '第 ' + idx + '/' + total + ' 个站点' +
+        (s.CurrentSite ? ' · 当前：' + s.CurrentSite : '') +
+        ' · 条目 ' + (s.ItemsWritten || 0) + ' · 错误 ' + (s.Errors || 0);
+      document.getElementById('btnSyncStart').disabled = true;
+      document.getElementById('btnSyncStop').disabled = false;
+      syncPollStart();
+    } else {
+      setSyncPill(s.LastSyncUtc ? '空闲' : '从未同步', s.LastSyncUtc ? '' : 'bad');
+      document.getElementById('tabSyncDot').style.display = 'none';
+      document.getElementById('btnSyncStart').disabled = false;
+      document.getElementById('btnSyncStop').disabled = true;
+      syncPollStop();
+      if (s.LastSyncUtc) document.getElementById('syncBarWrap').style.display = 'none';
+    }
+
+    document.getElementById('syncSummary').textContent =
+      s.LastSyncSummary || (running ? '正在同步中…' : '还没有同步记录');
+    document.getElementById('syncSummary').className =
+      s.LastSyncSummary ? '' : 'empty';
+    document.getElementById('syncLastErr').textContent =
+      s.LastError ? ('最近错误：' + s.LastError) : '';
+  }).catch(function (e) {
+    setSyncPill('接口异常', 'bad');
+    document.getElementById('syncStage').textContent = String(e);
+    syncPollStop();
+  });
+}
+
+function startSync() {
+  var b = document.getElementById('btnSyncStart');
+  b.disabled = true;
+  b.textContent = '正在触发…';
+  api('api/emby/sync', { method: 'POST' }).then(function (d) {
+    if (!d.ok) { toast(d.msg || '触发失败', 'bad'); return; }
+    var r = d.result || {};
+    if (r.Success === false) toast(r.Message || '已有同步在运行', 'bad');
+    else toast('同步已开始，进度会自动刷新', 'ok');
+    return refreshSyncStatus();
+  }).catch(function (e) {
+    toast('触发失败: ' + e, 'bad');
+  }).then(function () {
+    b.textContent = '▶ 开始同步';
+    b.disabled = false;
+  });
+}
+
+function stopSync() {
+  var b = document.getElementById('btnSyncStop');
+  b.disabled = true;
+  api('api/emby/sync/stop', { method: 'POST' }).then(function (d) {
+    if (!d.ok) { toast(d.msg || '停止失败', 'bad'); return; }
+    toast('已请求停止', 'ok');
+    return refreshSyncStatus();
+  }).catch(function (e) {
+    toast('停止失败: ' + e, 'bad');
+  }).then(function () { b.disabled = false; });
 }
 
 // ══════════ 操作记录 ══════════
