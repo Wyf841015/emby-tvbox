@@ -1,5 +1,16 @@
 #!/bin/bash
 # TVBox 中转 —— spider-hub 启动脚本
+#
+# 严格遵循 fnOS 应用生命周期约定（对照 netwatch / fnm3u8dl）：
+#   main start   启动
+#   main stop    停止
+#   main status  运行中 exit 0 / 已停止 exit 3
+#   其他参数     exit 1
+#
+# status 的退出码是 fnOS 判断"要不要启动"的唯一依据。
+# 之前写成 `status && echo running || echo stopped` 会让退出码恒为 0，
+# fnOS 认为进程已在运行 → 永不启动 → 网关连不到 socket → 502 Bad Gateway。
+
 LOG_FILE="${TRIM_PKGVAR}/info.log"
 PID_FILE="${TRIM_PKGVAR}/app.pid"
 APP="${TRIM_APPDEST}"
@@ -11,58 +22,86 @@ export TRM_PKGVAR="${TRIM_PKGVAR}"
 
 log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"; }
 
-# 优先用内置 JRE，其次系统 java
 JAVA="${APP}/ui/jre/bin/java"
 [ -x "$JAVA" ] || JAVA="$(command -v java 2>/dev/null)"
-if [ -z "$JAVA" ] || [ ! -x "$JAVA" ]; then
-    log_msg "ERROR: 找不到 java（内置 JRE 缺失，系统也没有）"
-    exit 1
-fi
 
-SPIDER_JAR="$(find "${APP}/ui/spiders" -maxdepth 1 -name '*.jar' 2>/dev/null | head -1)"
+status() {
+    if [ -f "${PID_FILE}" ]; then
+        pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+        if [ -n "$pid" ] && kill -0 "${pid}" 2>/dev/null; then
+            return 0
+        fi
+        rm -f "${PID_FILE}"
+    fi
+    return 1
+}
 
 start_process() {
-    if status; then return 0; fi
-    log_msg "Starting (java=$JAVA, spider=${SPIDER_JAR:-none})"
-    # -Xverify:none: dex2jar 生成的字节码过不了 JVM 校验（VerifyError）
-    nohup "$JAVA" -Xverify:none -Xmx512m \
-        -Dfile.encoding=UTF-8 \
-        -cp "${APP}/ui/hub.jar:${APP}/ui/lib/*" \
-        hub.Hub \
-        --port "${PORT}" \
-        --socket "${SOCK}" \
-        --prefix "/app/tvboxhub" \
-        --config "${TRIM_PKGVAR}/hub.json" \
-        --jar-dir "${APP}/ui/lib" \
-        --plugin-dll "${APP}/ui/plugin/TvBox.dll" \
-        --ui-dir "${APP}/ui" \
-        ${SPIDER_JAR:+--spider-jar "$SPIDER_JAR"} \
-        >> "${LOG_FILE}" 2>&1 &
-    echo $! > "${PID_FILE}"
-    sleep 2
-    if status; then log_msg "Started ok (pid=$(cat ${PID_FILE}))"; else log_msg "ERROR: 启动失败，看上面的日志"; fi
+    if status; then
+        log_msg "already running (pid=$(cat "${PID_FILE}"))"
+        return 0
+    fi
+
+    if [ -z "$JAVA" ] || [ ! -x "$JAVA" ]; then
+        log_msg "ERROR: 找不到 java（内置 JRE 缺失，系统也没有）"
+        return 1
+    fi
+
+    SPIDER_JAR="$(find "${APP}/ui/spiders" -maxdepth 1 -name '*.jar' 2>/dev/null | head -1)"
+    log_msg "Starting (java=${JAVA}, spider=${SPIDER_JAR:-none})"
+
+    # -Xverify:none 必带：dex2jar 生成的字节码过不了 JVM 校验（VerifyError）
+    bash -c "'${JAVA}' -Xverify:none -Xmx512m -Dfile.encoding=UTF-8 -cp '${APP}/ui/hub.jar:${APP}/ui/lib/*' hub.Hub --port ${PORT} --socket '${SOCK}' --prefix /app/tvboxhub --config '${TRIM_PKGVAR}/hub.json' --jar-dir '${APP}/ui/lib' --plugin-dll '${APP}/ui/plugin/TvBox.dll' --ui-dir '${APP}/ui' ${SPIDER_JAR:+--spider-jar '$SPIDER_JAR'}" >> "${LOG_FILE}" 2>&1 &
+
+    pid=$!
+    printf "%s" "$pid" > "${PID_FILE}"
+    log_msg "pid=$pid"
+
+    # 等 socket 出现（最多 15 秒），确认真的起得来
+    local count=0
+    while [ ! -S "${SOCK}" ] && [ $count -lt 15 ]; do
+        sleep 1
+        count=$((count + 1))
+        if ! kill -0 "$pid" 2>/dev/null; then
+            log_msg "ERROR: 进程已退出，看上面的日志"
+            rm -f "${PID_FILE}"
+            return 1
+        fi
+    done
+    if [ -S "${SOCK}" ]; then
+        log_msg "socket ready after ${count}s"
+    else
+        log_msg "WARNING: 15 秒内 socket 未出现"
+    fi
+    return 0
 }
 
 stop_process() {
+    log_msg "Stopping process ..."
     if [ -f "${PID_FILE}" ]; then
-        PID=$(cat "${PID_FILE}")
-        kill "$PID" 2>/dev/null
-        sleep 1
-        kill -9 "$PID" 2>/dev/null
+        pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+        if [ -n "$pid" ] && kill -0 "${pid}" 2>/dev/null; then
+            log_msg "send TERM to PID:${pid}"
+            kill -TERM "${pid}" 2>/dev/null
+            local count=0
+            while kill -0 "${pid}" 2>/dev/null && [ $count -lt 10 ]; do
+                sleep 1; count=$((count + 1))
+            done
+            if kill -0 "${pid}" 2>/dev/null; then
+                log_msg "send KILL to PID:${pid}"
+                kill -KILL "${pid}" 2>/dev/null
+            fi
+        fi
         rm -f "${PID_FILE}"
-        log_msg "Stopped"
     fi
     rm -f "${SOCK}"
-}
-
-status() {
-    [ -f "${PID_FILE}" ] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null
+    return 0
 }
 
 case "$1" in
-    start)   start_process ;;
-    stop)    stop_process ;;
-    restart) stop_process; start_process ;;
-    status)  status && echo "running" || echo "stopped" ;;
-    *)       start_process ;;
+start)   start_process ;;
+stop)    stop_process ;;
+status)  if status; then exit 0; else exit 3; fi ;;
+restart) stop_process; start_process ;;
+*)       exit 1 ;;
 esac

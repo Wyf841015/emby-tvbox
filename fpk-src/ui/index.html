@@ -135,6 +135,9 @@
       <button onclick="uninstallPlugin()">卸载插件</button>
       <span class="hint" id="pluginHint" style="margin:0"></span>
     </div>
+    <div class="hint" style="margin-top:10px">
+      插件连接的 hub 地址：<code id="hubAddr">—</code>（安装时自动写入插件配置）
+    </div>
     <div class="hint">
       安装会把 <code>TvBox.dll</code> 复制到 <code>&lt;Emby数据目录&gt;/plugins/</code>，
       并写好插件配置（配置地址 + hub 地址 + 输出目录），**装完重启一次 Emby 即可**。
@@ -168,6 +171,7 @@
 <script>
 var sites = [];
 var currentFilter = 'all';
+var hubInfo = { tcpPort: 8098 };
 
 function api(path, opt) {
   return fetch(path, opt).then(function (r) { return r.json(); });
@@ -196,6 +200,11 @@ function status() {
     document.getElementById('kOk').textContent = d.stats.ok;
     document.getElementById('kBad').textContent = d.stats.unknown;
     document.getElementById('kUptime').textContent = fmtUptime(d.uptimeSec);
+    if (d.tcpPort) { hubInfo.tcpPort = d.tcpPort; }
+    var hubEl = document.getElementById('hubAddr');
+    if (hubEl && d.tcpPort) {
+      hubEl.textContent = 'http://' + location.hostname + ':' + d.tcpPort;
+    }
     if (d.configUrl && !document.getElementById('configUrl').value) {
       document.getElementById('configUrl').value = d.configUrl;
     }
@@ -394,7 +403,7 @@ function installPlugin() {
       programdata: pd,
       outputRoot: out,
       configUrl: document.getElementById('configUrl').value.trim(),
-      hubUrl: location.origin
+      hubUrl: location.protocol + '//' + location.hostname + ':' + hubInfo.tcpPort
     })
   }).then(function (d) {
     if (d.ok) {

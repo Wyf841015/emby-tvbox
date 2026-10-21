@@ -49,6 +49,7 @@ public class Hub {
     static Path pluginDll;      // TvBox.dll（安装包里带的）
     static Path uiDir;          // Web 界面目录
     static int tcpPort = 8098;  // Unix 前端的反代目标
+    static boolean tcpOk = false;
 
     public static void main(String[] args) throws Exception {
         int port = 8098;
@@ -109,11 +110,25 @@ public class Hub {
             }
         }
 
-        HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
-        server.createContext("/", Hub::handle);
-        server.setExecutor(Executors.newFixedThreadPool(16));
-        server.start();
-        System.out.println("TCP 监听: http://0.0.0.0:" + port + "/");
+        // TCP 绑定失败绝不能弄死进程：fnOS 的正门是 Unix socket，
+        // 端口被占（比如残留实例）时如果直接抛异常退出，socket 也不会建，
+        // 网关就会报 502 Bad Gateway。这里顺延端口，实在不行也继续跑。
+        for (int i = 0; i < 10 && unix == null; i++) {
+            int tryPort = port + i;
+            try {
+                HttpServer server = HttpServer.create(new InetSocketAddress(tryPort), 0);
+                server.createContext("/", Hub::handle);
+                server.setExecutor(Executors.newFixedThreadPool(16));
+                server.start();
+                tcpPort = tryPort;
+                tcpOk = true;
+                System.out.println("TCP 监听: http://0.0.0.0:" + tryPort + "/" + (i > 0 ? "（端口顺延）" : ""));
+                break;
+            } catch (Exception e) {
+                System.out.println("TCP 端口 " + tryPort + " 不可用: " + e.getMessage());
+            }
+        }
+        if (!tcpOk) System.out.println("WARNING: TCP 全部端口绑定失败，仅 Unix socket 可用");
 
         // Unix socket 前端：fnOS 网关只认 /var/apps/<app>/target/<app>.sock
         // 实现方式是反向代理到本地 TCP 端口，避免重构路由
@@ -181,6 +196,8 @@ public class Hub {
                 m.put("stats", pool.stats());
                 m.put("loadErrors", pool.loadErrors());
                 m.put("javaVersion", System.getProperty("java.version"));
+                m.put("tcpPort", tcpPort);
+                m.put("tcpOk", tcpOk);
                 sendJson(ex, 200, m);
                 return;
             }
