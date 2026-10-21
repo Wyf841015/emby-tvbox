@@ -371,6 +371,18 @@ namespace TvBox.Plugin.Core
 
                         if (line.Episodes.Count > 1)
                         {
+                            if (cfg.VerifyPlayUrl)
+                            {
+                                var firstEp = line.Episodes[0]?.Url;
+                                var (pok, why) = await client.VerifyPlayableAsync(firstEp, ct).ConfigureAwait(false);
+                                if (!pok)
+                                {
+                                    summary.Skipped++; Update(p => p.ItemsSkipped++);
+                                    _log("     [" + (item.Name ?? item.Id) + "] 跳过：" + line.Episodes.Count + " 集但首集不可用（" + why + "）");
+                                    if (cfg.RequestDelayMs > 0) await Task.Delay(cfg.RequestDelayMs, ct).ConfigureAwait(false);
+                                    continue;
+                                }
+                            }
                             var outs = writer.WriteSeries(name, detail, line);
                             foreach (var o in outs) if (!string.IsNullOrEmpty(o.Path)) keep.Add(o.Path);
                             int added = outs.Count(o => o.Created || o.Updated);
@@ -381,6 +393,18 @@ namespace TvBox.Plugin.Core
                         }
                         else
                         {
+                            var epUrl = line.Episodes[0]?.Url;
+                            if (cfg.VerifyPlayUrl)
+                            {
+                                var (pok, why) = await client.VerifyPlayableAsync(epUrl, ct).ConfigureAwait(false);
+                                if (!pok)
+                                {
+                                    summary.Skipped++; Update(p => p.ItemsSkipped++);
+                                    _log("     [" + (item.Name ?? item.Id) + "] 跳过：播放地址不可用（" + why + "）");
+                                    if (cfg.RequestDelayMs > 0) await Task.Delay(cfg.RequestDelayMs, ct).ConfigureAwait(false);
+                                    continue;
+                                }
+                            }
                             var o = writer.WriteMovie(name, detail, line);
                             if (!string.IsNullOrEmpty(o.Path)) keep.Add(o.Path);
                             if (o.Created || o.Updated)

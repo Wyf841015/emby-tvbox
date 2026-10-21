@@ -261,6 +261,93 @@ namespace TvBox.Plugin.Core
         }
 
         /// <summary>
+        /// 校验一个播放地址是不是真能用。
+        ///
+        /// 实测踩到的坑：某些源（123clouddisk 的 dy 类）播放列表里 651 个分片全是
+        /// .png 广告图，且全部 404 —— 直连和代理都放不出来。不校验就会写出一堆死文件。
+        ///
+        /// 校验策略：
+        ///   1. 先取（最多 128KB）内容，看状态码和 content-type
+        ///   2. 如果是 m3u8：抠出第一个真实分片再取一次，遇到图片后缀直接判死
+        ///   3. 分片要求状态 200/206，且不是 text/html、application/xml 这类错误页
+        /// </summary>
+        public async Task<(bool ok, string reason)> VerifyPlayableAsync(string url, CancellationToken ct)
+        {
+            if (string.IsNullOrWhiteSpace(url)) return (false, "地址为空");
+            try
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Get, url);
+                req.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 131071);
+                using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct)
+                                           .ConfigureAwait(false);
+                var status = (int)resp.StatusCode;
+                var ctType = resp.Content.Headers.ContentType?.MediaType ?? "";
+                if (status >= 400) return (false, "源返回 " + status);
+
+                bool isPlaylist = url.Contains(".m3u8", StringComparison.OrdinalIgnoreCase)
+                                  || ctType.Contains("mpegurl", StringComparison.OrdinalIgnoreCase);
+                if (!isPlaylist)
+                    return IsMediaContentType(ctType) || ctType.Length == 0
+                        ? (true, "")
+                        : (false, "content-type=" + ctType);
+
+                var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                if (!body.Contains("#EXTM3U")) return (false, "不是 m3u8");
+
+                // 取第一个非注释行（可能是子播放列表，也可能是分片）
+                string first = null;
+                foreach (var raw in body.Split('\n'))
+                {
+                    var line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("#")) continue;
+                    first = line; break;
+                }
+                if (first == null) return (false, "播放列表里没有分片");
+
+                // 图片后缀 = 广告/诱饵，源已经坏了
+                var probe = first.Split('?')[0].ToLowerInvariant();
+                foreach (var ext in new[] { ".png", ".jpg", ".jpeg", ".gif", ".webp" })
+                    if (probe.EndsWith(ext)) return (false, "分片是图片（" + ext + "），源已失效");
+
+                // 相对/绝对地址统一，再取一次第一个分片
+                string segUrl = first;
+                if (first.StartsWith("/") || !first.Contains("://"))
+                {
+                    var baseUri = new Uri(url);
+                    segUrl = new Uri(baseUri, first).ToString();
+                }
+                if (segUrl.Contains(".m3u8", StringComparison.OrdinalIgnoreCase))
+                    return (true, "");       // 子播放列表结构正常就认了，别再往下钻
+
+                using var req2 = new HttpRequestMessage(HttpMethod.Get, segUrl);
+                req2.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 8191);
+                using var resp2 = await _http.SendAsync(req2, HttpCompletionOption.ResponseHeadersRead, ct)
+                                            .ConfigureAwait(false);
+                int st2 = (int)resp2.StatusCode;
+                var t2 = resp2.Content.Headers.ContentType?.MediaType ?? "";
+                if (st2 >= 400) return (false, "首个分片返回 " + st2);
+                if (t2.Contains("html") || t2.Contains("xml"))
+                    return (false, "首个分片是错误页（" + t2 + "）");
+                return (true, "");
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                return (false, "校验异常: " + ex.GetType().Name);
+            }
+        }
+
+        private static bool IsMediaContentType(string ct)
+        {
+            if (string.IsNullOrEmpty(ct)) return true;
+            return ct.StartsWith("video/", StringComparison.OrdinalIgnoreCase)
+                || ct.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)
+                || ct.Contains("mpegurl", StringComparison.OrdinalIgnoreCase)
+                || ct.Contains("octet-stream", StringComparison.OrdinalIgnoreCase)
+                || ct.Contains("mp2t", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
         /// 很多 CMS/spider 的 vod_play_url 是相对路径（如 /play/50368-1-21.html），
         /// 原样写进 strm 播放器根本打不开。这里按站点采集地址的 scheme+host 补成绝对地址。
         /// </summary>

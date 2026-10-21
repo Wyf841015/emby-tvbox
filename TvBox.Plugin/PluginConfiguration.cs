@@ -57,6 +57,13 @@ namespace TvBox.Plugin
         /// </summary>
         public bool ExcludeCloudDrive { get; set; } = true;
 
+        /// <summary>
+        /// 写入 strm 前先校验播放地址是否真的能取到（默认 true）。
+        /// 很多源的播放列表里塞的是 .png 广告分片、或者干脆 404，
+        /// 不校验就会出现"文件生成了一堆，个个播不了"。
+        /// </summary>
+        public bool VerifyPlayUrl { get; set; } = true;
+
         /// <summary>STRM 输出根目录。留空则用 Emby 数据目录下的 tvbox/。</summary>
         public string OutputRoot { get; set; } = string.Empty;
 
