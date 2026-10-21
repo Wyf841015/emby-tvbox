@@ -360,8 +360,43 @@ public class EmbyManager {
                 configPath = cfg.toString();
             }
 
+            // 关键权限修复：
+            //   1) 本进程以 root 跑，写出来的 DLL/XML 是 root 所有；
+            //      而 Emby 以自己用户跑，之后【保存插件配置】会因无权限失败
+            //      （用户侧表现就是「插件界面无法保存」）。
+            //   2) OutputRoot 若是 root 建的，Emby 写 strm 同样会被拒。
+            // 这里统一把 owner/group 对齐到 plugins 目录的 owner（即 Emby 运行用户）。
+            String chownTo = null;
+            try {
+                chownTo = Files.getOwner(plugins).getName();
+                chownGroupLike(target, plugins);
+            } catch (Exception ignore) {
+            }
+
+            String outRoot = null;
+            if (configXml != null && !configXml.isBlank()) {
+                Path cfg = plugins.resolve("configurations").resolve("TvBox.xml");
+                adoptOwner(cfg, plugins);
+            }
+            adoptOwner(target, plugins);
+
+            // 准备输出目录并交给 Emby 用户
+            String or = extractTag(configXml, "OutputRoot");
+            if (or != null && or.startsWith("/")) {
+                try {
+                    Path outDir = Path.of(or);
+                    Files.createDirectories(outDir.resolve("movies"));
+                    Files.createDirectories(outDir.resolve("tv"));
+                    adoptOwnerRecursive(outDir, plugins, 2);
+                    outRoot = outDir.toString();
+                } catch (Exception ignore) {
+                }
+            }
+
             r.put("ok", true);
             r.put("dll", target.toString());
+            if (chownTo != null) r.put("owner", chownTo);
+            if (outRoot != null) r.put("outputPrepared", outRoot);
             r.put("size", Files.size(target));
             r.put("config", configPath);
             r.put("backup", backup);
@@ -569,6 +604,57 @@ public class EmbyManager {
         if (s.contains("://")) return null;
         if (s.contains("..")) return null;
         return s;
+    }
+
+    /** 从 XML 里抠一个标签值。 */
+    private static String extractTag(String xml, String tag) {
+        if (xml == null) return null;
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("<" + tag + ">(.*?)</" + tag + ">", java.util.regex.Pattern.DOTALL).matcher(xml);
+        return m.find() ? m.group(1).trim() : null;
+    }
+
+    /** 把 target 的 owner/group 对齐到 reference（一般是 plugins 目录）。 */
+    private static void adoptOwner(Path target, Path reference) {
+        try {
+            if (!Files.exists(target)) return;
+            Files.setOwner(target, Files.getOwner(reference));
+            try {
+                java.nio.file.attribute.GroupPrincipal g =
+                        Files.readAttributes(reference, java.nio.file.attribute.PosixFileAttributes.class)
+                             .group();
+                Files.getFileAttributeView(target, java.nio.file.attribute.PosixFileAttributeView.class)
+                     .setGroup(g);
+            } catch (Exception ignore) {
+            }
+            try {
+                Files.setPosixFilePermissions(target,
+                        java.nio.file.attribute.PosixFilePermissions.fromString("rw-rw-r--"));
+            } catch (Exception ignore) {
+            }
+        } catch (Exception ignore) {
+        }
+    }
+
+    /** 递归对齐目录 owner（限制深度，别把整个媒体库扫一遍）。 */
+    private static void adoptOwnerRecursive(Path dir, Path reference, int depth) {
+        adoptOwner(dir, reference);
+        try {
+            Files.setPosixFilePermissions(dir,
+                    java.nio.file.attribute.PosixFilePermissions.fromString("rwxrwxr-x"));
+        } catch (Exception ignore) {
+        }
+        if (depth <= 0) return;
+        try (DirectoryStream<Path> ds = Files.newDirectoryStream(dir)) {
+            for (Path c : ds) {
+                if (Files.isDirectory(c)) adoptOwnerRecursive(c, reference, depth - 1);
+            }
+        } catch (Exception ignore) {
+        }
+    }
+
+    private static void chownGroupLike(Path target, Path reference) {
+        adoptOwner(target, reference);
     }
 
     /** 先写同目录临时文件，再原子替换，避免打断正在使用这个文件的进程。 */

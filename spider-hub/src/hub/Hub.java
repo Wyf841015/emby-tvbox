@@ -468,6 +468,35 @@ public class Hub {
                 sendJson(ex, 200, m);
                 return;
             }
+            case "/api/emby/config": {
+                String base = embyBase();
+                if (base == null) { sendJson(ex, 200, fail("还没连上 Emby")); return; }
+                String body = readBody(ex);
+                if (body == null || body.isBlank()) { sendJson(ex, 200, fail("缺少配置内容")); return; }
+                long t0 = System.currentTimeMillis();
+                Map<String, Object> m = new LinkedHashMap<>();
+                try {
+                    // body 里可能是 {"SiteWhitelist":...} 也可能已经是带 Token 的完整对象；
+                    // 统一补一个 token 字段塞进去（Jackson 风格的简单拼装，不引库）。
+                    String payload = body.trim();
+                    if (payload.startsWith("{")) {
+                        payload = payload.substring(0, 1)
+                                + "\"Token\":\"" + embyToken() + "\"," + payload.substring(1);
+                    }
+                    String resp = embyPostJson(base + "/TvBox/Config", payload);
+                    Object parsed = SpiderPool.Json.parse(resp);
+                    m.put("ok", true);
+                    m.put("result", parsed);
+                    String msg = parsed instanceof Map ? str(((Map<?, ?>) parsed).get("Message")) : null;
+                    boolean okFlag = !(parsed instanceof Map) || !Boolean.FALSE.equals(((Map<?, ?>) parsed).get("Success"));
+                    record("保存同步范围", base, okFlag, msg == null ? "" : msg, System.currentTimeMillis() - t0);
+                } catch (Exception e) {
+                    m.put("ok", false);
+                    m.put("msg", "保存失败: " + explain(e));
+                }
+                sendJson(ex, 200, m);
+                return;
+            }
             case "/api/emby/sync/stop": {
                 String base = embyBase();
                 if (base == null) { sendJson(ex, 200, fail("还没连上 Emby")); return; }
@@ -773,6 +802,16 @@ public class Hub {
             }
         }
         return null;
+    }
+
+    /** 带 JSON body 的 POST（转发插件的配置更新）。 */
+    static String embyPostJson(String url, String json) throws Exception {
+        HttpRequest req = HttpRequest.newBuilder(URI.create(url))
+                .timeout(Duration.ofSeconds(30))
+                .header("Content-Type", "application/json; charset=utf-8")
+                .POST(HttpRequest.BodyPublishers.ofString(json, StandardCharsets.UTF_8))
+                .build();
+        return EMBY_HTTP.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)).body();
     }
 
     static String embyHttp(String method, String url) throws Exception {

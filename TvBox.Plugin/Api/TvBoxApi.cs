@@ -43,6 +43,21 @@ namespace TvBox.Plugin.Api
         public string Token { get; set; }
     }
 
+    /// <summary>同步范围配置：hub 的 Web 界面直接读写，不用进 Emby 后台。</summary>
+    [Unauthenticated]
+    [Route("/TvBox/Config", "POST", Summary = "更新同步范围（白名单/页数/并发等）")]
+    public class UpdateConfig : IReturn<SimpleResult>
+    {
+        public string Token { get; set; }
+        public string SiteWhitelist { get; set; }
+        public string SiteBlacklist { get; set; }
+        public int? MaxPagesPerCategory { get; set; }
+        public int? MaxItemsPerRun { get; set; }
+        public int? Concurrency { get; set; }
+        public int? TimeoutSeconds { get; set; }
+        public string OutputRoot { get; set; }
+    }
+
     [Unauthenticated]
     [Route("/TvBox/Probe", "GET", Summary = "探测单个站点的分类和条目数")]
     public class ProbeSite : IReturn<ProbeResult>
@@ -90,6 +105,15 @@ namespace TvBox.Plugin.Api
         public string OutputRoot { get; set; }
         public string LastSyncUtc { get; set; }
         public string LastSyncSummary { get; set; }
+
+        // 同步范围（hub 界面显示 + 编辑）
+        public string ConfigUrl { get; set; }
+        public string SiteWhitelist { get; set; }
+        public string SiteBlacklist { get; set; }
+        public int MaxPagesPerCategory { get; set; }
+        public int MaxItemsPerRun { get; set; }
+        public int Concurrency { get; set; }
+        public int TimeoutSeconds { get; set; }
     }
 
     public class SourceRow
@@ -175,6 +199,13 @@ namespace TvBox.Plugin.Api
                     OutputRoot = p.ResolveOutputRoot(),
                     LastSyncUtc = cfg.LastSyncUtc == DateTime.MinValue ? "" : cfg.LastSyncUtc.ToString("u"),
                     LastSyncSummary = cfg.LastSyncSummary,
+                    ConfigUrl = cfg.ConfigUrl,
+                    SiteWhitelist = cfg.SiteWhitelist,
+                    SiteBlacklist = cfg.SiteBlacklist,
+                    MaxPagesPerCategory = cfg.MaxPagesPerCategory,
+                    MaxItemsPerRun = cfg.MaxItemsPerRun,
+                    Concurrency = cfg.Concurrency,
+                    TimeoutSeconds = cfg.TimeoutSeconds,
                 };
             }
         }

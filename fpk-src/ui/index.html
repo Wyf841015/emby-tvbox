@@ -230,6 +230,25 @@
     </div>
 
     <div class="panel">
+      <h2>同步范围</h2>
+      <div class="hint" style="margin:0 0 10px">只同步这些站点（逗号分隔的站点 key 或名称片段）。留空 = 全部（慢且大量空转）。</div>
+      <div class="row" style="margin-bottom:10px">
+        <input type="text" id="cfgWhitelist" placeholder="Wn4k,Juying,急救教学,农民影视,Sao火,88看球" style="flex:1;min-width:260px">
+      </div>
+      <div class="row">
+        <label style="font-size:13px;color:var(--dim)">每分类页数
+          <input type="number" id="cfgPages" min="1" max="20" style="width:70px" value="3"></label>
+        <label style="font-size:13px;color:var(--dim)">最多条目
+          <input type="number" id="cfgMaxItems" min="0" style="width:90px" value="0"></label>
+        <label style="font-size:13px;color:var(--dim)">并发
+          <input type="number" id="cfgConc" min="1" max="20" style="width:70px" value="3"></label>
+        <button onclick="saveSyncScope()" id="btnScope">保存范围</button>
+        <button onclick="useKnownGood()">填入实测可用站点</button>
+      </div>
+      <div class="hint" id="scopeHint"></div>
+    </div>
+
+    <div class="panel">
       <h2>同步结果</h2>
       <div id="syncSummary" class="empty">还没有同步记录</div>
       <div class="hint" id="syncLastErr"></div>
@@ -806,6 +825,51 @@ function onLibPick(sel) {
 }
 
 
+
+var GOOD_SITES = 'Wn4k,Juying,急救教学,农民影视,Sao火,88看球';
+
+function useKnownGood() {
+  document.getElementById('cfgWhitelist').value = GOOD_SITES;
+  toast('已填入实测可用的 6 个站点，记得点「保存范围」', 'ok');
+}
+
+function fillScope(s) {
+  document.getElementById('cfgWhitelist').value = s.SiteWhitelist || '';
+  document.getElementById('cfgPages').value = s.MaxPagesPerCategory || 3;
+  document.getElementById('cfgMaxItems').value = s.MaxItemsPerRun || 0;
+  document.getElementById('cfgConc').value = s.Concurrency || 3;
+  var n = (s.SiteWhitelist || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean).length;
+  document.getElementById('scopeHint').textContent = n
+    ? '当前只同步 ' + n + ' 个站点'
+    : '当前同步全部站点（会非常慢）';
+}
+
+function saveSyncScope() {
+  var btn = document.getElementById('btnScope');
+  btn.disabled = true; btn.textContent = '保存中…';
+  var body = {
+    SiteWhitelist: document.getElementById('cfgWhitelist').value.trim(),
+    MaxPagesPerCategory: parseInt(document.getElementById('cfgPages').value, 10) || 3,
+    MaxItemsPerRun: parseInt(document.getElementById('cfgMaxItems').value, 10) || 0,
+    Concurrency: parseInt(document.getElementById('cfgConc').value, 10) || 3
+  };
+  api('api/emby/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }).then(function (d) {
+    if (!d.ok) { toast(d.msg || '保存失败', 'bad'); return; }
+    var r = d.result || {};
+    if (r.Success === false) toast(r.Message || '保存失败', 'bad');
+    else toast('已保存并生效', 'ok');
+    return refreshSyncStatus();
+  }).catch(function (e) {
+    toast('保存失败: ' + e, 'bad');
+  }).then(function () {
+    btn.disabled = false; btn.textContent = '保存范围';
+  });
+}
+
 // ══════════ 同步控制（直接驱动 Emby 里的插件）══════════
 
 var syncPoll = null;
@@ -870,6 +934,7 @@ function refreshSyncStatus() {
       if (s.LastSyncUtc) document.getElementById('syncBarWrap').style.display = 'none';
     }
 
+    fillScope(s);
     document.getElementById('syncSummary').textContent =
       s.LastSyncSummary || (running ? '正在同步中…' : '还没有同步记录');
     document.getElementById('syncSummary').className =
