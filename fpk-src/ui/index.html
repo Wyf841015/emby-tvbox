@@ -173,24 +173,61 @@ var sites = [];
 var currentFilter = 'all';
 var hubInfo = { tcpPort: 8098 };
 
-// 关键：一律用相对路径。
-// 通过 fnOS 网关访问时页面在 /app/tvboxhub/ 下，写死的 /api/xxx 会被解析到
-// https://nas/api/xxx（fnOS 主界面），返回 HTML → JSON 解析报
-// "Unexpected token '<'"。去掉前导斜杠交给浏览器按当前文档地址解析即可：
-//   网关  https://nas/app/tvboxhub/  → https://nas/app/tvboxhub/api/xxx
-//   直连  http://ip:8098/            → http://ip:8098/api/xxx
+// ── API 前缀自动探测 ──
+// fnOS 网关下页面可能落在这些位置，每种都要能活：
+//   /app/tvboxhub/   （标准）
+//   /app/tvboxhub    （没有尾斜杠 —— 相对路径会解析成 /app/api/xxx，打到 fnOS 主服务返回 "Not Found"）
+//   /app/            （某些 WebView 会把应用名截掉）
+//   直接 TCP 访问时是 /
+// 做法：列候选前缀，逐个试，谁返回真 JSON 就记住谁。
+var API_CANDIDATES = (function () {
+  var p = location.pathname || '/';
+  var list = [];
+  list.push(p.slice(-1) === '/' ? p : p + '/');        // 当前目录
+  list.push('/app/tvboxhub/');                          // 本应用的固定前缀
+  var i = p.lastIndexOf('/');
+  if (i > 0) list.push(p.slice(0, i + 1));              // 上一级
+  list.push('/app/');
+  list.push('/');
+  var seen = {};
+  return list.filter(function (x) { return x && !seen[x] && (seen[x] = 1); });
+})();
+var apiBase = null;   // 已验证可用的前缀
+
+function looksLikeHtml(t) {
+  var s = String(t || '').trim();
+  return s.charAt(0) === '<' || /^Not Found$/i.test(s) || /^404 page/i.test(s) || s === '';
+}
+
 function api(path, opt) {
-  var url = path.replace(/^\/+/, '');
-  return fetch(url, opt).then(function (r) {
-    return r.text().then(function (txt) {
-      var t = txt.trim();
-      if (t.charAt(0) === '<') {
-        throw new Error('接口返回了 HTML（多半是路径没走应用前缀）：' + t.slice(0, 60));
-      }
-      try { return JSON.parse(t); }
-      catch (e) { throw new Error('接口返回非 JSON：' + t.slice(0, 60)); }
+  var rel = path.replace(/^\/+/, '');
+  var tries = apiBase ? [apiBase] : API_CANDIDATES.slice();
+  if (apiBase && API_CANDIDATES.indexOf(apiBase) > 0) {
+    // 已确定前缀时也保留其它候选做兜底（例如应用被换端口）
+    tries = tries.concat(API_CANDIDATES);
+  }
+  var idx = 0, lastErr = null;
+
+  function attempt() {
+    if (idx >= tries.length) {
+      return Promise.reject(lastErr || new Error('所有候选前缀都取不到接口'));
+    }
+    var base = tries[idx++];
+    return fetch(base + rel, opt).then(function (r) {
+      return r.text().then(function (t) {
+        if (looksLikeHtml(t)) throw new Error('非 JSON: ' + String(t).trim().slice(0, 40));
+        var j;
+        try { j = JSON.parse(t); }
+        catch (e) { throw new Error('非 JSON: ' + String(t).trim().slice(0, 40)); }
+        apiBase = base;
+        return j;
+      });
+    }).catch(function (e) {
+      lastErr = e;
+      return attempt();
     });
-  });
+  }
+  return attempt();
 }
 
 function toast(msg, kind) {
@@ -447,6 +484,9 @@ function uninstallPlugin() {
 function saveConfig() {
   var url = document.getElementById('configUrl').value.trim();
   if (!url) { toast('先填配置地址', 'bad'); return; }
+  var btn = document.querySelector('button.primary[onclick*="saveConfig"]');
+  if (btn) { btn.disabled = true; btn.textContent = '正在加载…'; }
+  toast('正在加载（GitHub 直连超时约 5 秒后会走镜像，请稍等）', '');
   api('/api/save', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -456,13 +496,20 @@ function saveConfig() {
   }).then(function (d) {
     toast(d.msg || '已加载', d.ok ? 'ok' : 'bad');
     loadSites(); status();
-  }).catch(function (e) { toast('失败: ' + e, 'bad'); });
+  }).catch(function (e) {
+    toast('失败：' + (e && e.message ? e.message : e), 'bad');
+  }).then(function () {
+    if (btn) { btn.disabled = false; btn.textContent = '保存并加载'; }
+  });
 }
 
 function reload() {
+  toast('正在重新加载…', '');
   api('/api/reload', { method: 'POST' }).then(function (d) {
     toast(d.msg || '已重新加载', d.ok ? 'ok' : 'bad');
     loadSites(); status();
+  }).catch(function (e) {
+    toast('失败：' + (e && e.message ? e.message : e), 'bad');
   });
 }
 
