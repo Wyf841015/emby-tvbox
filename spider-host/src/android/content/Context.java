@@ -10,5 +10,9 @@ public class Context {
     public java.io.File getCacheDir() { return new java.io.File(System.getProperty("java.io.tmpdir")); }
     public java.io.File getFilesDir() { return getCacheDir(); }
     public ClassLoader getClassLoader() { return Context.class.getClassLoader(); }
-    public Object getSharedPreferences(String n, int m) { return null; }
+    private static final java.util.Map<String, SharedPreferences> PREFS = new java.util.concurrent.ConcurrentHashMap<>();
+
+    public SharedPreferences getSharedPreferences(String n, int m) {
+        return PREFS.computeIfAbsent(String.valueOf(n), k -> new SharedPreferences.Impl());
+    }
 }

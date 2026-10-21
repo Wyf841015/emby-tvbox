@@ -320,6 +320,94 @@ namespace TvBox.Plugin.Core
             return false;
         }
 
+        /// <summary>
+        /// 分类为空时的降级同步：直接按 ac=videolist&pg=1..N 拉列表。
+        /// 实测很多源（尤其接 spider-hub 的）class 数组是空的，但列表本身是好的，
+        /// 以前这里直接跳过整站 → 同步"成功"但磁盘 0 个文件。
+        /// </summary>
+        private async Task<int> SyncSiteWithoutCategoriesAsync(
+            CmsClient client, TvBoxSite site, PluginConfiguration cfg,
+            StrmWriter writer, HashSet<string> keep, CancellationToken ct, SyncSummary summary)
+        {
+            int written = 0, seen = 0;
+            int maxPages = Math.Max(1, cfg.MaxPagesPerCategory);
+            var name = site.DisplayName ?? site.Name;
+
+            for (int page = 1; page <= maxPages; page++)
+            {
+                ct.ThrowIfCancellationRequested();
+                PagedResult res;
+                try
+                {
+                    res = await client.GetListAsync(site, null, page, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    _log("     第 " + page + " 页失败: " + ex.Message);
+                    summary.Errors++;
+                    break;
+                }
+                if (res?.Items == null || res.Items.Count == 0) break;
+
+                foreach (var item in res.Items)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (cfg.MaxItemsPerRun > 0 && summary.Items >= cfg.MaxItemsPerRun) break;
+                    if (string.IsNullOrWhiteSpace(item.Id)) continue;
+                    seen++;
+                    try
+                    {
+                        var details = await client.GetDetailAsync(site, new[] { item.Id }, ct).ConfigureAwait(false);
+                        var detail = details != null && details.Count > 0 ? details[0] : null;
+                        if (detail == null) { summary.Skipped++; Update(p => p.ItemsSkipped++); continue; }
+
+                        var line = detail.Lines != null && detail.Lines.Count > 0 ? detail.Lines[0] : null;
+                        if (line?.Episodes == null || line.Episodes.Count == 0)
+                        {
+                            summary.Skipped++; Update(p => p.ItemsSkipped++);
+                            continue;
+                        }
+
+                        if (line.Episodes.Count > 1)
+                        {
+                            var outs = writer.WriteSeries(name, detail, line);
+                            foreach (var o in outs) if (!string.IsNullOrEmpty(o.Path)) keep.Add(o.Path);
+                            int added = outs.Count(o => o.Created || o.Updated);
+                            summary.Episodes += added;
+                            summary.Items++;
+                            Update(p => { p.ItemsWritten++; p.EpisodesWritten += added; });
+                            if (added > 0) written++;
+                        }
+                        else
+                        {
+                            var o = writer.WriteMovie(name, detail, line);
+                            if (!string.IsNullOrEmpty(o.Path)) keep.Add(o.Path);
+                            if (o.Created || o.Updated)
+                            {
+                                summary.Items++;
+                                Update(p => { p.ItemsWritten++; p.EpisodesWritten++; });
+                                written++;
+                            }
+                            else { summary.Skipped++; Update(p => p.ItemsSkipped++); }
+                        }
+                        if (!string.IsNullOrEmpty(writer.LastError)) _lastWriteError = writer.LastError;
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex)
+                    {
+                        summary.Errors++;
+                        _log("     [" + (item.Name ?? item.Id) + "] 失败: " + ex.Message);
+                    }
+                    if (cfg.RequestDelayMs > 0) await Task.Delay(cfg.RequestDelayMs, ct).ConfigureAwait(false);
+                }
+                if (cfg.MaxItemsPerRun > 0 && summary.Items >= cfg.MaxItemsPerRun) break;
+                if (res.Items.Count < 20) break;
+            }
+            _log("     没分类但直接拉到 " + seen + " 条，写入 " + written + " 条");
+            return written;
+        }
+
         public static IEnumerable<TvBoxSite> SelectSites(IEnumerable<TvBoxSite> all, PluginConfiguration cfg)
             => SelectSites(all, cfg, null);
 
@@ -379,8 +467,12 @@ namespace TvBox.Plugin.Core
                 var cats = await client.GetCategoriesAsync(site, ct).ConfigureAwait(false);
                 if (cats.Count == 0)
                 {
-                    _log("     拿不到分类，跳过");
-                    return 0;
+                    // 很多源（尤其接 spider-hub 的）class 数组是空的，但 ac=videolist&pg=1
+                    // 直接就能返回条目。以前这里直接跳过整站，导致"同步成功但 0 文件"。
+                    // 现在降级成「不按分类，直接拉前 N 页」。
+                    _log("     没有分类，改为直接拉 videolist 前 " + Math.Max(1, cfg.MaxPagesPerCategory) + " 页");
+                    return await SyncSiteWithoutCategoriesAsync(client, site, cfg, writer, keep, ct, summary)
+                                 .ConfigureAwait(false);
                 }
 
                 int written = 0;

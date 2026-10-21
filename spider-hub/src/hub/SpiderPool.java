@@ -129,6 +129,74 @@ public class SpiderPool {
         }
         // 父加载器用系统 classpath，保证基类和 android stub 能解析到
         spiderLoader = new URLClassLoader(urls.toArray(new URL[0]), SpiderPool.class.getClassLoader());
+        initCatvodContext(spiderLoader);
+    }
+
+    /**
+     * 把我们的 android Context stub 交给 catvod 的 Init。
+     *
+     * Init.context() 读的是它自己的静态字段，没人调 Init.init(ctx) 就永远是 null。
+     * 线上表现：/v/<key>?ac=list 有列表，但 ac=detail 直接
+     *   NullPointerException: Cannot invoke "android.content.Context.getPackageName()"
+     *   because the return value of "com.github.catvod.spider.Init.context()" is null
+     * → 详情拿不到播放地址 → 同步写不出任何一个 strm 文件。
+     *
+     * 用反射调，避免编译期强依赖（不同 jar 的 Init 签名可能有差异）。
+     */
+    private static volatile boolean catvodContextReady = false;
+
+    static synchronized void initCatvodContext(ClassLoader loader) {
+        if (catvodContextReady) return;
+        android.app.Application app = android.app.Application.getInstance();
+        try {
+            Class<?> initCls = Class.forName("com.github.catvod.spider.Init", true, loader);
+
+            // 先试官方入口
+            try {
+                initCls.getMethod("init", android.content.Context.class).invoke(null, app);
+            } catch (Throwable ignore) {
+            }
+
+            // Init.context() 的实现是：get().c —— 而 c 只在 InitCheck.check(ctx) 通过时才会被
+            // init() 赋值。我们的 android 桩过不了那个 check，所以这里直接把字段塞进去。
+            if (readInitContext(initCls) == null) {
+                Object inst = initCls.getMethod("get").invoke(null);
+                System.out.println("[spider] Init.get() = " + inst);
+                for (java.lang.reflect.Field f : initCls.getDeclaredFields()) {
+                    System.out.println("[spider]   字段 " + f.getName() + " : " + f.getType().getName());
+                }
+                for (String fname : new String[]{"c"}) {
+                    try {
+                        java.lang.reflect.Field f = initCls.getDeclaredField(fname);
+                        System.out.println("[spider] 目标字段类型=" + f.getType().getName()
+                                + " 桩类型=" + app.getClass().getName()
+                                + " 同类型=" + (f.getType() == app.getClass()));
+                        f.setAccessible(true);
+                        f.set(inst, app);
+                        System.out.println("[spider] 已写入 Init." + fname);
+                    } catch (Throwable inner) {
+                        System.out.println("[spider] 写 " + fname + " 失败: " + inner);
+                    }
+                }
+            }
+
+            Object got = readInitContext(initCls);
+            catvodContextReady = got != null;
+            System.out.println(catvodContextReady
+                    ? "[spider] Init.context() 就绪，detailContent 可用"
+                    : "[spider] Init.context() 仍然为 null —— 详情解析会失败");
+        } catch (Throwable t) {
+            System.out.println("[spider] 注入 Context 失败（详情可能失败）: " + t);
+        }
+    }
+
+    /** 反射调 Init.context() 看当前是否为 null。 */
+    private static Object readInitContext(Class<?> initCls) {
+        try {
+            return initCls.getMethod("context").invoke(null);
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     /** 取（或创建）一个 spider 实例。线程安全：同一 key 只创建一个。 */

@@ -209,7 +209,10 @@ namespace TvBox.Plugin.Core
             if (string.IsNullOrEmpty(idList)) return new List<VodItem>();
             var url = BuildUrl(site.Api, "ac=detail&ids=" + Uri.EscapeDataString(idList));
             var body = await GetStringAsync(url, ct).ConfigureAwait(false);
-            return ParseDetail(body);
+            var items = ParseDetail(body);
+            // 播放地址常常是相对路径，这里按站点 scheme+host 绝对化（否则 strm 播不了）
+            foreach (var it in items) ResolveRelativePlayUrls(it, site.Api);
+            return items;
         }
 
         public static List<VodItem> ParseDetail(string body)
@@ -255,6 +258,39 @@ namespace TvBox.Plugin.Core
             var playUrl = GetStringFlexible(el, "vod_play_url", "play_url");
             item.Lines = PlayUrlParser.Parse(playFrom, playUrl);
             return item;
+        }
+
+        /// <summary>
+        /// 很多 CMS/spider 的 vod_play_url 是相对路径（如 /play/50368-1-21.html），
+        /// 原样写进 strm 播放器根本打不开。这里按站点采集地址的 scheme+host 补成绝对地址。
+        /// </summary>
+        private static void ResolveRelativePlayUrls(VodItem item, string apiUrl)
+        {
+            if (item?.Lines == null || string.IsNullOrWhiteSpace(apiUrl)) return;
+            string origin = null;
+            try
+            {
+                var u = new Uri(apiUrl);
+                origin = u.GetLeftPart(UriPartial.Authority);   // https://host
+            }
+            catch { return; }
+            if (string.IsNullOrEmpty(origin)) return;
+
+            foreach (var line in item.Lines)
+            {
+                if (line?.Episodes == null) continue;
+                foreach (var ep in line.Episodes)
+                {
+                    var u = ep?.Url;
+                    if (string.IsNullOrWhiteSpace(u)) continue;
+                    if (u.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                        u.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (u.StartsWith("//")) { ep.Url = "https:" + u; continue; }
+                    if (u.StartsWith("/")) { ep.Url = origin + u; continue; }
+                    // 形如 play/123.html —— 按站点根目录拼
+                    if (!u.Contains("://")) ep.Url = origin + "/" + u.TrimStart('.', '/');
+                }
+            }
         }
 
         // ───────────────────────── 解析：XML ─────────────────────────

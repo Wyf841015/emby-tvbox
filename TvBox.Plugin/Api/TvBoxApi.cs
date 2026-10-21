@@ -715,9 +715,38 @@ namespace TvBox.Plugin.Api
 
                 var abs = ToAbsolute(line, baseUri);
                 if (abs == null) { sb.Append(line).Append('\n'); continue; }
+
+                // 有些源的播放列表里混了 .png/.jpg 广告图，ffmpeg 的 HLS 解复用器
+                // 遇到不在 allowed_segment_extensions 里的条目会直接拒掉整个列表
+                //（"Error opening input: Invalid data found when processing input"）。
+                // 这些图本来也不是视频分片，直接丢掉。
+                if (IsNonMediaSegment(abs)) continue;
+
                 sb.Append(BuildProxyPath(abs)).Append('\n');
             }
             return sb.ToString();
+        }
+
+        /// <summary>播放列表里出现的图片/字体等非媒体条目，丢了不影响播放。</summary>
+        private static bool IsNonMediaSegment(string url)
+        {
+            try
+            {
+                var path = new Uri(url).AbsolutePath;
+                var dot = path.LastIndexOf('.');
+                if (dot < 0) return false;
+                var ext = path.Substring(dot + 1).ToLowerInvariant();
+                switch (ext)
+                {
+                    case "png": case "jpg": case "jpeg": case "gif":
+                    case "webp": case "bmp": case "svg": case "ico":
+                    case "css": case "js": case "html": case "htm": case "json":
+                        return true;
+                    default:
+                        return false;
+                }
+            }
+            catch { return false; }
         }
 
         private static string RewriteUriAttribute(string line, Uri baseUri)
