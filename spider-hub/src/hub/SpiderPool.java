@@ -31,6 +31,12 @@ public class SpiderPool {
         public String api;
         public String ext = "";
         public String cls;          // com.github.catvod.spider.Xxx
+        /**
+         * 网盘类源。判定靠继承链：catvod 里所有网盘实现都继承
+         * com.github.catvod.spider.Pan —— 它们能把分享页列出来，
+         * 但把分享链接换成直链需要夸克/115/迅雷等账号，没有账号就永远播不了。
+         */
+        public boolean netdisk;
         public volatile String lastError;
         public volatile long lastOk;
 
@@ -41,6 +47,7 @@ public class SpiderPool {
             m.put("type", type);
             m.put("api", api);
             m.put("class", cls);
+            m.put("netdisk", netdisk);
             m.put("ext", ext.length() > 200 ? ext.substring(0, 200) + "…" : ext);
             m.put("ok", lastOk > 0 && lastError == null);
             m.put("lastError", lastError);
@@ -75,10 +82,14 @@ public class SpiderPool {
      * @param json 配置内容（支持多仓 urls / base64 由调用方先处理）
      * @param baseUrl 用于拼接相对 api
      */
+    /** 是否允许访问网盘类源（默认 false，可在 hub 界面打开）。 */
+    public volatile boolean allowNetdisk = false;
+
     public void loadFromConfig(String json, String baseUrl) throws Exception {
         sites.clear();
         instances.clear();
         loadErrors.clear();
+        netdiskCount = 0;
 
         Object root = Json.parse(json);
         if (!(root instanceof Map)) throw new IllegalArgumentException("配置不是 JSON 对象");
@@ -104,7 +115,9 @@ public class SpiderPool {
             // 只收 csp_ 开头的 spider 站点
             if (site.type != 3 || site.api == null || !site.api.startsWith("csp_")) continue;
             site.cls = "com.github.catvod.spider." + site.api.substring(4);
+            site.netdisk = isNetdiskClass(site.cls);
             sites.put(site.key, site);
+            if (site.netdisk) netdiskCount++;
         }
     }
 
@@ -119,9 +132,48 @@ public class SpiderPool {
     }
 
     /** 取（或创建）一个 spider 实例。线程安全：同一 key 只创建一个。 */
+    /** 载入时统计的网盘源数量（给界面显示「已排除 N 个」）。 */
+    public volatile int netdiskCount = 0;
+
+    /**
+     * 判断一个 spider 类是不是网盘类：沿继承链找 com.github.catvod.spider.Pan。
+     * 比按类名/站名猜准得多 —— 实测 com.github.catvod.spider.Wn4k、Juying、HJZhenCai
+     * 这些名字里没有 Pan 的，实际都 extends Pan。
+     */
+    public boolean isNetdiskClass(String cls) {
+        try {
+            Class<?> c = Class.forName(cls, false, spiderLoader);
+            for (Class<?> k = c; k != null; k = k.getSuperclass()) {
+                if (k.getName().equals("com.github.catvod.spider.Pan")) return true;
+            }
+            return false;
+        } catch (Throwable t) {
+            // 类加载不了（缺类/stub 不全）→ 没法判定，按非网盘处理，留给探测去发现
+            return false;
+        }
+    }
+
+    /** 仅按名字兜底（插件侧拿不到继承链时也用这套规则）。 */
+    public static boolean looksLikeNetdisk(String cls, String api, String name) {
+        String c = cls == null ? "" : cls;
+        String a = api == null ? "" : api;
+        String n = name == null ? "" : name;
+        if (a.startsWith("csp_Pan")) return true;
+        if (c.contains(".Pan")) return true;
+        for (String k : new String[]{"网盘", "云盘", "盘搜", "搜盘", "夸克", "115", "迅雷", "百度盘",
+                "天翼", "阿里云", "UC网盘", "123云盘", "光鸭", "分享"}) {
+            if (n.contains(k)) return true;
+        }
+        return false;
+    }
+
     public Spider get(String key) throws Exception {
         Site site = sites.get(key);
         if (site == null) throw new IllegalArgumentException("没有这个站点: " + key);
+        if (site.netdisk && !allowNetdisk) {
+            // 明确告诉调用方原因，别让它以为站点坏了
+            throw new IllegalArgumentException("网盘类源已排除（" + site.name + "：需要夸克/115/迅雷等账号才能出直链）");
+        }
 
         Spider cached = instances.get(key);
         if (cached != null) return cached;
@@ -199,6 +251,7 @@ public class SpiderPool {
     public Map<String, Object> stats() {
         int ok = 0, bad = 0;
         for (Site s : sites.values()) {
+            if (s.netdisk) continue;                    // 网盘类不参与可用性统计
             if (s.lastOk > 0 && s.lastError == null) ok++;
             else bad++;
         }
@@ -206,6 +259,8 @@ public class SpiderPool {
         m.put("total", sites.size());
         m.put("ok", ok);
         m.put("unknown", bad);
+        m.put("netdisk", netdiskCount);
+        m.put("syncable", sites.size() - netdiskCount);
         return m;
     }
 

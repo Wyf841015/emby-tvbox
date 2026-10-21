@@ -191,6 +191,13 @@
         <button onclick="loadSites()">刷新</button>
         <span class="hint" id="probeProgress" style="margin:0"></span>
       </div>
+      <div class="row" style="margin-bottom:10px">
+        <label style="font-size:13px;color:var(--dim)">
+          <input type="checkbox" id="showNetdisk" onchange="loadSites()"> 显示网盘类源
+        </label>
+        <span class="pill" id="netdiskPill">—</span>
+        <span class="hint" style="margin:0">网盘类源（继承 catvod 的 Pan 基类）没账号拿不到直链，默认解析阶段就排除</span>
+      </div>
       <div id="siteTable"><div class="empty">还没有站点。先去「配置」标签填一个源地址。</div></div>
 
       <div class="panel" style="margin:14px 0 0;background:#0c1526">
@@ -245,6 +252,9 @@
         <button onclick="saveSyncScope()" id="btnScope">保存范围</button>
         <button onclick="useKnownGood()">填入实测可用站点</button>
         <button onclick="checkOutputWritable()" id="btnWriteCheck">测试输出目录可写</button>
+        <label style="font-size:13px;color:var(--dim)">
+          <input type="checkbox" id="cfgExcludeNd" checked> 排除网盘类源
+        </label>
       </div>
       <div id="writeCheckOut"></div>
       <div class="hint" id="scopeHint"></div>
@@ -474,7 +484,21 @@ function status() {
 
 // ══════════ 站点 ══════════
 function loadSites() {
-  api('api/sites').then(function (d) {
+  var withNd = document.getElementById('showNetdisk');
+  window._sitesUrl = 'api/sites' + (withNd && withNd.checked ? '?netdisk=1' : '');
+  api(window._sitesUrl || 'api/sites').then(function (d) {
+    var pill = document.getElementById('netdiskPill');
+    if (pill) {
+      var ex = d.netdiskExcluded || 0;
+      if (d.netdiskIncluded) {
+        var nd = (d.sites || []).filter(function (x) { return x.netdisk; }).length;
+        pill.textContent = '显示全部 ' + (d.total || 0) + ' 个（含 ' + nd + ' 个网盘）';
+        pill.className = 'pill';
+      } else {
+        pill.textContent = ex > 0 ? ('已排除 ' + ex + ' 个网盘源') : '没有网盘源';
+        pill.className = 'pill' + (ex > 0 ? ' bad' : '');
+      }
+    }
     sites = d.sites || [];
     renderSites();
     document.getElementById('tabSiteCount').textContent = sites.length;
@@ -502,11 +526,12 @@ function renderSites() {
     box.innerHTML = '<div class="empty">' + (sites.length ? '没有匹配的站点' : '还没有站点。先去「配置」标签填一个源地址。') + '</div>';
     return;
   }
-  var html = '<table><thead><tr><th>状态</th><th>名称</th><th>key / class</th><th>采集地址</th><th>操作</th></tr></thead><tbody>';
+  var html = '<table><thead><tr><th>状态</th><th>类型</th><th>名称</th><th>key / class</th><th>采集地址</th><th>操作</th></tr></thead><tbody>';
   list.forEach(function (s, i) {
     var st = s.ok ? 'ok' : (s.lastError ? 'bad' : 'unk');
     html += '<tr>' +
       '<td><span class="st ' + st + '"></span>' + (s.ok ? '可用' : (s.lastError ? '失败' : '未测')) + '</td>' +
+      '<td>' + (s.netdisk ? '<span class="pill bad">网盘</span>' : '<span class="pill ok">直连</span>') + '</td>' +
       '<td>' + esc(s.name || '') + '</td>' +
       '<td><code>' + esc(s.key) + '</code><br><span style="color:var(--dim);font-size:11.5px">' +
         esc((s.class || '').replace('com.github.catvod.spider.', 'spider.')) + '</span></td>' +
@@ -843,6 +868,8 @@ function fillScope(s) {
   document.getElementById('cfgPages').value = s.MaxPagesPerCategory || 3;
   document.getElementById('cfgMaxItems').value = s.MaxItemsPerRun || 0;
   document.getElementById('cfgConc').value = s.Concurrency || 3;
+  var nd = document.getElementById('cfgExcludeNd');
+  if (nd) nd.checked = (s.ExcludeCloudDrive !== false);
   var n = (s.SiteWhitelist || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean).length;
   document.getElementById('scopeHint').textContent = n
     ? '当前只同步 ' + n + ' 个站点'
@@ -856,7 +883,8 @@ function saveSyncScope() {
     SiteWhitelist: document.getElementById('cfgWhitelist').value.trim(),
     MaxPagesPerCategory: parseInt(document.getElementById('cfgPages').value, 10) || 3,
     MaxItemsPerRun: parseInt(document.getElementById('cfgMaxItems').value, 10) || 0,
-    Concurrency: parseInt(document.getElementById('cfgConc').value, 10) || 3
+    Concurrency: parseInt(document.getElementById('cfgConc').value, 10) || 3,
+    ExcludeCloudDrive: !!document.getElementById('cfgExcludeNd').checked
   };
   api('api/emby/config', {
     method: 'POST',

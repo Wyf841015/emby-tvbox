@@ -253,6 +253,18 @@ public class Hub {
     static void handleApi(HttpExchange ex, String path) throws Exception {
         Map<String, String> q = query(ex.getRequestURI().getRawQuery());
         switch (path) {
+            case "/api/netdisk": {          // 是否允许网盘类源（默认关）
+                String v = q.get("allow");
+                if (v != null) {
+                    pool.allowNetdisk = "1".equals(v) || "true".equalsIgnoreCase(v);
+                    record("网盘源开关", pool.allowNetdisk ? "开启" : "关闭", true, "", 0);
+                }
+                Map<String, Object> m = ok("");
+                m.put("allowNetdisk", pool.allowNetdisk);
+                m.put("netdiskCount", pool.netdiskCount);
+                sendJson(ex, 200, m);
+                return;
+            }
             case "/api/status": {
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("ok", true);
@@ -271,12 +283,19 @@ public class Hub {
                 return;
             }
             case "/api/sites": {
+                boolean withNetdisk = "1".equals(q.getOrDefault("netdisk", "0"));
                 List<Object> list = new ArrayList<>();
-                for (SpiderPool.Site s : pool.allSites()) list.add(s.toMap());
+                int hidden = 0;
+                for (SpiderPool.Site s : pool.allSites()) {
+                    if (s.netdisk && !withNetdisk) { hidden++; continue; }
+                    list.add(s.toMap());
+                }
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("ok", true);
-                m.put("total", pool.size());
+                m.put("total", list.size());
                 m.put("sites", list);
+                m.put("netdiskExcluded", hidden);     // 被排除的网盘类源数量
+                if (withNetdisk) m.put("netdiskIncluded", true);
                 sendJson(ex, 200, m);
                 return;
             }

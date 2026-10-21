@@ -36,6 +36,8 @@ namespace TvBox.Plugin.Core
         public int Errors { get; set; }
         /// <summary>处理过但没写进去的条目数（含写失败）。</summary>
         public int Skipped { get; set; }
+        /// <summary>解析阶段被排除的源数量（网盘类 + 黑白名单过滤）。</summary>
+        public int NetdiskExcluded { get; set; }
         public string Detail { get; set; } = "";
     }
 
@@ -146,14 +148,28 @@ namespace TvBox.Plugin.Core
                     var doc = await loader.LoadAsync(cfg.ConfigUrl, token).ConfigureAwait(false);
                     foreach (var w in doc.LoadWarnings) _log("[config] 警告: " + w);
 
+                    // 网盘名单必须在 ApplySpiderHub 之前取：改写后 site.Api 变成 hub 地址，
+                    // 原始 csp_Xxx 信息就没了，兜底判定会失效。
+                    HashSet<string> netdiskKeys = null;
+                    if (cfg.ExcludeCloudDrive)
+                    {
+                        _logStatic = _log;
+                        netdiskKeys = await FetchNetdiskKeysAsync(cfg.SpiderHubUrl, http, token).ConfigureAwait(false);
+                        var fallback = doc.Sites.Count(s => LooksLikeNetdisk(s.Api, s.DisplayName ?? s.Name));
+                        _log($"[netdisk] hub 报告 {netdiskKeys.Count} 个网盘源，名字兜底再识别 {fallback} 个，将在解析阶段排除");
+                    }
+
                     var hubCount = TvBoxConfigLoader.ApplySpiderHub(doc, cfg.SpiderHubUrl);
                     if (hubCount > 0)
                         _log($"[hub] {hubCount} 个 spider 站点已改走中转: {cfg.SpiderHubUrl}");
 
                     // ── 2. 过滤站点 ──
-                    var sites = SelectSites(doc.Sites, cfg).ToList();
+                    var sites = SelectSites(doc.Sites, cfg, netdiskKeys).ToList();
                     summary.Sites = sites.Count;
-                    _log($"配置里共 {doc.Sites.Count} 个站点，本次要同步 {sites.Count} 个");
+                    summary.NetdiskExcluded = Math.Max(0, doc.Sites.Count(s => s.Supported) - sites.Count);
+                    _log($"配置里共 {doc.Sites.Count} 个站点"
+                         + (summary.NetdiskExcluded > 0 ? $"（已排除 {summary.NetdiskExcluded} 个网盘/被过滤源）" : "")
+                         + $"，本次要同步 {sites.Count} 个");
 
                     if (sites.Count == 0)
                     {
@@ -250,7 +266,65 @@ namespace TvBox.Plugin.Core
         }
 
         /// <summary>按白名单 / 黑名单 / 名字过滤，挑出本次要处理的站点。</summary>
+        /// <summary>
+        /// 问 spider-hub 哪些站点是网盘类。hub 在 JVM 里能沿继承链判断
+        /// （catvod 的网盘实现都继承 com.github.catvod.spider.Pan），比按名字猜准。
+        /// hub 连不上就返回空集合，退回 LooksLikeNetdisk 兜底。
+        /// </summary>
+        public static async Task<HashSet<string>> FetchNetdiskKeysAsync(
+            string hubUrl, HttpClient http, CancellationToken ct)
+        {
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrWhiteSpace(hubUrl)) return set;
+            try
+            {
+                var url = hubUrl.Trim().TrimEnd('/') + "/api/sites?netdisk=1";
+                using (var resp = await http.GetAsync(url, HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false))
+                {
+                    if (!resp.IsSuccessStatusCode) return set;
+                    var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                    using (var doc = System.Text.Json.JsonDocument.Parse(json))
+                    {
+                        if (!doc.RootElement.TryGetProperty("sites", out var arr)) return set;
+                        foreach (var el in arr.EnumerateArray())
+                        {
+                            bool nd = el.TryGetProperty("netdisk", out var ndEl) && ndEl.ValueKind == System.Text.Json.JsonValueKind.True;
+                            if (!nd) continue;
+                            if (el.TryGetProperty("key", out var kEl) && kEl.ValueKind == System.Text.Json.JsonValueKind.String)
+                            {
+                                var k = kEl.GetString();
+                                if (!string.IsNullOrWhiteSpace(k)) set.Add(k);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logStatic?.Invoke("[netdisk] 取 hub 网盘名单失败（改用名字兜底）: " + ex.Message);
+            }
+            return set;
+        }
+
+        private static Action<string> _logStatic;
+
+        /// <summary>拿不到 hub 名单时的兜底判定（同名规则也在 hub 侧用）。</summary>
+        public static bool LooksLikeNetdisk(string api, string name)
+        {
+            var a = api ?? "";
+            var n = name ?? "";
+            if (a.StartsWith("csp_Pan", StringComparison.OrdinalIgnoreCase)) return true;
+            foreach (var k in new[]{"网盘", "云盘", "盘搜", "搜盘", "夸克", "115", "迅雷",
+                                     "百度盘", "天翼", "阿里云", "UC网盘", "123云盘", "光鸭", "分享"})
+                if (n.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            return false;
+        }
+
         public static IEnumerable<TvBoxSite> SelectSites(IEnumerable<TvBoxSite> all, PluginConfiguration cfg)
+            => SelectSites(all, cfg, null);
+
+        public static IEnumerable<TvBoxSite> SelectSites(IEnumerable<TvBoxSite> all, PluginConfiguration cfg,
+                                                         HashSet<string> netdiskKeys)
         {
             var white = SplitCsv(cfg.SiteWhitelist);
             var black = SplitCsv(cfg.SiteBlacklist);
@@ -260,6 +334,12 @@ namespace TvBox.Plugin.Core
             foreach (var s in all)
             {
                 if (s == null || !s.Supported) continue;
+                if (cfg.ExcludeCloudDrive)
+                {
+                    bool nd = (netdiskKeys != null && netdiskKeys.Contains(s.Key ?? ""))
+                              || LooksLikeNetdisk(s.Api, s.DisplayName ?? s.Name);
+                    if (nd) continue;      // 网盘类：没有账号拿不到直链，解析阶段就排除
+                }
                 if (dead.Contains(s.Key ?? "")) continue;
                 if (black.Count > 0 && Contains(black, s.Key)) continue;
                 if (white.Count > 0 && !Contains(white, s.Key)) continue;

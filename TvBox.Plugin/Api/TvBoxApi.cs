@@ -81,6 +81,7 @@ namespace TvBox.Plugin.Api
         public int? MaxItemsPerRun { get; set; }
         public int? Concurrency { get; set; }
         public int? TimeoutSeconds { get; set; }
+        public bool? ExcludeCloudDrive { get; set; }
         public string OutputRoot { get; set; }
     }
 
@@ -140,6 +141,8 @@ namespace TvBox.Plugin.Api
         public int MaxItemsPerRun { get; set; }
         public int Concurrency { get; set; }
         public int TimeoutSeconds { get; set; }
+        public bool ExcludeCloudDrive { get; set; }
+        public int NetdiskExcluded { get; set; }
     }
 
     public class SourceRow
@@ -232,6 +235,8 @@ namespace TvBox.Plugin.Api
                     MaxItemsPerRun = cfg.MaxItemsPerRun,
                     Concurrency = cfg.Concurrency,
                     TimeoutSeconds = cfg.TimeoutSeconds,
+                    ExcludeCloudDrive = cfg.ExcludeCloudDrive,
+                    NetdiskExcluded = cfg.LastSyncSummary != null && cfg.LastSyncSummary.Contains("网盘") ? 1 : 0,
                 };
             }
         }

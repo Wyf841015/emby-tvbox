@@ -49,6 +49,14 @@ namespace TvBox.Plugin
         /// </summary>
         public string HubToken { get; set; } = string.Empty;
 
+        /// <summary>
+        /// 解析源时直接排除网盘类源（默认 true）。
+        /// 网盘类 spider 都继承 catvod 的 Pan 基类：能把分享页列出来，但分享链接换直链
+        /// 需要夸克/115/迅雷/百度等账号，没有账号永远播不了，只会让同步白跑。
+        /// 判定优先问 spider-hub（它用 JVM 继承链判，准）；hub 连不上时用名字/类名兜底。
+        /// </summary>
+        public bool ExcludeCloudDrive { get; set; } = true;
+
         /// <summary>STRM 输出根目录。留空则用 Emby 数据目录下的 tvbox/。</summary>
         public string OutputRoot { get; set; } = string.Empty;
 
