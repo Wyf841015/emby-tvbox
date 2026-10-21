@@ -160,8 +160,14 @@
                 return window.ApiClient;
             }
 
+            // 插件的免登录路由要带共享令牌（Emby 4.9 里 Request 属性没被注入，
+            // 所以 token 只能由调用方显式传）。
+            var hubToken = '';
+
             function url(path) {
-                return api().getUrl('TvBox/' + path);
+                var u = api().getUrl('TvBox/' + path);
+                if (!hubToken) return u;
+                return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(hubToken);
             }
 
             function setText(id, text) {
@@ -215,6 +221,7 @@
             function load() {
                 if (!api()) return;
                 api().getPluginConfiguration(PLUGIN_ID).then(function (cfg) {
+                    hubToken = (cfg && cfg.HubToken) ? cfg.HubToken : '';
                     fill(cfg);
                     refreshStatus();
                 });
@@ -226,6 +233,10 @@
                     cfg = collect(cfg);
                     api().updatePluginConfiguration(PLUGIN_ID, cfg).then(function () {
                         setText('tvboxStatus', '已保存。');
+                        if (cfg.HubToken) hubToken = cfg.HubToken;
+                        loadSources();
+                    }).catch(function (e) {
+                        setText('tvboxStatus', '保存失败: ' + (e && e.message ? e.message : e));
                     });
                 });
                 return false;

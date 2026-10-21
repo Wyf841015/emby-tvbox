@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Collections.Generic;
 using System.IO;
 using System.Net.Http;
@@ -111,23 +112,59 @@ namespace TvBox.Plugin.Core
             {
                 // 多仓：逐个子仓拉取
                 _log($"这是多仓配置，共 {root.Urls.Count} 个子仓");
-                foreach (var entry in root.Urls)
+                // 串行拉 18 个子仓要 50 秒，配置页那个请求等不到就超时了。
+                // 这里并发 6 个，整体压到十秒内。
+                var entries = root.Urls.Where(e => e?.Url != null).ToList();
+                using (var subCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                using (var gate = new SemaphoreSlim(10))
                 {
-                    ct.ThrowIfCancellationRequested();
-                    if (entry?.Url == null) continue;
-                    try
+                  // 整批子仓最多等 15 秒：配置页那个请求等不起 20 秒以上。
+                  // 到点还没拉完的按警告丢弃，已拿到的照常返回。
+                  subCts.CancelAfter(TimeSpan.FromSeconds(15));
+
+                    var tasks = entries.Select(async entry =>
                     {
-                        var sub = await LoadOneAsync(entry.Url, ct, 1).ConfigureAwait(false);
-                        if (sub.Sites != null) result.Sites.AddRange(sub.Sites);
-                        if (sub.Lives != null) result.Lives.AddRange(sub.Lives);
-                        if (sub.Parses != null) result.Parses.AddRange(sub.Parses);
-                        _log($"  子仓 {entry.Name ?? entry.Url} → {sub.Sites?.Count ?? 0} 个站点");
-                    }
-                    catch (Exception ex)
+                        await gate.WaitAsync(subCts.Token).ConfigureAwait(false);
+                        try
+                        {
+                            subCts.Token.ThrowIfCancellationRequested();
+                            var sub = await LoadOneAsync(entry.Url, subCts.Token, 1).ConfigureAwait(false);
+                            _log($"  子仓 {entry.Name ?? entry.Url} → {sub.Sites?.Count ?? 0} 个站点");
+                            return (entry, sub, (Exception)null);
+                        }
+                        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                        {
+                            throw;
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            return (entry, (TvBoxConfigDocument)null,
+                                    (Exception)new TimeoutException("超过 15 秒总预算，已跳过"));
+                        }
+                        catch (Exception ex)
+                        {
+                            return (entry, (TvBoxConfigDocument)null, ex);
+                        }
+                        finally
+                        {
+                            gate.Release();
+                        }
+                    }).ToList();
+
+                    var done = await Task.WhenAll(tasks).ConfigureAwait(false);
+                    // 按原始顺序合并，保证结果稳定（并发完成顺序不固定）
+                    foreach (var (entry, sub, ex) in done)
                     {
-                        var msg = $"子仓 {entry.Name ?? entry.Url} 拉取失败: {ex.Message}";
-                        result.LoadWarnings.Add(msg);
-                        _log("  " + msg);
+                        if (ex != null)
+                        {
+                            var msg = $"子仓 {entry.Name ?? entry.Url} 拉取失败: {Short(ex)}";
+                            result.LoadWarnings.Add(msg);
+                            _log("  " + msg);
+                            continue;
+                        }
+                        if (sub?.Sites != null) result.Sites.AddRange(sub.Sites);
+                        if (sub?.Lives != null) result.Lives.AddRange(sub.Lives);
+                        if (sub?.Parses != null) result.Parses.AddRange(sub.Parses);
                     }
                 }
             }
@@ -158,11 +195,7 @@ namespace TvBox.Plugin.Core
             if (ref_.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
                 ref_.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             {
-                using (var resp = await _http.GetAsync(ref_, HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false))
-                {
-                    resp.EnsureSuccessStatusCode();
-                    text = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-                }
+                text = await FetchWithMirrorsAsync(ref_, ct).ConfigureAwait(false);
             }
             else if (File.Exists(ref_))
             {
@@ -173,7 +206,100 @@ namespace TvBox.Plugin.Core
                 throw new FileNotFoundException($"配置既不是 http(s) 地址，本地也找不到文件: {ref_}");
             }
 
+            // 有些源返回带 BOM 的 UTF-8，直接用 System.Text.Json 会报
+            // "'0xEF' is an invalid start of a value"。BOM 和前后空白都要清掉。
+            text = text.TrimStart('\uFEFF', '\u200B', ' ', '\r', '\n', '\t').TrimEnd();
+
             return ParseText(text, ref_);
+        }
+
+        /// <summary>
+        /// 拉配置内容。raw.githubusercontent.com 在国内经常超时或只有 AAAA 记录，
+        /// 直连失败就依次换镜像（和 spider-hub 用的是同一批）。
+        /// </summary>
+        private async Task<string> FetchWithMirrorsAsync(string url, CancellationToken ct)
+        {
+            var candidates = new List<string> { url };
+
+            var m = System.Text.RegularExpressions.Regex.Match(url,
+                @"^https?://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (m.Success)
+            {
+                var user = m.Groups[1].Value;
+                var repo = m.Groups[2].Value;
+                var branch = m.Groups[3].Value;
+                var path = m.Groups[4].Value;
+                candidates.Add("https://ghproxy.net/" + url);
+                candidates.Add("https://gh-proxy.com/" + url);
+                candidates.Add($"https://cdn.jsdelivr.net/gh/{user}/{repo}@{branch}/{path}");
+                candidates.Add($"https://fastly.jsdelivr.net/gh/{user}/{repo}@{branch}/{path}");
+            }
+            else if (url.Contains("github.com"))
+            {
+                candidates.Add("https://ghproxy.net/" + url);
+                candidates.Add("https://gh-proxy.com/" + url);
+            }
+
+            var errors = new List<string>();
+            foreach (var cand in candidates)
+            {
+                ct.ThrowIfCancellationRequested();
+                try
+                {
+                    // 单个候选地址最多等 8 秒：18 个子仓里总有死站，
+                    // 用 HttpClient 的 30s 全局超时会被最慢那个拖死（实测 49s）。
+                    using (var cts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                    {
+                    cts.CancelAfter(TimeSpan.FromSeconds(5));
+                    using (var req = new HttpRequestMessage(HttpMethod.Get, cand))
+                    using (var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseContentRead, cts.Token).ConfigureAwait(false))
+                    {
+                        if (!resp.IsSuccessStatusCode)
+                        {
+                            errors.Add($"{Host(cand)} → HTTP {(int)resp.StatusCode}");
+                            // 4xx（尤其 404）换镜像也救不回来，别浪费后面的超时预算
+                            if ((int)resp.StatusCode >= 400 && (int)resp.StatusCode < 500) break;
+                            continue;
+                        }
+                        var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                        if (string.IsNullOrWhiteSpace(body))
+                        {
+                            errors.Add($"{Host(cand)} → 空响应");
+                            continue;
+                        }
+                        if (cand != url) _log($"  镜像可用: {Host(cand)}");
+                        return body;
+                    }
+                    }
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    errors.Add($"{Host(cand)} → {Short(ex)}");
+                    // 域名都不存在，换镜像没意义
+                    if (Short(ex).IndexOf("Name or service not known", StringComparison.OrdinalIgnoreCase) >= 0
+                        || Short(ex).IndexOf("No such host", StringComparison.OrdinalIgnoreCase) >= 0) break;
+                }
+            }
+            throw new InvalidOperationException(
+                $"全部 {candidates.Count} 个地址都拉不到（{string.Join("；", errors)}）");
+        }
+
+        private static string Host(string url)
+        {
+            try { return new Uri(url).Host; } catch { return url; }
+        }
+
+        private static string Short(Exception ex)
+        {
+            var e = ex;
+            while (e.InnerException != null && e.InnerException != e) e = e.InnerException;
+            var msg = e.Message ?? e.GetType().Name;
+            return msg.Length > 80 ? msg.Substring(0, 80) + "…" : msg;
         }
 
         /// <summary>

@@ -18,28 +18,36 @@ namespace TvBox.Plugin.Api
     [Route("/TvBox/Status", "GET", Summary = "获取 TVBox 同步状态")]
     public class GetStatus : IReturn<StatusResult>
     {
+        /// <summary>spider-hub 调用时要带；Emby 配置页调用时留空则按已登录处理。</summary>
+        public string Token { get; set; }
     }
 
+    [Unauthenticated]
     [Route("/TvBox/Sources", "GET", Summary = "解析配置并列出所有站点")]
     public class GetSources : IReturn<SourcesResult>
     {
+        public string Token { get; set; }
     }
 
     [Unauthenticated]
     [Route("/TvBox/Sync", "POST", Summary = "立即开始同步")]
     public class StartSync : IReturn<SimpleResult>
     {
+        public string Token { get; set; }
     }
 
     [Unauthenticated]
     [Route("/TvBox/Stop", "POST", Summary = "停止正在进行的同步")]
     public class StopSync : IReturn<SimpleResult>
     {
+        public string Token { get; set; }
     }
 
+    [Unauthenticated]
     [Route("/TvBox/Probe", "GET", Summary = "探测单个站点的分类和条目数")]
     public class ProbeSite : IReturn<ProbeResult>
     {
+        public string Token { get; set; }
         public string SiteKey { get; set; }
         public int Page { get; set; }
     }
@@ -125,23 +133,22 @@ namespace TvBox.Plugin.Api
         private static Plugin P => Plugin.Instance;
 
         /// <summary>
-        /// 免登录路由的共享令牌校验。
-        /// 配置里 HubToken 为空 → 不校验（旧安装兼容）；非空 → 必须带对的 ?token=。
+        /// 共享令牌校验。token 从 DTO 上取（ServiceStack 自动绑定 ?token=），
+        /// 不用 Request 属性 —— 实测 Emby 4.9 里那个属性没被注入，永远拿不到值。
+        ///
+        /// 规则：
+        ///   HubToken 为空        → 放行（旧安装兼容）
+        ///   token 对得上          → 放行（spider-hub 走这条路）
+        ///   token 空或不匹配      → 拒绝
+        /// Emby 自己的配置页走 api().getUrl()，我们在 config.html 里给它拼了 token。
         /// </summary>
-        private bool HubOk()
+        private static bool HubOk(string token)
         {
-            try
-            {
-                var cfg = P?.Configuration;
-                if (cfg == null) return false;
-                if (string.IsNullOrWhiteSpace(cfg.HubToken)) return true;
-                var got = Request?.QueryString?["token"];
-                return !string.IsNullOrEmpty(got) && string.Equals(got, cfg.HubToken.Trim(), StringComparison.Ordinal);
-            }
-            catch
-            {
-                return false;
-            }
+            var cfg = P?.Configuration;
+            if (cfg == null) return false;
+            if (string.IsNullOrWhiteSpace(cfg.HubToken)) return true;
+            var expect = cfg.HubToken.Trim();
+            return !string.IsNullOrEmpty(token) && string.Equals(token.Trim(), expect, StringComparison.Ordinal);
         }
 
         // ── 状态 ──
@@ -149,7 +156,7 @@ namespace TvBox.Plugin.Api
         {
             var p = P;
             if (p == null) return new StatusResult { Stage = "插件未初始化" };
-            if (!HubOk()) return new StatusResult { Stage = "token 无效" };
+            if (!HubOk(req.Token)) return new StatusResult { Stage = "token 无效" };
             var cfg = p.Configuration;
             var pr = p.SyncService.Progress;
             lock (pr)
@@ -226,8 +233,9 @@ namespace TvBox.Plugin.Api
         public object Post(StartSync req)
         {
             var p = P;
+            if (!HubOk(req.Token)) return new SourcesResult { Success = false, Error = "token 无效" };
             if (p == null) return new SimpleResult { Message = "插件未初始化" };
-            if (!HubOk()) return new SimpleResult { Success = false, Message = "token 无效" };
+            if (!HubOk(req.Token)) return new SimpleResult { Success = false, Message = "token 无效" };
             if (p.SyncService.IsRunning)
                 return new SimpleResult { Success = false, Message = "已有同步在运行" };
 
@@ -274,7 +282,7 @@ namespace TvBox.Plugin.Api
         public object Get(ProbeSite req)
         {
             var p = P;
-            if (!HubOk()) return new SimpleResult { Success = false, Message = "token 无效" };
+            if (!HubOk(req.Token)) return new SimpleResult { Success = false, Message = "token 无效" };
             if (p == null) return new ProbeResult { Error = "插件未初始化" };
             var cfg = p.Configuration;
             var key = req?.SiteKey;
