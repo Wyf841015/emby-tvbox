@@ -173,8 +173,24 @@ var sites = [];
 var currentFilter = 'all';
 var hubInfo = { tcpPort: 8098 };
 
+// 关键：一律用相对路径。
+// 通过 fnOS 网关访问时页面在 /app/tvboxhub/ 下，写死的 /api/xxx 会被解析到
+// https://nas/api/xxx（fnOS 主界面），返回 HTML → JSON 解析报
+// "Unexpected token '<'"。去掉前导斜杠交给浏览器按当前文档地址解析即可：
+//   网关  https://nas/app/tvboxhub/  → https://nas/app/tvboxhub/api/xxx
+//   直连  http://ip:8098/            → http://ip:8098/api/xxx
 function api(path, opt) {
-  return fetch(path, opt).then(function (r) { return r.json(); });
+  var url = path.replace(/^\/+/, '');
+  return fetch(url, opt).then(function (r) {
+    return r.text().then(function (txt) {
+      var t = txt.trim();
+      if (t.charAt(0) === '<') {
+        throw new Error('接口返回了 HTML（多半是路径没走应用前缀）：' + t.slice(0, 60));
+      }
+      try { return JSON.parse(t); }
+      catch (e) { throw new Error('接口返回非 JSON：' + t.slice(0, 60)); }
+    });
+  });
 }
 
 function toast(msg, kind) {
