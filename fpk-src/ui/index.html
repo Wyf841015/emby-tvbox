@@ -432,7 +432,10 @@ function status() {
     document.getElementById('kUptime').textContent = fmtUptime(d.uptimeSec);
     document.getElementById('tabSiteCount').textContent = d.stats.total;
     if (d.tcpPort) hubInfo.tcpPort = d.tcpPort;
-    var hubUrl = location.protocol + '//' + location.hostname + ':' + hubInfo.tcpPort;
+    // 插件和 hub 在同一台机器上，必须用回环地址：
+    //   - location.hostname 可能是外网域名（如 office.xxx.com），插件连不出去
+    //   - location.protocol 可能是 https，而 hub 的 TCP 端口是明文 http
+    var hubUrl = 'http://127.0.0.1:' + hubInfo.tcpPort;
     document.getElementById('hubAddr').textContent = hubUrl;
     document.getElementById('infoHub').textContent = hubUrl;
     document.getElementById('infoPort').textContent = d.tcpPort + (d.tcpOk ? '（正常）' : '（未绑定）');
@@ -701,7 +704,7 @@ function installPlugin() {
   api('api/emby/install', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ programdata: pd, outputRoot: out,
       configUrl: document.getElementById('configUrl').value.trim(),
-      hubUrl: location.protocol + '//' + location.hostname + ':' + hubInfo.tcpPort })
+      hubUrl: 'http://127.0.0.1:' + hubInfo.tcpPort })
   }).then(function (d) {
     if (d.ok) {
       toast('安装成功，重启 Emby 生效', 'ok');

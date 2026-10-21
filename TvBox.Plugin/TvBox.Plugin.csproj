@@ -1,13 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <!-- Emby 4.10.2.0 的运行时是 Microsoft.NETCore.App 8.0.28（已从官方 deb 里的
-         EmbyServer.runtimeconfig.json 确认），所以插件目标框架锁 net8.0。
-         这样可以直接用共享框架里的 System.Text.Json，无需任何 NuGet 包。 -->
+    <!-- 参考程序集必须和「运行时的 Emby」版本一致，否则 Emby 加载插件时会报
+           Could not load file or assembly 'MediaBrowser.Common, Version=4.10.2.0'
+         然后静默跳过整个插件。
+         现在用 fnOS 上实际在跑的 Emby 4.9.0.42 的 system/*.dll 当参考
+         （lib/emby4_9/，不进 git）。指向老版本的好处：以后升到 4.10/4.11 也能加载，
+         反过来（用新版编、装到旧版）会直接加载失败。
+         Emby 4.9 的运行时是 Microsoft.NETCore.App 8.0.x，故目标框架锁 net8.0。 -->
     <TargetFramework>net8.0</TargetFramework>
     <AssemblyName>TvBox</AssemblyName>
     <RootNamespace>TvBox.Plugin</RootNamespace>
-    <Version>0.1.0.0</Version>
+    <Version>0.3.0.0</Version>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
@@ -24,20 +28,20 @@
   <!-- Emby 参考程序集：Private=false，绝不能把 Emby 自己的 DLL 打进插件包 -->
   <ItemGroup>
     <Reference Include="MediaBrowser.Common">
-      <HintPath>../lib/emby4_10/MediaBrowser.Common.dll</HintPath>
+      <HintPath>../lib/emby4_9/MediaBrowser.Common.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="MediaBrowser.Controller">
-      <HintPath>../lib/emby4_10/MediaBrowser.Controller.dll</HintPath>
+      <HintPath>../lib/emby4_9/MediaBrowser.Controller.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="MediaBrowser.Model">
-      <HintPath>../lib/emby4_10/MediaBrowser.Model.dll</HintPath>
+      <HintPath>../lib/emby4_9/MediaBrowser.Model.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <!-- IResponse.OutputWriter 的类型，Emby 自带这个程序集 -->
     <Reference Include="System.IO.Pipelines">
-      <HintPath>../lib/emby4_10/System.IO.Pipelines.dll</HintPath>
+      <HintPath>../lib/emby4_9/System.IO.Pipelines.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using MediaBrowser.Common;
 using MediaBrowser.Common.Configuration;
+using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Common.Plugins;
 using MediaBrowser.Model.Logging;
 using MediaBrowser.Model.Plugins;
@@ -24,17 +25,20 @@ namespace TvBox.Plugin
         private readonly IApplicationPaths _paths;
         private readonly IApplicationHost _host;
         private readonly ILogger _logger;
+        private readonly IServerConfigurationManager _serverConfig;
 
         public Plugin(
             IApplicationPaths applicationPaths,
             IXmlSerializer xmlSerializer,
             ILogManager logManager,
-            IApplicationHost applicationHost)
+            IApplicationHost applicationHost,
+            IServerConfigurationManager serverConfigurationManager)
             : base(applicationPaths, xmlSerializer)
         {
             _instance = this;
             _paths = applicationPaths;
             _host = applicationHost;
+            _serverConfig = serverConfigurationManager;
             _logger = logManager.GetLogger("TvBox");
 
             SyncService = new SyncService(msg => _logger.Info(msg));
@@ -83,11 +87,27 @@ namespace TvBox.Plugin
         /// 用于把播放地址改写成本机代理地址的基地址。
         /// 用户没填就返回 null（此时 strm 里写原始地址）。
         /// </summary>
+        /// <summary>
+        /// strm 里的播放代理地址前缀。
+        /// 用户没填就自动用「本机回环 + Emby 实际监听端口」——插件跑在 Emby 进程里，
+        /// 回环一定通，比让人手填 IP 靠谱得多（填错就整片黑屏）。
+        /// </summary>
         public string ResolveEmbyBaseUrl()
         {
             var cfg = Configuration;
-            if (cfg == null || string.IsNullOrWhiteSpace(cfg.EmbyBaseUrl)) return null;
-            return cfg.EmbyBaseUrl.Trim().TrimEnd('/');
+            if (cfg != null && !string.IsNullOrWhiteSpace(cfg.EmbyBaseUrl))
+                return cfg.EmbyBaseUrl.Trim().TrimEnd('/');
+
+            try
+            {
+                var port = _serverConfig?.Configuration?.HttpServerPortNumber ?? 0;
+                if (port <= 0) port = 8096;
+                return "http://127.0.0.1:" + port;
+            }
+            catch
+            {
+                return "http://127.0.0.1:8096";
+            }
         }
 
         public IEnumerable<PluginPageInfo> GetPages()
