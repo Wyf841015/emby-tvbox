@@ -226,6 +226,7 @@
       <div class="kv">
         <div class="k">Emby</div><div class="v" style="font-size:13px"><code id="syncEmby">—</code></div>
         <div class="k">输出目录</div><div class="v" style="font-size:13px"><code id="syncOut">—</code></div>
+        <div class="k">同步站点</div><div class="v" style="font-size:13px"><span id="syncSiteCount">—</span></div>
         <div class="k">当前阶段</div><div class="v" style="font-size:14px" id="syncStage">—</div>
       </div>
       <div id="syncBarWrap" style="display:none;margin-top:16px">
@@ -307,7 +308,8 @@
         <label>并发<input type="number" id="pcConc" min="1" max="16"></label>
         <label>超时（秒）<input type="number" id="pcTimeout" min="5" max="120"></label>
         <label>请求间隔（毫秒）<input type="number" id="pcDelay" min="0" max="5000"></label>
-        <label>输出目录<input type="text" id="pcOutputRoot" placeholder="/vol1/media/tvbox"></label>
+        <label>输出目录<input type="text" id="pcOutputRoot" placeholder="/vol1/media/tvbox"
+                 oninput="var t=document.getElementById('outputRoot'); if(t) t.value=this.value;"></label>
         <label>Emby 访问地址<input type="text" id="pcEmbyBase" placeholder="http://127.0.0.1:8096"></label>
         <label>Referer（可选）<input type="text" id="pcReferer" placeholder="部分源需要"></label>
         <label>User-Agent<input type="text" id="pcUA"></label>
@@ -359,7 +361,8 @@
       </div>
       <div id="libTable"></div>
       <div class="row" style="margin-top:10px">
-        <input type="text" id="outputRoot" placeholder="输出目录（strm 根目录），如 /vol1/media/tvbox">
+        <input type="text" id="outputRoot" placeholder="输出目录（strm 根目录），如 /vol1/media/tvbox"
+               oninput="var t=document.getElementById('pcOutputRoot'); if(t) t.value=this.value;">
       </div>
       <div class="row" style="margin-top:10px">
         <button class="primary" onclick="installPlugin()" id="btnInstall">安装插件到 Emby</button>
@@ -473,7 +476,8 @@ function fmtMs(ms) {
 
 // ══════════ Tab ══════════
 function switchTab(name, el) {
-  if (name === 'config' || name === 'sync') pcLoad();
+  // 这三个页都显示「输出目录 / 配置源」，一律从 Emby 插件读，避免各显示各的
+  if (name === 'config' || name === 'sync' || name === 'emby') pcLoad();
   document.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('active'); });
   document.querySelectorAll('.pane').forEach(function (p) { p.classList.remove('active'); });
   if (el) el.classList.add('active');
@@ -705,6 +709,13 @@ function pcLoad() {
       var el = document.getElementById(PC_CHECKS[k]);
       if (el) el.checked = !!c[k];
     });
+    // Emby 标签页的「输出目录」（安装插件时用）和同步页的「输出目录」显示，
+    // 都必须是插件里那一份，不能各显示各的。
+    var oroot = document.getElementById('outputRoot');
+    if (oroot && c.OutputRoot) oroot.value = c.OutputRoot;
+    var sOut = document.getElementById('syncOut');
+    if (sOut && c.OutputRoot) sOut.textContent = c.OutputRoot;
+
     // 同步范围卡片也铺同一份值，保证两个 tab 显示一致
     var w = document.getElementById('cfgWhitelist');
     if (w) w.value = c.SiteWhitelist || '';
@@ -719,7 +730,22 @@ function pcLoad() {
     window._pcLoaded = true;
   }).catch(function (e) {
     window._pcLoaded = false;
-    if (badge) { badge.textContent = '读取失败'; badge.className = 'pill bad'; }
+    if (badge) { badge.textContent = '读取失败（应用可能没重启）'; badge.className = 'pill bad'; }
+    // 兜底：老版本 hub 没有 /api/config，就从插件的 Status 把关键位置读回来，
+    // 至少「同步位置」显示的是 Emby 里的真实值，而不是空框。
+    api('api/emby/sync/status').then(function (d) {
+      var s = (d && d.status) || {};
+      var oroot = document.getElementById('outputRoot');
+      if (oroot && s.OutputRoot) oroot.value = s.OutputRoot;
+      var pcOut = document.getElementById('pcOutputRoot');
+      if (pcOut && s.OutputRoot) pcOut.value = s.OutputRoot;
+      var sOut = document.getElementById('syncOut');
+      if (sOut && s.OutputRoot) sOut.textContent = s.OutputRoot;
+      if (s.ConfigUrl) {
+        var cu = document.getElementById('pcConfigUrl');
+        if (cu) cu.value = s.ConfigUrl;
+      }
+    }).catch(function () {});
   });
 }
 
@@ -986,6 +1012,8 @@ function onLibPick(sel) {
     p = base + '/tvbox';
   }
   document.getElementById('outputRoot').value = p;
+  var pcOut = document.getElementById('pcOutputRoot');
+  if (pcOut) pcOut.value = p;
   document.getElementById('pluginHint').textContent =
     '输出目录 ' + p + '（strm 会分到 ' + p + '/movies 和 ' + p + '/tv，Emby 里对应建两个库）';
   document.getElementById('pluginHint').style.color = 'var(--dim)';
@@ -1100,6 +1128,13 @@ function refreshSyncStatus() {
     var s = d.status || {};
     document.getElementById('syncEmby').textContent = d.emby || '—';
     document.getElementById('syncOut').textContent = s.OutputRoot || '—';
+  var sc = document.getElementById('syncSiteCount');
+  if (sc) {
+    var tot = s.SiteTotal || 0;
+    var nd = s.NetdiskExcluded || 0;
+    sc.textContent = tot ? (tot + ' 个' + (nd ? '（已排除网盘 ' + nd + '）' : '')) : '—';
+    sc.title = '本次要同步的站点数；如果只有纯 CMS 站（没有 /v/ 开头的 spider 站），说明 SpiderHubUrl 没配对';
+  }
     document.getElementById('syncStage').textContent = s.Stage || '—';
 
     document.getElementById('kItems').textContent = (s.ItemsWritten != null ? s.ItemsWritten : '–');

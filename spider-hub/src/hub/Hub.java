@@ -1113,19 +1113,43 @@ public class Hub {
         return "http://127.0.0.1:" + tcpPort;
     }
 
-    /** 插件里的 SpiderHubUrl 是否指向自己；不对就推一次修正。 */
+    /**
+     * 插件里的 SpiderHubUrl 是否指向一个活着的 hub。
+     * 只在「为空」或「那个端口已经没人监听」时才改写成自己的地址 ——
+     * 否则任何第二个 hub 实例（测试用、临时启动的）都会把生产插件的这一项抢走，
+     * 表现为同步时 spider 站点全部失败。
+     */
     static void ensureHubUrlInPlugin(Map<String, Object> pc) {
         try {
             if (pc == null) return;
             String want = hubSelfUrl();
             String have = str(pc.get("SpiderHubUrl"));
             if (want.equals(have)) return;
+
+            if (have != null && !have.isEmpty() && !have.equals(want)) {
+                if (hubPortAlive(have)) return;      // 原来那个地址还活着，别动它
+            }
             Map<String, Object> one = new LinkedHashMap<>();
             one.put("SpiderHubUrl", want);
-            pushPluginConfig(one);
-            System.out.println("[emby] 已把插件的 SpiderHubUrl 修正为 " + want + "（原值: " + have + "）");
+            String resp = pushPluginConfig(one);
+            System.out.println("[emby] 插件的 SpiderHubUrl 由 " + have + " 改为 " + want + " —— " + resp);
         } catch (Exception e) {
             System.out.println("[emby] 修正 SpiderHubUrl 失败: " + e.getMessage());
+        }
+    }
+
+    /** 尝试连一下 http://host:port/api/status，能连上就算活着。 */
+    static boolean hubPortAlive(String url) {
+        try {
+            java.net.URI u = java.net.URI.create(url);
+            int port = u.getPort() > 0 ? u.getPort() : 8098;
+            try (java.net.Socket s = new java.net.Socket()) {
+                s.connect(new java.net.InetSocketAddress(
+                        u.getHost() == null ? "127.0.0.1" : u.getHost(), port), 1200);
+                return true;
+            }
+        } catch (Exception e) {
+            return false;
         }
     }
 
