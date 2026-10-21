@@ -37,7 +37,20 @@ trap term TERM INT
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') - [supervisor] $*" >> "$LOG"; }
 
+# 日志轮转：supervisor 和 hub 都往 info.log 追加，长期不轮转会顶满小分区
+rotate_log() {
+    [ -f "$LOG" ] || return 0
+    size=$(stat -c%s "$LOG" 2>/dev/null || echo 0)
+    if [ "$size" -gt 10485760 ]; then
+        [ -f "$LOG.2" ] && mv -f "$LOG.2" "$LOG.3"
+        [ -f "$LOG.1" ] && mv -f "$LOG.1" "$LOG.2"
+        mv -f "$LOG" "$LOG.1"
+        log "日志超过 10MB，已轮转为 $LOG.1"
+    fi
+}
+
 while true; do
+    rotate_log
     log "启动 hub（SerialGC, pid 待定）"
     "$JAVA" -Xverify:none -Xmx512m -XX:+UseSerialGC -XX:+ExitOnOutOfMemoryError \
         -XX:MaxMetaspaceSize=256m -Dfile.encoding=UTF-8 \

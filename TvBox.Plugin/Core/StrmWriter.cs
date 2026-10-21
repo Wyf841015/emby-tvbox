@@ -114,7 +114,7 @@ namespace TvBox.Plugin.Core
             var ep = line?.Episodes?.FirstOrDefault();
             if (ep == null) return default;
 
-            var folder = SafeName(TitleWithYear(item.Name, item.Year));
+            var folder = SafeName(TitleWithYear(item.Name, item.Year, item.Remarks));
             var dir = Path.Combine(MoviesRoot, folder);
             var file = Path.Combine(dir, folder + ".strm");
             var outcome = WriteStrmFile(file, ep.Url);
@@ -139,7 +139,11 @@ namespace TvBox.Plugin.Core
             var results = new List<WriteOutcome>();
             if (line?.Episodes == null || line.Episodes.Count == 0) return results;
 
-            var baseTitle = SafeName(TitleWithYear(item.Name, item.Year));
+            // 整条属于同一季时（备注「第二季」），集名不带季号也归到 S02，别全塞进 Season 01
+            int baseSeason = SeasonFromText(item.Remarks);
+            if (baseSeason <= 0) baseSeason = SeasonFromText(item.Name);
+            if (baseSeason <= 0) baseSeason = 1;
+            var baseTitle = SafeName(TitleWithYear(item.Name, item.Year, item.Remarks));
             var showDir = Path.Combine(TvRoot, baseTitle);
             var used = new Dictionary<int, HashSet<int>>();
 
@@ -152,7 +156,7 @@ namespace TvBox.Plugin.Core
                 var ep = line.Episodes[i];
                 if (realCount > 1 && IsPlaceholderEpisode(ep.Name)) continue;
                 var epTitle = CleanEpisodeTitle(ep.Name, out var season, out var num);
-                if (season <= 0) season = 1;
+                if (season <= 0) season = baseSeason;
                 if (num <= 0) num = i + 1;
 
                 if (!used.TryGetValue(season, out var set))
@@ -450,11 +454,32 @@ namespace TvBox.Plugin.Core
         }
 
         /// <summary>片名 + (年份)。年份优先取 vod_year，其次从片名末尾的括号里抠。</summary>
-        public static string TitleWithYear(string name, string year)
+        public static string TitleWithYear(string name, string year, string remarks = null)
         {
             var n = CleanTitle(name);
-            var y = ExtractYear(year) ?? YearFromTitle(name);
+            // 年份兜底顺序：vod_year → 片名里的年份 → 备注里的年份。
+            // 很多源 vod_year 是空的（实测《骤雨》《遇见你》都没有），
+            // 备注却常写「2024」「2024-10-19」，不兜底就只能写成无年份目录，刮削直接漂。
+            var y = ExtractYear(year) ?? YearFromTitle(name) ?? ExtractYear(remarks);
             return string.IsNullOrEmpty(y) ? n : $"{n} ({y})";
+        }
+
+        /// <summary>
+        /// 从自由文本里认季号：第2季 / 第二季 / Season 2。
+        /// 只给「整条都是同一季」的条目用（备注写「第二季」，集名里却不带季号）。
+        /// </summary>
+        public static int SeasonFromText(string t)
+        {
+            if (string.IsNullOrWhiteSpace(t)) return 0;
+            var m = ReSeasonCn.Match(t);
+            if (m.Success)
+            {
+                var n = CnToInt(m.Groups[1].Value);
+                if (n > 0) return n;
+            }
+            m = ReSeasonEn.Match(t);
+            if (m.Success && int.TryParse(m.Groups[1].Value, out var n2) && n2 > 0) return n2;
+            return 0;
         }
 
         /// <summary>

@@ -110,17 +110,65 @@ namespace TvBox.Plugin.Core
         /// </summary>
         /// <summary>
         /// 逐集校验，返回真正能播的分集列表。并发 6，整体失败不影响其它集。
+        ///
+        /// 两条现实约束决定了这里不能无脑全量校验：
+        ///   1. 源里动辄 200+ 集（实测 265/288/247/221 集），每集要 2 个请求，
+        ///      一个条目就能烧掉 500+ 次请求、耗掉一两分钟——这是同步慢的头号原因；
+        ///   2. 但只验首集又会放过"前几集正常、后面全是图片广告"的源（实测有 17 集坏的）。
+        /// 折中：超过 VerifyMaxEpisodes 就做样本校验（首 12 + 尾 12 + 中间均匀抽），
+        /// 没被抽到的集按"可播"处理直接写入，并在日志里说明抽了多少、为什么。
+        ///
+        /// 顺带处理第三类地址：不是媒体流的（解析接口 ?url=…、网页播放页、302 中转）
+        /// 先交给 PlayUrlResolver 解一次，解出来的真地址同时回写到分集上，
+        /// 这样写进 strm 的就是能播的那个。
         /// </summary>
         private static async Task<List<VodEpisode>> FilterPlayableEpisodesAsync(
-            CmsClient client, List<VodEpisode> episodes, CancellationToken ct, Action<string> onDead)
+            CmsClient client, List<VodEpisode> episodes, TvBoxSite site, PluginConfiguration cfg,
+            CancellationToken ct, Action<string> onDead, Action<string> onNote)
         {
             var result = new List<VodEpisode>();
             if (episodes == null || episodes.Count == 0) return result;
 
+            int cap = cfg.VerifyMaxEpisodes;
+            bool sampled = cap > 0 && episodes.Count > cap;
+            var verifyIdx = new List<int>();
+            if (!sampled)
+            {
+                for (int i = 0; i < episodes.Count; i++) verifyIdx.Add(i);
+            }
+            else
+            {
+                // 首尾各 12，但总配额不能超过上限（有人把上限调到 6 时就只剩首尾 3+3）
+                int head = Math.Min(12, Math.Max(1, cap / 2));
+                int tail = head;
+                int h = Math.Min(head, episodes.Count);
+                int t = Math.Min(tail, Math.Max(0, episodes.Count - h));
+                for (int i = 0; i < h; i++) verifyIdx.Add(i);
+                for (int i = episodes.Count - t; i < episodes.Count; i++) verifyIdx.Add(i);
+
+                int span = episodes.Count - h - t;
+                int need = Math.Max(0, cap - verifyIdx.Count);
+                if (need > 0 && span > 0)
+                {
+                    double step = (double)span / need;
+                    for (int j = 0; j < need; j++)
+                    {
+                        int idx = h + (int)Math.Round(j * step + step / 2);
+                        if (idx >= h && idx < episodes.Count - t) verifyIdx.Add(idx);
+                    }
+                }
+                verifyIdx = verifyIdx.Distinct().OrderBy(x => x).ToList();
+                onNote?.Invoke(episodes.Count + " 集超过校验上限 " + cap + "，抽样校验 " + verifyIdx.Count
+                               + " 集（首尾各 12 + 中间均匀），其余按可播写入");
+            }
+
+            var live = new bool[episodes.Count];
+            foreach (var i in verifyIdx) live[i] = true;   // 抽样模式下未抽到的默认可播
+
             var sem = new SemaphoreSlim(6);
-            var flags = new bool[episodes.Count];
             var tasks = new List<Task>();
-            for (int i = 0; i < episodes.Count; i++)
+            int resolved = 0, attempted = 0;
+            foreach (var i in verifyIdx)
             {
                 int idx = i;
                 tasks.Add(Task.Run(async () =>
@@ -128,16 +176,29 @@ namespace TvBox.Plugin.Core
                     await sem.WaitAsync(ct).ConfigureAwait(false);
                     try
                     {
-                        var (ok, why) = await client.VerifyPlayableAsync(episodes[idx]?.Url, ct).ConfigureAwait(false);
-                        flags[idx] = ok;
+                        var url = episodes[idx]?.Url;
+                        if (cfg.ResolveIndirectUrl && !PlayUrlResolver.LooksLikeDirectMedia(url))
+                        {
+                            Interlocked.Increment(ref attempted);
+                            var real = await PlayUrlResolver.ResolveAsync(client.Http, url, site?.Referer, ct)
+                                                            .ConfigureAwait(false);
+                            if (!string.IsNullOrWhiteSpace(real))
+                            {
+                                episodes[idx].Url = real;   // 回写：strm 里写能播的那个
+                                url = real;
+                                Interlocked.Increment(ref resolved);
+                            }
+                        }
+                        var (ok, why) = await client.VerifyPlayableAsync(url, site?.Referer, ct).ConfigureAwait(false);
+                        live[idx] = ok;
                         if (!ok) onDead?.Invoke(why);
                     }
                     catch (OperationCanceledException)
                     {
                         if (ct.IsCancellationRequested) throw;   // 真·用户取消
-                        flags[idx] = false;                      // 只是这一集超时
+                        live[idx] = false;                      // 只是这一集超时
                     }
-                    catch { flags[idx] = false; }
+                    catch { live[idx] = false; }
                     finally { sem.Release(); }
                 }, ct));
             }
@@ -145,8 +206,12 @@ namespace TvBox.Plugin.Core
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             finally { sem.Dispose(); }
 
+            if (attempted > 0)
+                onNote?.Invoke("间接地址解析: 尝试 " + attempted + " 个，解出 " + resolved + " 个"
+                               + (resolved == 0 ? "（解析接口/播放页不可达，或里面没有 m3u8）" : ""));
+
             for (int i = 0; i < episodes.Count; i++)
-                if (flags[i]) result.Add(episodes[i]);
+                if (live[i]) result.Add(episodes[i]);
             return result;
         }
 
@@ -262,11 +327,24 @@ namespace TvBox.Plugin.Core
                         _log("元数据: nfo=" + (cfg.WriteNfo ? "开" : "关")
                              + " 海报=" + (cfg.DownloadPoster ? "开" : "关"));
                     }
+                    // 站点级 Referer：每个站点单独取，写进代理地址里，播放时才会带对 Referer
+                    string siteReferer = null;
                     if (cfg.UseProxy && !string.IsNullOrWhiteSpace(embyBaseUrlForProxy))
                     {
                         var baseUrl = embyBaseUrlForProxy.TrimEnd('/');
+                        if (IsLoopbackBase(baseUrl))
+                        {
+                            summary.Detail = "输出地址解析成了本机回环 " + baseUrl
+                                + "：客户端（电视/手机）拿到 127.0.0.1 会去连自己，写出来的 strm 全部播不了。"
+                                + "请到插件设置里把「Emby 访问地址」填成局域网地址（如 http://192.168.1.10:8096）。";
+                            _log("[abort] " + summary.Detail);
+                            Update(p => p.LastError = summary.Detail);
+                            Finish(summary, cfg, saveConfig);
+                            return false;
+                        }
                         writer.UrlRewriter = u =>
-                            baseUrl + TvBox.Plugin.Api.TvBoxApi.BuildProxyPath(u, cfg.Referer);
+                            baseUrl + TvBox.Plugin.Api.TvBoxApi.BuildProxyPath(
+                                u, string.IsNullOrWhiteSpace(cfg.Referer) ? siteReferer : cfg.Referer);
                         _log("播放地址将改写为本机代理: " + baseUrl + "/TvBox/Stream");
                     }
                     else if (cfg.UseProxy)
@@ -281,6 +359,7 @@ namespace TvBox.Plugin.Core
                         ct.ThrowIfCancellationRequested();
                         siteIdx++;
                         Update(p => { p.SiteIndex = siteIdx; p.CurrentSite = site.DisplayName; });
+                        siteReferer = site.Referer;
                         _log($"── [{siteIdx}/{sites.Count}] {site.DisplayName} ({site.Api})");
 
                         try
@@ -505,12 +584,15 @@ namespace TvBox.Plugin.Core
                                 // 逐集校验：一个源里经常是"前几集能播、后面几集全是图片广告"，
                                 // 只验首集会放过大量死地址（实测 40 个样本里就有 1 个是 17 集坏了）。
                                 int dead = 0;
+                                var reasons = new System.Collections.Concurrent.ConcurrentDictionary<string, int>();
                                 var live = await FilterPlayableEpisodesAsync(
-                                    client, line.Episodes, ct, _ => dead++).ConfigureAwait(false);
+                                    client, line.Episodes, site, cfg, ct,
+                                    why => { dead++; reasons.AddOrUpdate(ShortReason(why), 1, (_, v) => v + 1); },
+                                    note => _log("     [" + (item.Name ?? item.Id) + "] " + note)).ConfigureAwait(false);
                                 if (live.Count == 0)
                                 {
                                     summary.Skipped++; Update(p => p.ItemsSkipped++);
-                                    _log("     [" + (item.Name ?? item.Id) + "] 跳过：" + line.Episodes.Count + " 集全部不可用");
+                                    _log("     [" + (item.Name ?? item.Id) + "] 跳过：" + line.Episodes.Count + " 集全部不可用" + FormatReasons(reasons));
                                     if (cfg.RequestDelayMs > 0) await Task.Delay(cfg.RequestDelayMs, ct).ConfigureAwait(false);
                                     continue;
                                 }
@@ -669,6 +751,45 @@ namespace TvBox.Plugin.Core
                                   .ConfigureAwait(false);
                 return left.Concat(right).ToList();
             }
+        }
+
+        /// <summary>
+        /// 输出地址是不是本机回环。填成回环时写出的 strm 客户端一律播不了，
+        /// 与其静默生成一个死库，不如直接拒绝并让用户去改配置。
+        /// </summary>
+        private static bool IsLoopbackBase(string baseUrl)
+        {
+            if (string.IsNullOrWhiteSpace(baseUrl)) return true;
+            try
+            {
+                var host = new Uri(baseUrl).Host;
+                if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return true;
+                if (host == "::1" || host == "[::1]") return true;
+                if (System.Net.IPAddress.TryParse(host, out var ip))
+                    return System.Net.IPAddress.IsLoopback(ip);
+                return false;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>把校验失败原因归一成短标签，便于在日志里做分布统计。</summary>
+        private static string ShortReason(string why)
+        {
+            if (string.IsNullOrWhiteSpace(why)) return "未知";
+            var w = why.Trim();
+            if (w.StartsWith("源返回 ")) return w.Substring(4).Trim();
+            if (w.StartsWith("content-type=")) return w.Substring(13).Trim();
+            if (w.Contains("Timeout", StringComparison.OrdinalIgnoreCase)) return "超时";
+            return w.Length > 24 ? w.Substring(0, 24) : w;
+        }
+
+        /// <summary>「（原因：403×12、text/html×6）」——只报"全部不可用"看不出是防盗链还是源死了。</summary>
+        private static string FormatReasons(System.Collections.Concurrent.ConcurrentDictionary<string, int> reasons)
+        {
+            if (reasons == null || reasons.Count == 0) return "";
+            var top = reasons.OrderByDescending(kv => kv.Value).Take(3)
+                             .Select(kv => kv.Key + "×" + kv.Value);
+            return "（原因：" + string.Join("、", top) + "）";
         }
 
         private static string ShortErr(Exception ex)
@@ -856,14 +977,17 @@ namespace TvBox.Plugin.Core
                                 if (cfg.VerifyPlayUrl)
                                 {
                                     int dead = 0;
+                                    var reasons = new System.Collections.Concurrent.ConcurrentDictionary<string, int>();
                                     var live = await FilterPlayableEpisodesAsync(
-                                        client, line.Episodes, ct, _ => dead++).ConfigureAwait(false);
+                                        client, line.Episodes, site, cfg, ct,
+                                        why => { dead++; reasons.AddOrUpdate(ShortReason(why), 1, (_, v) => v + 1); },
+                                        note => _log("     [" + (item.Name ?? item.Id) + "] " + note)).ConfigureAwait(false);
                                     if (live.Count == 0)
                                     {
                                         summary.Items++;
                                         summary.Skipped++;
                                         Update(p => p.ItemsSkipped++);
-                                        _log("     [" + (item.Name ?? item.Id) + "] 跳过：" + line.Episodes.Count + " 集全部不可用");
+                                        _log("     [" + (item.Name ?? item.Id) + "] 跳过：" + line.Episodes.Count + " 集全部不可用" + FormatReasons(reasons));
                                         continue;
                                     }
                                     if (dead > 0)

@@ -33,3 +33,10 @@ if [ -f "$VENDOR_JSON" ]; then
 else
   echo "⚠️ 缺少 $VENDOR_JSON，继续用 lib/json.jar 的严格版" >&2
 fi
+
+# ── 打 hub.jar 并同步到 fpk-src/ui ──
+# 运行时的 classpath 是「hub.jar 在最前 + lib/* 兜底」，所以宽松版 org.json 必须进 hub.jar。
+( cd out && "$JAVA_HOME/bin/jar" --create --file ../hub.jar . )
+mkdir -p ../fpk-src/ui
+cp -f hub.jar ../fpk-src/ui/hub.jar
+echo "已生成 hub.jar: $(stat -c%s hub.jar) bytes"

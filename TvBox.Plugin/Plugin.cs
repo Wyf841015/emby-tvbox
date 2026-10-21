@@ -111,7 +111,11 @@ namespace TvBox.Plugin
             // 必然播不了。这里自动挑本机可被局域网访问的 IPv4。
             var lan = DetectLanAddress();
             if (lan != null) return "http://" + lan + ":" + p2;
-            return "http://127.0.0.1:" + p2;
+
+            // 找不到局域网地址时返回 null，绝不退化成 127.0.0.1：
+            // 那会静默写出一整库客户端连自己的死链，而且日志一个字都不提。
+            // 交给 SyncService 明确拒绝并提示用户去填「Emby 访问地址」。
+            return null;
         }
 
         /// <summary>

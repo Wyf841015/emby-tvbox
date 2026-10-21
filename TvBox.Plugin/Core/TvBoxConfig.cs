@@ -25,6 +25,31 @@ namespace TvBox.Plugin.Core
         [JsonPropertyName("ext")] public JsonElement? Ext { get; set; }
 
         /// <summary>
+        /// 校验/播放时该带的 Referer。很多 CDN 只认自己站点的 Referer，不带就 403，
+        /// 会被当成死链整条丢掉。优先取 api 的源站；spider 站的 api 是 csp_Xxx，退回 ext 里的域名。
+        /// </summary>
+        public string Referer
+        {
+            get
+            {
+                var r = OriginOf(Api);
+                if (r != null) return r;
+                if (Ext.HasValue && Ext.Value.ValueKind == JsonValueKind.String)
+                    return OriginOf(Ext.Value.GetString());
+                return null;
+            }
+        }
+
+        private static string OriginOf(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url)) return null;
+            if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+                !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) return null;
+            try { return new Uri(url).GetLeftPart(UriPartial.Authority) + "/"; }
+            catch { return null; }
+        }
+
+        /// <summary>
         /// 本插件能否处理这个站。
         /// type 0 = CMS XML，type 1 = CMS JSON —— 直接支持。
         /// type 3/4 是 spider（jar 或 drpy js），C# 跑不了，明确不支持。

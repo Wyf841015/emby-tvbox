@@ -123,6 +123,20 @@ namespace TvBox.Plugin
         /// </summary>
         public int DetailBatchSize { get; set; } = 16;
 
+        /// <summary>
+        /// 单个条目最多校验多少集（默认 48）。源里动辄 200+ 集，每集要 2 个请求，
+        /// 全量校验一个条目就能烧掉 500+ 次请求；超过这个数就做样本校验
+        /// （首 12 + 尾 12 + 中间均匀抽），没抽到的按可播写入。填 0 = 不限（很慢）。
+        /// </summary>
+        public int VerifyMaxEpisodes { get; set; } = 48;
+
+        /// <summary>
+        /// 把「不能直接播」的地址解成真媒体地址（默认开）：
+        /// 解析接口（?url=…）、网页播放页、302 中转。解的只是被校验的那几集，
+        /// 解不出来就照旧跳过，不会让同步变慢。
+        /// </summary>
+        public bool ResolveIndirectUrl { get; set; } = true;
+
         /// <summary>同步开关：关掉后定时任务直接跳过。</summary>
         public bool EnableScheduledSync { get; set; }
 

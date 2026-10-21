@@ -76,6 +76,9 @@ namespace TvBox.Plugin.Core
     public class CmsClient
     {
         private readonly HttpClient _http;
+
+        /// <summary>给 PlayUrlResolver 复用同一个连接池（UA/超时/代理设置一致）。</summary>
+        public HttpClient Http => _http;
         private readonly Action<string> _log;
         private readonly string _referer;
 
@@ -282,13 +285,19 @@ namespace TvBox.Plugin.Core
         ///   2. 如果是 m3u8：抠出第一个真实分片再取一次，遇到图片后缀直接判死
         ///   3. 分片要求状态 200/206，且不是 text/html、application/xml 这类错误页
         /// </summary>
-        public async Task<(bool ok, string reason)> VerifyPlayableAsync(string url, CancellationToken ct)
+        public Task<(bool ok, string reason)> VerifyPlayableAsync(string url, CancellationToken ct)
+            => VerifyPlayableAsync(url, null, ct);
+
+        public async Task<(bool ok, string reason)> VerifyPlayableAsync(string url, string referer, CancellationToken ct)
         {
             if (string.IsNullOrWhiteSpace(url)) return (false, "地址为空");
             try
             {
                 using var req = new HttpRequestMessage(HttpMethod.Get, url);
                 req.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 131071);
+                // 按站点补 Referer：不少 CDN 不带自己站点的 Referer 就 403，会被误判成死链
+                if (!string.IsNullOrWhiteSpace(referer) && Uri.TryCreate(referer, UriKind.Absolute, out var rf))
+                    req.Headers.Referrer = rf;
                 using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct)
                                            .ConfigureAwait(false);
                 var status = (int)resp.StatusCode;

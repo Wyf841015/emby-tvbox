@@ -22,6 +22,8 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -46,6 +48,54 @@ import com.sun.net.httpserver.HttpServer;
  *   java -cp "out:lib/*:spiders/*" hub.Hub --port 8098 --config hub.json
  */
 public class Hub {
+
+    // ── ac=detail 结果缓存 ──
+    // spider 的 detailContent 是最慢的一环（很多站 3~8 秒/条），而它是纯读操作。
+    // 同步时的「拆批重试」「跨轮次重跑」「重复点同步」都会重复打同样的 id，
+    // 加一层短 TTL 缓存能直接把这些重复请求吃掉，也少给上游压力。
+    // 按「站点|单个 id」做键：拆批重试按单个 id 重发，也能命中。
+    private static final class DetailEntry {
+        final String json;
+        final long at;
+        DetailEntry(String json, long at) { this.json = json; this.at = at; }
+    }
+    private static final Map<String, DetailEntry> detailCache = new ConcurrentHashMap<>();
+    private static final int DETAIL_CACHE_MAX = 800;
+    private static final long DETAIL_TTL_MS = 5 * 60 * 1000L;
+    private static final LongAdder detailHits = new LongAdder();
+    private static final LongAdder detailMiss = new LongAdder();
+
+    static String detailCacheGet(String k) {
+        DetailEntry e = detailCache.get(k);
+        if (e == null) { detailMiss.increment(); return null; }
+        if (System.currentTimeMillis() - e.at > DETAIL_TTL_MS) { detailCache.remove(k); detailMiss.increment(); return null; }
+        detailHits.increment();
+        return e.json;
+    }
+
+    static void detailCachePut(String k, String json) {
+        long now = System.currentTimeMillis();
+        if (detailCache.size() >= DETAIL_CACHE_MAX) {
+            for (Map.Entry<String, DetailEntry> e : detailCache.entrySet())
+                if (now - e.getValue().at > DETAIL_TTL_MS) detailCache.remove(e.getKey());
+            if (detailCache.size() >= DETAIL_CACHE_MAX) {
+                // 还是满的：清掉最老的一批，简单省事
+                List<Map.Entry<String, DetailEntry>> ordered = new ArrayList<>(detailCache.entrySet());
+                ordered.sort((a, b) -> Long.compare(a.getValue().at, b.getValue().at));
+                for (int i = 0; i < ordered.size() / 4; i++) detailCache.remove(ordered.get(i).getKey());
+            }
+        }
+        detailCache.put(k, new DetailEntry(json, now));
+    }
+
+    static Map<String, Object> detailCacheStats() {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("entries", detailCache.size());
+        m.put("hits", detailHits.sum());
+        m.put("miss", detailMiss.sum());
+        m.put("ttlSec", DETAIL_TTL_MS / 1000);
+        return m;
+    }
 
     static SpiderPool pool = new SpiderPool();
     static {
@@ -369,6 +419,8 @@ public class Hub {
                 m.put("configUrl", str(settings.get("configUrl")));
                 m.put("spiderJar", str(settings.get("spiderJar")));
                 m.put("stats", pool.stats());
+                m.put("pool", pool.instanceStats());
+                m.put("detailCache", detailCacheStats());
                 m.put("loadErrors", pool.loadErrors());
                 m.put("javaVersion", System.getProperty("java.version"));
                 m.put("tcpPort", tcpPort);
@@ -726,6 +778,15 @@ public class Hub {
                 sendJson(ex, 200, m);
                 return;
             }
+            case "/api/cache/clear": {
+                int n = detailCache.size();
+                detailCache.clear();
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("ok", true);
+                m.put("cleared", n);
+                sendJson(ex, 200, m);
+                return;
+            }
             case "/api/emby/write-check": {
                 String base = embyBase();
                 if (base == null) { sendJson(ex, 200, fail("还没连上 Emby")); return; }
@@ -903,7 +964,15 @@ public class Hub {
                         for (String one : parts) {
                             if (one == null || one.isEmpty()) continue;
                             final String oneId = one;
+                            final String ck = key + "|" + oneId;
                             try {
+                                String cachedJson = detailCacheGet(ck);
+                                if (cachedJson != null) {
+                                    if (okCount > 0) merged.append(",");
+                                    merged.append(cachedJson.substring(1, cachedJson.length() - 1));
+                                    okCount++;
+                                    continue;
+                                }
                                 String raw = call(key, () -> {
                                     Spider s = pool.get(key);
                                     return s.detailContent(new ArrayList<>(List.of(oneId)));
@@ -913,6 +982,7 @@ public class Hub {
                                 Object lst = (parsed instanceof Map) ? ((Map<?, ?>) parsed).get("list") : null;
                                 if (!(lst instanceof List) || ((List<?>) lst).isEmpty()) continue;
                                 String oneJson = SpiderPool.Json.stringify(lst);
+                                detailCachePut(ck, oneJson);
                                 if (okCount > 0) merged.append(",");
                                 merged.append(oneJson.substring(1, oneJson.length() - 1));  // 去掉外层 []
                                 okCount++;

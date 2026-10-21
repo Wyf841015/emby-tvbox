@@ -10,6 +10,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 import com.github.catvod.crawler.Spider;
 
@@ -74,6 +75,15 @@ public class SpiderPool {
 
     private final Map<String, Site> sites = new ConcurrentHashMap<>();
     private final Map<String, Spider> instances = new ConcurrentHashMap<>();
+
+    // ── 实例数量治理 ──
+    // 原先 instances 只进不出：站一多（实测 189 个）就常驻 189 个 spider，
+    // 每个都可能自带缓存，512m 堆很容易被压死（这台 2 核 Celeron 已经因此崩过两次 GC）。
+    // 现在做「空闲回收 + 总量上限」：超过 MAX_INSTANCES 就按最久未用先回收。
+    private static final int MAX_INSTANCES = 60;
+    private static final long IDLE_MS = 15 * 60 * 1000L;
+    private final Map<String, Long> lastUsed = new ConcurrentHashMap<>();
+    private final AtomicLong evicted = new AtomicLong();
     private final Map<String, String> loadErrors = new LinkedHashMap<>();
     private ClassLoader spiderLoader;
     /** 站点自带 jar 的 ClassLoader（按 jar URL 缓存，父加载器是 spiderLoader）。 */
@@ -291,7 +301,11 @@ public class SpiderPool {
         }
 
         Spider cached = instances.get(key);
-        if (cached != null) return cached;
+        if (cached != null) {
+            lastUsed.put(key, System.currentTimeMillis());
+            maybeEvict();
+            return cached;
+        }
 
         synchronized (this) {
             cached = instances.get(key);
@@ -331,8 +345,46 @@ public class SpiderPool {
             }
 
             instances.put(key, spider);
+            lastUsed.put(key, System.currentTimeMillis());
+            maybeEvict();
             return spider;
         }
+    }
+
+    /** 空闲/超额实例回收：先收空闲超过 15 分钟的，再看总量是否超上限。 */
+    private void maybeEvict() {
+        long now = System.currentTimeMillis();
+        for (Map.Entry<String, Long> e : lastUsed.entrySet()) {
+            if (now - e.getValue() > IDLE_MS && instances.size() > 8) {
+                if (instances.remove(e.getKey()) != null) {
+                    lastUsed.remove(e.getKey());
+                    evicted.incrementAndGet();
+                }
+            }
+        }
+        if (instances.size() <= MAX_INSTANCES) return;
+        // 超上限：按最久未用先回收，收到上限的 80% 为止，避免每次都触发
+        List<Map.Entry<String, Long>> ordered = new ArrayList<>(lastUsed.entrySet());
+        ordered.sort(Map.Entry.comparingByValue());
+        int target = (int) (MAX_INSTANCES * 0.8);
+        for (Map.Entry<String, Long> e : ordered) {
+            if (instances.size() <= target) break;
+            if (instances.remove(e.getKey()) != null) {
+                lastUsed.remove(e.getKey());
+                evicted.incrementAndGet();
+            }
+        }
+        System.out.println("[pool] spider 实例超过 " + MAX_INSTANCES + " 个，已回收到 " + instances.size()
+                + " 个（累计回收 " + evicted.get() + "）");
+    }
+
+    /** 实例治理状态，给 /api/status 用。 */
+    public Map<String, Object> instanceStats() {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("cached", instances.size());
+        m.put("max", MAX_INSTANCES);
+        m.put("evicted", evicted.get());
+        return m;
     }
 
     /**
