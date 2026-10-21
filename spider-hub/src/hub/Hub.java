@@ -598,6 +598,8 @@ public class Hub {
                     }
                     if (rec) record("探测站点", key, nClass > 0 || nList > 0,
                             "分类 " + nClass + " / 列表 " + nList, ms);
+                    pool.markData(key, nClass, nList);          // 有数据才算可用
+                    rememberProbe(key, nClass, nList, null);    // 落盘，重启后还在
                     Map<String, Object> m = new LinkedHashMap<>();
                     m.put("ok", true);
                     m.put("classes", nClass);
@@ -608,6 +610,8 @@ public class Hub {
                 } catch (Exception e) {
                     long ms = System.currentTimeMillis() - t0;
                     if (rec) record("探测站点", key, false, String.valueOf(e.getMessage()), ms);
+                    pool.markData(key, 0, 0);   // 记下探测时间，界面才能区分「无数据」和「未测」
+                    rememberProbe(key, 0, 0, String.valueOf(e.getMessage()));
                     Map<String, Object> m = fail(String.valueOf(e.getMessage()));
                     m.put("ms", ms);
                     sendJson(ex, 200, m);
@@ -1051,6 +1055,7 @@ public class Hub {
         }
         pool.loadFromConfig(body, url);
         System.out.println("已加载 " + pool.size() + " 个 spider 站点");
+        restoreProbeState();
         return pool.size();
     }
 
@@ -1549,6 +1554,50 @@ public class Hub {
         if (dataFile != null && !settings.containsKey("configUrl")) {
             settings.put("configUrl", "");
         }
+    }
+
+
+    // ───────────── 探测结果持久化（界面「测试」列在重启后不清空）─────────────
+
+    /**
+     * 把一条探测结果写进 settings["probe"] 并落盘。
+     * 结构：{"站点key": {"c":分类数,"l":列表数,"at":毫秒,"e":错误或null}}
+     */
+    @SuppressWarnings("unchecked")
+    static synchronized void rememberProbe(String key, int classes, int list, String err) {
+        if (key == null || key.isBlank()) return;
+        Object cur = settings.get("probe");
+        Map<String, Object> probe = (cur instanceof Map)
+                ? (Map<String, Object>) cur : new LinkedHashMap<String, Object>();
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("c", classes);
+        row.put("l", list);
+        row.put("at", System.currentTimeMillis());
+        row.put("e", (err == null || err.isBlank()) ? null
+                : (err.length() > 200 ? err.substring(0, 200) : err));
+        probe.put(key, row);
+        settings.put("probe", probe);
+        saveSettings();
+    }
+
+    /** hub 启动 / 重新加载配置后，把磁盘上的探测结果恢复到 pool（测试列不清空）。 */
+    static void restoreProbeState() {
+        Object cur = settings.get("probe");
+        if (!(cur instanceof Map)) return;
+        int n = 0;
+        for (Map.Entry<?, ?> e : ((Map<?, ?>) cur).entrySet()) {
+            if (!(e.getValue() instanceof Map)) continue;
+            Map<?, ?> row = (Map<?, ?>) e.getValue();
+            int c = (int) num(row.get("c"));
+            int l = (int) num(row.get("l"));
+            long at = (long) num(row.get("at"));
+            Object errObj = row.get("e");
+            String err = errObj == null ? null : String.valueOf(errObj);
+            if (at <= 0) continue;
+            pool.restoreProbe(String.valueOf(e.getKey()), c, l, at, err);
+            n++;
+        }
+        if (n > 0) System.out.println("恢复上次探测结果: " + n + " 个站点");
     }
 
     static void saveSettings() {

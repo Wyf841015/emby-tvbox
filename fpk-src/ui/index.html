@@ -201,6 +201,7 @@
   .st{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
   .st.ok{background:var(--ok);box-shadow:0 0 8px rgba(46,204,113,.65)}
   .st.bad{background:var(--bad)} .st.unk{background:var(--dim)}
+  .st.none{background:var(--warn);opacity:.75}
   .err{color:#ff9a9d;font-size:12px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   html[data-theme="light"] .err{color:#c62b31}
   html[data-theme="light"] code{color:#1d4fd8;background:#f1f5fd;border-color:#dde6f6}
@@ -367,6 +368,7 @@
   html[data-theme="light"] button.danger{background:#fff;border-color:#e8b4b6;color:#c62b31}
   html[data-theme="light"] button.danger:hover{background:#fdeced;border-color:#d97e81}
   html[data-theme="light"] .st.bad{background:#d13a40}
+  html[data-theme="light"] .st.none{background:#c8860d}
   html[data-theme="light"] .pbar{background:#dde5f0}
   html[data-theme="light"] pre{background:#f5f8fd;color:#2c3d57;border-color:var(--line)}
   html[data-theme="light"] .toast{background:#fff;box-shadow:var(--sh-3)}
@@ -450,7 +452,8 @@
       <div class="row" style="margin-bottom:12px">
         <select id="siteFilter" onchange="renderSites()">
           <option value="all">全部</option>
-          <option value="ok">仅可用</option>
+          <option value="ok">仅可用（有数据）</option>
+          <option value="none">无数据</option>
           <option value="bad">失败 / 未测</option>
         </select>
         <input type="text" id="siteSearch" placeholder="搜索站点名 / key"
@@ -826,12 +829,18 @@ function loadSites() {
   });
 }
 
+/** 站点是否真的能出内容：探测过看 data，没探测过退回「调用成功」。 */
+function siteHasData(s) {
+  return s.probeTs ? !!s.data : !!s.ok;
+}
+
 function filteredSites() {
   var filter = (document.getElementById('siteFilter') || {}).value || 'all';
   var kw = ((document.getElementById('siteSearch') || {}).value || '').trim().toLowerCase();
   return sites.filter(function (s) {
-    if (filter === 'ok' && !s.ok) return false;
-    if (filter === 'bad' && s.ok) return false;
+    if (filter === 'ok' && !siteHasData(s)) return false;
+    if (filter === 'none' && !(s.probeTs && !s.data && !s.lastError)) return false;
+    if (filter === 'bad' && !(s.lastError || (!s.probeTs && !s.ok))) return false;
     if (kw) {
       var hay = (s.name + ' ' + s.key + ' ' + s.class).toLowerCase();
       if (hay.indexOf(kw) < 0) return false;
@@ -857,9 +866,17 @@ function renderSites() {
   }
 
   function row(s) {
-    var st = s.ok ? 'ok' : (s.lastError ? 'bad' : 'unk');
+    // 四态：失败 / 可用（真拿到内容）/ 无数据（调通了但 0 条）/ 未测
+    var probed = !!s.probeTs;
+    var st = s.lastError ? 'bad'
+      : (probed ? (s.data ? 'ok' : 'none') : (s.ok ? 'ok' : 'unk'));
+    var label = s.lastError ? '失败'
+      : (probed ? (s.data ? '可用' : '无数据') : (s.ok ? '可用' : '未测'));
+    var tip = s.lastError ? ('错误：' + s.lastError)
+      : (probed ? ('分类 ' + (s.classes || 0) + ' / 列表 ' + (s.list || 0) + ' · 探测于 ' + (s.probeAt || ''))
+                : '还没探测过，点上面的「批量探测当前」');
     return '<tr>' +
-      '<td><span class="st ' + st + '"></span>' + (s.ok ? '可用' : (s.lastError ? '失败' : '未测')) + '</td>' +
+      '<td title="' + esc(tip) + '"><span class="st ' + st + '"></span>' + label + '</td>' +
       '<td>' + (s.netdisk ? '<span class="pill bad">网盘</span>' : '<span class="pill ok">直连</span>') + '</td>' +
       '<td>' + esc(s.name || '') + '</td>' +
       '<td><code>' + esc(s.key) + '</code></td>' +
@@ -899,9 +916,9 @@ function setSiteSync(key, on) {
 // 批量：把所有「可用」站点加入同步，或全部移出
 function bulkSync(on) {
   var targets = on
-    ? sites.filter(function (s) { return !s.sync && !s.netdisk && s.ok; }).map(function (s) { return s.key; })
+    ? sites.filter(function (s) { return !s.sync && !s.netdisk && siteHasData(s); }).map(function (s) { return s.key; })
     : sites.filter(function (s) { return s.sync; }).map(function (s) { return s.key; });
-  if (!targets.length) { toast(on ? '没有「已探测可用且尚未加入」的站点（先跑一遍批量探测）' : '当前没有加入同步的站点', 'bad'); return; }
+  if (!targets.length) { toast(on ? '没有「探测有数据且尚未加入」的站点（先跑一遍批量探测）' : '当前没有加入同步的站点', 'bad'); return; }
   if (!confirm((on ? '把 ' : '把 ') + targets.length + ' 个站点' + (on ? '加入' : '移出') + '同步？')) return;
   api('api/sites/sync', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -972,8 +989,8 @@ function probeAll() {
   function next(i) {
     if (i >= list.length) {
       var ms = Date.now() - t0;
-      box.textContent = '完成：' + ok + ' / ' + list.length + ' 可用';
-      toast('探测完成：' + ok + ' / ' + list.length + ' 可用', 'ok');
+      box.textContent = '完成：' + ok + ' / ' + list.length + ' 有数据';
+      toast('探测完成：' + ok + ' / ' + list.length + ' 个站有数据（其余见测试列）', 'ok');
       api('api/history/add', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: '批量探测', target: list.length + ' 个站点（当前筛选）',
           ok: 1, detail: '可用 ' + ok + ' / ' + list.length, ms: ms }) }).then(loadLogs);
@@ -981,7 +998,7 @@ function probeAll() {
       return;
     }
     api('api/probe?key=' + encodeURIComponent(list[i].key) + '&record=0').then(function (d) {
-      if (d.classes > 0 || d.list > 0) ok++;
+      if (d.classes > 0 || d.list > 0) ok++;   // 与后端 markData 同一口径
     }).catch(function () {}).then(function () {
       done++;
       box.textContent = done + ' / ' + list.length + '（可用 ' + ok + '）';

@@ -39,6 +39,13 @@ public class SpiderPool {
         public boolean netdisk;
         public volatile String lastError;
         public volatile long lastOk;
+        /** 最近一次探测（homeContent）拿到的分类数、列表条目数。 */
+        public volatile int lastClasses;
+        public volatile int lastList;
+        /** 最近一次探测时间（0 = 从没探测过）。 */
+        public volatile long lastProbeAt;
+        /** 最近一次探测是否真的拿到了内容（分类>0 或 列表>0）。 */
+        public volatile boolean hasData;
 
         public Map<String, Object> toMap() {
             Map<String, Object> m = new LinkedHashMap<>();
@@ -52,6 +59,12 @@ public class SpiderPool {
             m.put("ok", lastOk > 0 && lastError == null);
             m.put("lastError", lastError);
             m.put("lastOk", lastOk == 0 ? null : new java.util.Date(lastOk).toString());
+            // 测试列三态：失败(lastError) / 可用(有数据) / 无数据(调通了但 0 条) / 未测(从没探测)
+            m.put("data", hasData);
+            m.put("classes", lastClasses);
+            m.put("list", lastList);
+            m.put("probeAt", lastProbeAt == 0 ? null : new java.util.Date(lastProbeAt).toString());
+            m.put("probeTs", lastProbeAt == 0 ? null : lastProbeAt);
             return m;
         }
     }
@@ -313,6 +326,47 @@ public class SpiderPool {
         }
     }
 
+    /**
+     * 记录一次探测结果（homeContent 的分类数 / 列表条目数）。
+     *
+     * 和 markOk 的区别：markOk 只说明「调用没抛异常」，返回 0 条也算 success；
+     * 这里额外记住有没有真拿到内容，界面测试列才能区分「可用」和「无数据」。
+     */
+    public void markData(String key, int classes, int list) {
+        Site s = sites.get(key);
+        if (s == null) return;
+        long now = System.currentTimeMillis();
+        s.lastProbeAt = now;
+        s.lastClasses = classes;
+        s.lastList = list;
+        s.hasData = classes > 0 || list > 0;
+        if (s.hasData) {
+            s.lastOk = now;
+            s.lastError = null;
+        }
+    }
+
+    /**
+     * 从磁盘恢复一次探测结果（hub 重启后测试列不清空）。
+     * err 非空表示上次是失败，此时 data 一律 false。
+     */
+    public void restoreProbe(String key, int classes, int list, long at, String err) {
+        Site s = sites.get(key);
+        if (s == null || at <= 0) return;
+        s.lastProbeAt = at;
+        s.lastClasses = classes;
+        s.lastList = list;
+        if (err != null && !err.isBlank()) {
+            s.hasData = false;
+            s.lastError = err;
+            s.lastOk = 0;
+        } else {
+            s.hasData = classes > 0 || list > 0;
+            s.lastError = null;
+            s.lastOk = s.hasData ? at : 0;
+        }
+    }
+
     /** 记录一次失败。 */
     public void record(String key, String err) {
         Site s = sites.get(key);
@@ -344,7 +398,10 @@ public class SpiderPool {
         int ok = 0, bad = 0;
         for (Site s : sites.values()) {
             if (s.netdisk) continue;                    // 网盘类不参与可用性统计
-            if (s.lastOk > 0 && s.lastError == null) ok++;
+            // 探测过（lastProbeAt>0）就只认真的拿到了内容；没探测过才按「调用成功」算
+            boolean usable = s.lastError == null
+                    && (s.lastProbeAt > 0 ? s.hasData : s.lastOk > 0);
+            if (usable) ok++;
             else bad++;
         }
         Map<String, Object> m = new LinkedHashMap<>();
