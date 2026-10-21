@@ -213,8 +213,14 @@ public class EmbyManager {
             boolean nameLooksEmby = name.contains("emby");
 
             if (!hasSystemXml && !hasTrace && !nameLooksEmby) return null;
-            // "默认路径"这类靠名字匹配的，如果目录空且和 emby 无关就别认
-            if (!hasSystemXml && !hasTrace && !nameLooksEmby) return null;
+
+            // 排除「应用安装目录」：fnOS 的 @appcenter/EmbyServer4-9 里有 target/system/EmbyServer，
+            // 那是程序本体不是 programdata，认成 programdata 会让用户装错地方。
+            if (Files.exists(dir.resolve("system").resolve("EmbyServer.dll"))
+                    || Files.isRegularFile(dir.resolve("system").resolve("EmbyServer"))
+                    || Files.isDirectory(dir.resolve("target").resolve("system"))) {
+                return null;
+            }
 
             Instance i = new Instance();
             i.programdata = dir.toAbsolutePath().toString();
@@ -404,6 +410,162 @@ public class EmbyManager {
             m.put("error", explain(e));
         }
         return m;
+    }
+
+
+    // ───────────────────────── 媒体库目录检测 ─────────────────────────
+
+    /**
+     * 从 Emby programdata 里挖出已配置的媒体库目录。
+     *
+     * Emby 把这信息分散在三处，单一来源都不可靠，所以三路都扫再合并：
+     *   1. root/default/<库>/*.mblink  —— 每个媒体文件夹一个链接文件，正文就是路径
+     *   2. config/library/*            —— 库的选项文件，里面会有 <Path> 之类
+     *   3. data/library.db             —— SQLite，直接按字节找绝对路径串（无需驱动）
+     */
+    public static List<Map<String, Object>> detectLibraries(String programdata) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        Path root;
+        try {
+            root = Path.of(programdata);
+        } catch (Exception e) {
+            return out;
+        }
+        if (!Files.isDirectory(root)) return out;
+
+        // 1) .mblink
+        try (Stream<Path> s = Files.walk(root.resolve("root"), 6)) {
+            s.filter(Files::isRegularFile)
+             .filter(f -> {
+                 String n = f.getFileName().toString().toLowerCase();
+                 return n.endsWith(".mblink") || n.endsWith(".mblink.link");
+             })
+             .limit(500)
+             .forEach(f -> {
+                 try {
+                     String txt = Files.readString(f, StandardCharsets.UTF_8).trim();
+                     addLib(out, seen, txt, "媒体库链接文件", root);
+                     // 有些版本把路径 base64 存
+                     try {
+                         String dec = new String(java.util.Base64.getDecoder().decode(txt), StandardCharsets.UTF_8);
+                         if (dec.startsWith("/")) addLib(out, seen, dec.trim(), "媒体库链接文件(base64)", root);
+                     } catch (Exception ignore) {
+                     }
+                 } catch (Exception ignore) {
+                 }
+             });
+        } catch (Exception ignore) {
+        }
+
+        // 2) config/library/*
+        Path libCfg = root.resolve("config").resolve("library");
+        if (Files.isDirectory(libCfg)) {
+            try (DirectoryStream<Path> ds = Files.newDirectoryStream(libCfg)) {
+                for (Path f : ds) {
+                    if (!Files.isRegularFile(f)) continue;
+                    try {
+                        long size = Files.size(f);
+                        if (size > 4L * 1024 * 1024) continue;
+                        String txt = new String(Files.readAllBytes(f), StandardCharsets.UTF_8);
+                        for (String abs : extractAbsPaths(txt)) {
+                            addLib(out, seen, abs, "config/library/" + f.getFileName(), root);
+                        }
+                    } catch (Exception ignore) {
+                    }
+                }
+            } catch (Exception ignore) {
+            }
+        }
+
+        // 3) data/library.db —— 按字节找绝对路径
+        for (String dbName : new String[]{"library.db", "library.db-wal"}) {
+            Path db = root.resolve("data").resolve(dbName);
+            if (!Files.isRegularFile(db)) continue;
+            try (java.io.InputStream in = Files.newInputStream(db)) {
+                byte[] head = in.readNBytes(16 * 1024 * 1024);   // 最多读 16MB
+                String txt = new String(head, StandardCharsets.UTF_8);
+                for (String abs : extractAbsPaths(txt)) {
+                    addLib(out, seen, abs, "data/" + dbName, root);
+                }
+            } catch (Exception ignore) {
+            }
+        }
+
+        // 排序：存在的在前，可写的优先，层级浅的优先
+        out.sort(java.util.Comparator
+                .comparingInt((Map<String, Object> m) -> Boolean.TRUE.equals(m.get("exists")) ? 0 : 1)
+                .thenComparingInt(m -> Boolean.TRUE.equals(m.get("writable")) ? 0 : 1)
+                .thenComparingInt(m -> String.valueOf(m.get("path")).length()));
+        return out;
+    }
+
+    private static void addLib(List<Map<String, Object>> out, Set<String> seen,
+                               String raw, String source, Path programdata) {
+        String path = cleanPath(raw);
+        if (path == null) return;
+        // 排除 Emby 自己的数据目录、系统目录
+        if (path.startsWith(programdata.toString())) return;
+        if (path.startsWith("/proc") || path.startsWith("/sys") || path.startsWith("/dev")) return;
+        if (path.split("/").length < 3) return;          // 至少 /vol1/xxx
+        if (seen.contains(path)) return;
+        seen.add(path);
+
+        Path p = Path.of(path);
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("path", path);
+        m.put("source", source);
+        m.put("exists", Files.isDirectory(p));
+        m.put("writable", Files.isDirectory(p) && Files.isWritable(p));
+        // 猜一下库类型，方便界面提示
+        String low = path.toLowerCase();
+        if (low.contains("movie") || low.contains("电影")) m.put("kind", "电影");
+        else if (low.contains("动漫") || low.contains("anime")) m.put("kind", "动漫");
+        else if (low.contains("tv") || low.contains("show") || low.contains("剧") || low.contains("series")) m.put("kind", "剧集");
+        else if (low.contains("music") || low.contains("音乐")) m.put("kind", "音乐");
+        else if (low.contains("photo") || low.contains("相册")) m.put("kind", "照片");
+        else m.put("kind", "未知");
+        out.add(m);
+    }
+
+    /**
+     * 从任意文本里抽绝对路径。
+     * 注意：字符类里用 \x2d 表示 '-'，避免被当成范围；
+     * 汉字区间直接写成 \u4e00-\u9fa5（Java 预处理会转成真字符）。
+     */
+    private static final java.util.regex.Pattern ABS_PATH = java.util.regex.Pattern.compile(
+            "/(?:vol[0-9]+|volume[0-9]+|mnt|media|share)/[A-Za-z0-9_./@# \u4e00-\u9fa5-]{2,200}");
+
+    private static List<String> extractAbsPaths(String text) {
+        List<String> out = new ArrayList<>();
+        if (text == null || text.isEmpty()) return out;
+        java.util.regex.Matcher m = ABS_PATH.matcher(text);
+        while (m.find()) {
+            String p = cleanPath(m.group());
+            if (p != null && !out.contains(p)) out.add(p);
+            if (out.size() > 200) break;
+        }
+        return out;
+    }
+
+    /** 归一化：去掉尾部的控制字符、引号、常见后缀噪声。 */
+    private static String cleanPath(String raw) {
+        if (raw == null) return null;
+        String s = raw.trim();
+        // 去掉 XML/JSON 尾巴
+        s = s.replaceAll("[\\x00-\\x1f\"'<>|,*;]+$", "");
+        s = s.replaceAll("[\\x00-\\x1f\"'<>|*?]$", "");
+        int cut = s.length();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < 0x20 || "\"'<>|*?".indexOf(c) >= 0) { cut = i; break; }
+        }
+        s = s.substring(0, cut).trim();
+        while (s.endsWith("/") && s.length() > 1) s = s.substring(0, s.length() - 1);
+        if (s.length() < 4 || !s.startsWith("/")) return null;
+        if (s.contains("://")) return null;
+        if (s.contains("..")) return null;
+        return s;
     }
 
     private static String explain(Exception e) {

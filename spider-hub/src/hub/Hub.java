@@ -416,6 +416,19 @@ public class Hub {
                 }
                 return;
             }
+            case "/api/emby/libraries": {
+                String pd = q.getOrDefault("programdata", str(settings.get("embyPath")));
+                if (pd == null || pd.isEmpty()) { sendJson(ex, 200, fail("还没选 Emby 目录")); return; }
+                List<Object> dirs = new ArrayList<>();
+                for (Map<String, Object> m : EmbyManager.detectLibraries(pd)) dirs.add(m);
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("ok", true);
+                m.put("programdata", pd);
+                m.put("total", dirs.size());
+                m.put("dirs", dirs);
+                sendJson(ex, 200, m);
+                return;
+            }
             case "/api/emby/detect": {
                 List<Object> list = new ArrayList<>();
                 for (EmbyManager.Instance i : EmbyManager.detect(str(settings.get("embyPath")))) {

@@ -233,8 +233,15 @@
 
     <div class="panel">
       <h2>安装插件</h2>
-      <div class="row">
-        <input type="text" id="outputRoot" placeholder="剧集输出目录（strm 根目录），如 /vol1/media/tvbox">
+      <div class="row" style="margin-bottom:10px">
+        <button onclick="detectLibs()" id="btnLibs">检测媒体库目录</button>
+        <select id="libSelect" onchange="onLibPick(this)" style="max-width:420px;flex:1">
+          <option value="">（点左侧按钮，从 Emby 里读出已配置的媒体库目录）</option>
+        </select>
+      </div>
+      <div id="libTable"></div>
+      <div class="row" style="margin-top:10px">
+        <input type="text" id="outputRoot" placeholder="输出目录（strm 根目录），如 /vol1/media/tvbox">
       </div>
       <div class="row" style="margin-top:10px">
         <button class="primary" onclick="installPlugin()" id="btnInstall">安装插件到 Emby</button>
@@ -668,6 +675,72 @@ function uninstallPlugin() {
   api('api/emby/uninstall', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ programdata: pd }) })
     .then(function (d) { toast(d.msg || '已卸载', d.ok ? 'ok' : 'bad'); embyStatus(); loadLogs(); });
+}
+
+
+// ───────── Emby 媒体库目录 ─────────
+
+function detectLibs() {
+  var pd = document.getElementById('embyPath').value.trim();
+  var box = document.getElementById('libTable');
+  var sel = document.getElementById('libSelect');
+  if (!pd) { toast('先在上面选一个 Emby 数据目录', 'bad'); return; }
+  box.innerHTML = '<div class="empty">正在从 Emby 数据里读媒体库目录…</div>';
+  var btn = document.getElementById('btnLibs');
+  btn.disabled = true;
+  api('api/emby/libraries?programdata=' + encodeURIComponent(pd)).then(function (d) {
+    var dirs = d.dirs || [];
+    sel.innerHTML = '<option value="">（不选，手工填下面的输出目录）</option>';
+    if (!dirs.length) {
+      box.innerHTML = '<div class="empty" style="text-align:left;line-height:2">' +
+        '<b>Emby 里还没有配置媒体库。</b><br>' +
+        '两种情况：<br>' +
+        '1. 刚装好的 Emby 还没添加过库 → 先去 Emby 后台「添加媒体库」，随便选一个目录，' +
+        '保存后回来再点一次这个按钮，就能自动读出来；<br>' +
+        '2. 已经有库但没扫描过 → 让 Emby 扫一次库再试。<br><br>' +
+        '也可以跳过这步，直接在下面手工填输出目录（例如 <code>/vol1/media/tvbox</code>），' +
+        '装好插件后再去 Emby 把这个目录添加成媒体库。</div>';
+      return;
+    }
+    dirs.forEach(function (it) {
+      var o = document.createElement('option');
+      o.value = it.path;
+      o.textContent = '[' + (it.kind || '未知') + '] ' + it.path +
+        (it.exists ? (it.writable ? '' : '（不可写）') : '（目录不存在）');
+      o.disabled = !it.exists || !it.writable;
+      sel.appendChild(o);
+    });
+    var html = '<table><thead><tr><th>类型</th><th>媒体库目录</th><th>状态</th><th>来源</th></tr></thead><tbody>';
+    dirs.forEach(function (it) {
+      var st = !it.exists ? '<span class="st bad"></span>不存在'
+             : (it.writable ? '<span class="st ok"></span>可写' : '<span class="st bad"></span>不可写');
+      html += '<tr><td>' + esc(it.kind || '未知') + '</td>' +
+        '<td><code>' + esc(it.path) + '</code></td>' +
+        '<td>' + st + '</td>' +
+        '<td style="font-size:12px;color:var(--dim)">' + esc(it.source) + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    html += '<div class="hint">选一个媒体库，会在它下面建 <code>tvbox/</code> 子目录放 strm —— ' +
+      '这样 Emby 扫描这个库时就能直接看到，不和你原有文件混在一起。</div>';
+    box.innerHTML = html;
+
+    var firstOk = dirs.find(function (x) { return x.exists && x.writable; });
+    if (firstOk) {
+      sel.value = firstOk.path;
+      onLibPick(sel);
+    }
+    toast('检测到 ' + dirs.length + ' 个媒体库目录', 'ok');
+  }).catch(function (e) {
+    box.innerHTML = '<div class="empty">检测失败: ' + esc(e) + '</div>';
+  }).then(function () { btn.disabled = false; });
+}
+
+function onLibPick(sel) {
+  if (!sel.value) return;
+  var p = sel.value.replace(/\/+$/, '') + '/tvbox';
+  document.getElementById('outputRoot').value = p;
+  document.getElementById('pluginHint').textContent = '输出目录会设为 ' + p;
+  document.getElementById('pluginHint').style.color = 'var(--dim)';
 }
 
 // ══════════ 操作记录 ══════════
