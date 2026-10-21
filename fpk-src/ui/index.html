@@ -720,8 +720,9 @@ function detectLibs() {
         '<td style="font-size:12px;color:var(--dim)">' + esc(it.source) + '</td></tr>';
     });
     html += '</tbody></table>';
-    html += '<div class="hint">选一个媒体库，会在它下面建 <code>tvbox/</code> 子目录放 strm —— ' +
-      '这样 Emby 扫描这个库时就能直接看到，不和你原有文件混在一起。</div>';
+    html += '<div class="hint">插件会把 strm 分到输出目录下的 <code>movies/</code> 和 <code>tv/</code> 两个子目录，' +
+      '所以 Emby 里要建两个库：电影 → <code>&lt;输出目录&gt;/movies</code>，' +
+      '电视剧 → <code>&lt;输出目录&gt;/tv</code>。选 movies 那个库，输出目录会自动取它的上一级。</div>';
     box.innerHTML = html;
 
     var firstOk = dirs.find(function (x) { return x.exists && x.writable; });
@@ -737,9 +738,21 @@ function detectLibs() {
 
 function onLibPick(sel) {
   if (!sel.value) return;
-  var p = sel.value.replace(/\/+$/, '') + '/tvbox';
+  var base = sel.value.replace(/\/+$/, '');
+  var p;
+  // 插件往 <输出目录>/movies 和 <输出目录>/tv 两个子目录写 strm。
+  // 所以：
+  //   库指向 .../movies 或 .../tv  → 输出目录取它的上一级（正好让两个库都覆盖到）
+  //   库指向别的目录              → 在它下面建 tvbox/ 当输出目录
+  var m = base.match(/^(.*)\/(movies|tv)$/i);
+  if (m) {
+    p = m[1];
+  } else {
+    p = base + '/tvbox';
+  }
   document.getElementById('outputRoot').value = p;
-  document.getElementById('pluginHint').textContent = '输出目录会设为 ' + p;
+  document.getElementById('pluginHint').textContent =
+    '输出目录 ' + p + '（strm 会分到 ' + p + '/movies 和 ' + p + '/tv，Emby 里对应建两个库）';
   document.getElementById('pluginHint').style.color = 'var(--dim)';
 }
 
