@@ -13,3 +13,4 @@ lib/
 # 生成的 strm / 缓存
 strm/
 *.log
+spider-host/out/
