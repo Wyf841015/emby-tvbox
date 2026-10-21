@@ -43,6 +43,32 @@ namespace TvBox.Plugin.Api
         public string Token { get; set; }
     }
 
+    /// <summary>以 Emby 进程身份测试目录是否可写（只有真跑一下才知道，看权限位不可靠）。</summary>
+    [Unauthenticated]
+    [Route("/TvBox/ProbeWrite", "GET", Summary = "测试目录对 Emby 是否可写")]
+    public class ProbeWrite : IReturn<WriteProbeResult>
+    {
+        public string Token { get; set; }
+        public string Path { get; set; }
+    }
+
+    public class WriteProbeItem
+    {
+        public string Path { get; set; }
+        public bool Exists { get; set; }
+        public bool Writable { get; set; }
+        public string Error { get; set; }
+    }
+
+    public class WriteProbeResult
+    {
+        public bool Ok { get; set; }
+        public string User { get; set; }
+        public string Error { get; set; }
+        public System.Collections.Generic.List<WriteProbeItem> Items { get; set; }
+            = new System.Collections.Generic.List<WriteProbeItem>();
+    }
+
     /// <summary>同步范围配置：hub 的 Web 界面直接读写，不用进 Emby 后台。</summary>
     [Unauthenticated]
     [Route("/TvBox/Config", "POST", Summary = "更新同步范围（白名单/页数/并发等）")]

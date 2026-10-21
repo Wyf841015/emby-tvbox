@@ -375,7 +375,11 @@ public class EmbyManager {
 
             String outRoot = null;
             if (configXml != null && !configXml.isBlank()) {
-                Path cfg = plugins.resolve("configurations").resolve("TvBox.xml");
+                Path cfgDir = plugins.resolve("configurations");
+                Path cfg = cfgDir.resolve("TvBox.xml");
+                // 目录本身也要 chown：Emby 保存配置常常先写临时文件再 rename，
+                // 只改文件 owner 而目录还是 root 的话照样失败（实测 Permission denied）
+                adoptOwner(cfgDir, plugins);
                 adoptOwner(cfg, plugins);
             }
             adoptOwner(target, plugins);

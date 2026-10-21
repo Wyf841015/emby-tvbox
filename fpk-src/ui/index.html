@@ -244,7 +244,9 @@
           <input type="number" id="cfgConc" min="1" max="20" style="width:70px" value="3"></label>
         <button onclick="saveSyncScope()" id="btnScope">保存范围</button>
         <button onclick="useKnownGood()">填入实测可用站点</button>
+        <button onclick="checkOutputWritable()" id="btnWriteCheck">测试输出目录可写</button>
       </div>
+      <div id="writeCheckOut"></div>
       <div class="hint" id="scopeHint"></div>
     </div>
 
@@ -660,7 +662,8 @@ function detectEmby() {
         '<td><code>' + esc(it.programdata) + '</code></td>' +
         '<td style="color:var(--dim);font-size:12px">' + esc(it.source) + '</td>' +
         '<td style="font-size:12px;color:var(--dim);max-width:260px">' + esc(it.hint || '') + '</td>' +
-        '<td><button class="tiny" onclick="pickEmby(this)" data-path="' + esc(it.programdata) + '">选用</button></td>' +
+        '<td><button class="tiny" onclick="pickEmby(this)" data-path="' + esc(it.programdata) + '">选用</button>' +
+        '<button class="tiny" onclick="checkWritablePath(this.dataset.path,\'libWriteOut\')" data-path="' + esc(it.programdata) + '">测可写</button></td>' +
         '</tr>';
     });
     html += '</tbody></table>';
@@ -778,19 +781,21 @@ function detectLibs() {
       o.disabled = !it.exists || !it.writable;
       sel.appendChild(o);
     });
-    var html = '<table><thead><tr><th>类型</th><th>媒体库目录</th><th>状态</th><th>来源</th></tr></thead><tbody>';
+    var html = '<table><thead><tr><th>类型</th><th>媒体库目录</th><th>状态</th><th>来源</th><th></th></tr></thead><tbody>';
     dirs.forEach(function (it) {
       var st = !it.exists ? '<span class="st bad"></span>不存在'
              : (it.writable ? '<span class="st ok"></span>可写' : '<span class="st bad"></span>不可写');
       html += '<tr><td>' + esc(it.kind || '未知') + '</td>' +
         '<td><code>' + esc(it.path) + '</code></td>' +
         '<td>' + st + '</td>' +
-        '<td style="font-size:12px;color:var(--dim)">' + esc(it.source) + '</td></tr>';
+        '<td style="font-size:12px;color:var(--dim)">' + esc(it.source) + '</td>' +
+        '<td><button class="tiny" onclick="checkWritablePath(this.dataset.path,\'libWriteOut\')" data-path="' + esc(it.path) + '">测可写</button></td></tr>';
     });
     html += '</tbody></table>';
     html += '<div class="hint">插件会把 strm 分到输出目录下的 <code>movies/</code> 和 <code>tv/</code> 两个子目录，' +
       '所以 Emby 里要建两个库：电影 → <code>&lt;输出目录&gt;/movies</code>，' +
       '电视剧 → <code>&lt;输出目录&gt;/tv</code>。选 movies 那个库，输出目录会自动取它的上一级。</div>';
+    html += '</tbody></table><div id="libWriteOut"></div>';
     box.innerHTML = html;
 
     var firstOk = dirs.find(function (x) { return x.exists && x.writable; });
@@ -867,6 +872,41 @@ function saveSyncScope() {
     toast('保存失败: ' + e, 'bad');
   }).then(function () {
     btn.disabled = false; btn.textContent = '保存范围';
+  });
+}
+
+
+// 以 Emby 进程身份真实写文件来判断可写（看权限位不准：
+// fnOS 卷是 trimacl，root 视角和 Emby 用户视角完全不同）
+function checkWritablePath(path, boxId) {
+  var box = document.getElementById(boxId);
+  if (!path) { toast('没有路径可测', 'bad'); return; }
+  box.innerHTML = '<div class="hint">正在以 Emby 身份写入测试（' + esc(path) + '）…</div>';
+  api('api/emby/write-check?path=' + encodeURIComponent(path)).then(function (d) {
+    if (!d.ok) { box.innerHTML = '<div class="hint" style="color:var(--bad)">探测失败: ' + esc(d.msg || '') + '</div>'; return; }
+    var r = d.result || {};
+    var rows = (r.Items || []).map(function (it) {
+      var st = it.Writable ? '<span class="st ok"></span>可写' : '<span class="st bad"></span>不可写';
+      return '<tr><td style="white-space:nowrap">' + st + '</td>' +
+             '<td><code>' + esc(it.Path) + '</code></td>' +
+             '<td style="font-size:12px;color:var(--dim)">' + esc(it.Error || '') + '</td></tr>';
+    }).join('');
+    box.innerHTML = '<div class="hint" style="margin-top:8px">以 Emby 进程身份（<b>' + esc(r.User || '?') +
+      '</b>）实测写入：</div><table style="margin-top:6px"><thead><tr><th>结果</th><th>目录</th><th>错误</th></tr></thead><tbody>' +
+      rows + '</tbody></table>';
+    toast(r.Ok ? '✓ 输出目录可写' : '✗ 有目录写不进去', r.Ok ? 'ok' : 'bad');
+  }).catch(function (e) {
+    box.innerHTML = '<div class="hint" style="color:var(--bad)">探测失败: ' + esc(String(e)) + '</div>';
+  });
+}
+
+function checkOutputWritable() {
+  var p = document.getElementById('cfgWhitelist') ? null : null;
+  // 用插件当前生效的 OutputRoot（status 里带回来）
+  api('api/emby/sync/status').then(function (d) {
+    var root = (d && d.status && d.status.OutputRoot) || '';
+    if (!root) { toast('还没拿到输出目录', 'bad'); return; }
+    checkWritablePath(root, 'writeCheckOut');
   });
 }
 

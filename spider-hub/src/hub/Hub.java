@@ -468,6 +468,25 @@ public class Hub {
                 sendJson(ex, 200, m);
                 return;
             }
+            case "/api/emby/write-check": {
+                String base = embyBase();
+                if (base == null) { sendJson(ex, 200, fail("还没连上 Emby")); return; }
+                String probePath = q.getOrDefault("path", str(settings.get("outputRoot")));
+                if (probePath == null || probePath.isEmpty()) { sendJson(ex, 200, fail("没给路径")); return; }
+                Map<String, Object> m = new LinkedHashMap<>();
+                try {
+                    String body = embyHttp("GET", base + "/TvBox/ProbeWrite?token=" + embyToken()
+                            + "&Path=" + URLEncoder.encode(probePath, StandardCharsets.UTF_8));
+                    m.put("ok", true);
+                    m.put("emby", base);
+                    m.put("result", SpiderPool.Json.parse(body));
+                } catch (Exception e) {
+                    m.put("ok", false);
+                    m.put("msg", "探测失败: " + explain(e));
+                }
+                sendJson(ex, 200, m);
+                return;
+            }
             case "/api/emby/config": {
                 String base = embyBase();
                 if (base == null) { sendJson(ex, 200, fail("还没连上 Emby")); return; }
