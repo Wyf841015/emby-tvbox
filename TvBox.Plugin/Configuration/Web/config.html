@@ -1,0 +1,293 @@
+<div id="TvBoxConfigPage" data-role="page" class="page type-interior pluginConfigurationPage"
+     data-require="emby-input,emby-button,emby-checkbox,emby-select">
+
+    <div data-role="content">
+        <div class="content-primary">
+
+            <div class="verticalSection">
+                <h2 class="sectionTitle">TVBox 源接入</h2>
+                <p class="fieldDescription">
+                    把 TVBox 配置里的点播源（苹果 CMS 接口，type 0/1）同步成 .strm 文件，Emby 扫描后即可浏览、搜索、播放。
+                    <br />
+                    <strong>注意：</strong>type 3/4 的 spider 源（jar / drpy js）无法解析，会被自动跳过。
+                </p>
+            </div>
+
+            <form id="tvboxForm" class="tvboxForm">
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="configUrl">TVBox 配置地址</label>
+                    <input id="configUrl" type="text" is="emby-input" class="txtConfigUrl"
+                           placeholder="https://example.com/tvbox.json 或 /vol1/media/tvbox.json" />
+                    <div class="fieldDescription">支持单仓 JSON、多仓（urls）、base64 编码，也支持本机文件绝对路径。</div>
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="outputRoot">STRM 输出目录</label>
+                    <input id="outputRoot" type="text" is="emby-input"
+                           placeholder="留空 = Emby 数据目录下的 tvbox/" />
+                    <div class="fieldDescription">
+                        会生成两个子目录：<code>movies/</code>（电影库）和 <code>tv/</code>（电视剧库）。
+                        在 Emby 里分别添加这两个目录为媒体库。
+                    </div>
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="embyBaseUrl">Emby 访问地址</label>
+                    <input id="embyBaseUrl" type="text" is="emby-input"
+                           placeholder="http://192.168.1.10:8096" />
+                    <div class="fieldDescription">
+                        开启播放代理时必须填，用于生成绝对播放地址。局域网内填内网 IP 即可。
+                    </div>
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="referer">播放 Referer</label>
+                    <input id="referer" type="text" is="emby-input" placeholder="留空 = 站点根地址" />
+                    <div class="fieldDescription">很多采集站的 m3u8 会校验 Referer，遇到 403 时在这里填源站地址。</div>
+                </div>
+
+                <div class="checkboxContainer">
+                    <label>
+                        <input id="useProxy" type="checkbox" is="emby-checkbox" />
+                        <span>播放走本机代理</span>
+                    </label>
+                    <div class="fieldDescription">
+                        打开后 strm 里写 <code>/TvBox/Stream?u=...</code>，由插件补 Referer/UA 并重写 HLS 分片地址，能解决防盗链。
+                        代价是所有播放流量都经过 Emby。
+                    </div>
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="siteWhitelist">站点白名单</label>
+                    <input id="siteWhitelist" type="text" is="emby-input" placeholder="留空 = 全部支持的站点" />
+                    <div class="fieldDescription">填站点 key，逗号分隔。建议先用「查看站点」拿到 key 再填。</div>
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="siteBlacklist">站点黑名单</label>
+                    <input id="siteBlacklist" type="text" is="emby-input" placeholder="逗号分隔，优先生效" />
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="siteNameFilter">站点名过滤</label>
+                    <input id="siteNameFilter" type="text" is="emby-input" placeholder="按名字模糊匹配，逗号分隔" />
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="maxPagesPerCategory">每分类抓取页数</label>
+                    <input id="maxPagesPerCategory" type="number" min="1" max="50" is="emby-input" />
+                    <div class="fieldDescription">每页通常 20 条。源很脆弱，建议 1-3 页。</div>
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="maxItemsPerRun">单次最大条目数</label>
+                    <input id="maxItemsPerRun" type="number" min="0" is="emby-input" />
+                    <div class="fieldDescription">0 = 不限。第一次先填 20 试水，确认能跑通再放开。</div>
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="requestDelayMs">请求间隔(ms)</label>
+                    <input id="requestDelayMs" type="number" min="0" is="emby-input" />
+                </div>
+
+                <div class="checkboxContainer">
+                    <label>
+                        <input id="cleanupOrphans" type="checkbox" is="emby-checkbox" />
+                        <span>同步时清理已失效的 strm</span>
+                    </label>
+                </div>
+
+                <div class="checkboxContainer">
+                    <label>
+                        <input id="enableScheduledSync" type="checkbox" is="emby-checkbox" />
+                        <span>启用定时同步</span>
+                    </label>
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="syncIntervalHours">定时间隔(小时)</label>
+                    <input id="syncIntervalHours" type="number" min="1" max="168" is="emby-input" />
+                </div>
+
+                <div>
+                    <button is="emby-button" type="submit" class="raised button-submit block">
+                        <span>保存</span>
+                    </button>
+                </div>
+            </form>
+
+            <div class="verticalSection" style="margin-top:2em">
+                <h2 class="sectionTitle">操作</h2>
+                <div style="display:flex;gap:.6em;flex-wrap:wrap">
+                    <button is="emby-button" type="button" class="raised" id="btnSources">
+                        <span>查看站点</span>
+                    </button>
+                    <button is="emby-button" type="button" class="raised" id="btnSync">
+                        <span>立即同步</span>
+                    </button>
+                    <button is="emby-button" type="button" class="raised" id="btnStatus">
+                        <span>刷新状态</span>
+                    </button>
+                </div>
+
+                <div id="tvboxStatus" class="fieldDescription" style="margin-top:1em;white-space:pre-wrap"></div>
+                <div id="tvboxSources" style="margin-top:1em;max-height:420px;overflow:auto;font-size:.85em"></div>
+            </div>
+
+        </div>
+    </div>
+
+    <script type="text/javascript">
+        (function () {
+            var PLUGIN_ID = '7f3c1d92-4a6b-4c8e-9f21-8b5d3a72c104';
+
+            function api() {
+                return window.ApiClient;
+            }
+
+            function url(path) {
+                return api().getUrl('TvBox/' + path);
+            }
+
+            function setText(id, text) {
+                var el = document.getElementById(id);
+                if (el) el.textContent = text;
+            }
+
+            function fill(cfg) {
+                var map = {
+                    configUrl: 'ConfigUrl', outputRoot: 'OutputRoot', embyBaseUrl: 'EmbyBaseUrl',
+                    referer: 'Referer', siteWhitelist: 'SiteWhitelist', siteBlacklist: 'SiteBlacklist',
+                    siteNameFilter: 'SiteNameFilter', maxPagesPerCategory: 'MaxPagesPerCategory',
+                    maxItemsPerRun: 'MaxItemsPerRun', requestDelayMs: 'RequestDelayMs',
+                    syncIntervalHours: 'SyncIntervalHours'
+                };
+                Object.keys(map).forEach(function (id) {
+                    var el = document.getElementById(id);
+                    if (el) el.value = cfg[map[id]] !== undefined && cfg[map[id]] !== null ? cfg[map[id]] : '';
+                });
+                ['useProxy', 'cleanupOrphans', 'enableScheduledSync'].forEach(function (id) {
+                    var el = document.getElementById(id);
+                    var key = id.charAt(0).toUpperCase() + id.slice(1);
+                    if (el) el.checked = !!cfg[key];
+                });
+            }
+
+            function collect(cfg) {
+                function v(id) { var e = document.getElementById(id); return e ? e.value : ''; }
+                function n(id, d) { var x = parseInt(v(id), 10); return isNaN(x) ? d : x; }
+                function c(id) { var e = document.getElementById(id); return !!(e && e.checked); }
+
+                cfg.ConfigUrl = v('configUrl').trim();
+                cfg.OutputRoot = v('outputRoot').trim();
+                cfg.EmbyBaseUrl = v('embyBaseUrl').trim();
+                cfg.Referer = v('referer').trim();
+                cfg.SiteWhitelist = v('siteWhitelist').trim();
+                cfg.SiteBlacklist = v('siteBlacklist').trim();
+                cfg.SiteNameFilter = v('siteNameFilter').trim();
+                cfg.MaxPagesPerCategory = n('maxPagesPerCategory', 3);
+                cfg.MaxItemsPerRun = n('maxItemsPerRun', 0);
+                cfg.RequestDelayMs = n('requestDelayMs', 150);
+                cfg.SyncIntervalHours = n('syncIntervalHours', 12);
+                cfg.UseProxy = c('useProxy');
+                cfg.CleanupOrphans = c('cleanupOrphans');
+                cfg.EnableScheduledSync = c('enableScheduledSync');
+                return cfg;
+            }
+
+            function load() {
+                if (!api()) return;
+                api().getPluginConfiguration(PLUGIN_ID).then(function (cfg) {
+                    fill(cfg);
+                    refreshStatus();
+                });
+            }
+
+            function save(e) {
+                if (e) e.preventDefault();
+                api().getPluginConfiguration(PLUGIN_ID).then(function (cfg) {
+                    cfg = collect(cfg);
+                    api().updatePluginConfiguration(PLUGIN_ID, cfg).then(function () {
+                        setText('tvboxStatus', '已保存。');
+                    });
+                });
+                return false;
+            }
+
+            function refreshStatus() {
+                if (!api()) return;
+                api().getJSON(url('Status')).then(function (s) {
+                    var lines = [];
+                    lines.push('运行中: ' + (s.Running ? '是' : '否') + (s.Stage ? '  [' + s.Stage + ']' : ''));
+                    if (s.Running) {
+                        lines.push('进度: ' + s.SiteIndex + '/' + s.SiteTotal + '  当前: ' + s.CurrentSite);
+                        lines.push('已写: ' + s.ItemsWritten + ' 条目 / ' + s.EpisodesWritten + ' 分集，错误 ' + s.Errors);
+                    }
+                    if (s.LastError) lines.push('最后错误: ' + s.LastError);
+                    lines.push('输出目录: ' + (s.OutputRoot || ''));
+                    if (s.LastSyncUtc) lines.push('上次同步: ' + s.LastSyncUtc + ' UTC');
+                    if (s.LastSyncSummary) lines.push('上次结果: ' + s.LastSyncSummary);
+                    setText('tvboxStatus', lines.join('\n'));
+                });
+            }
+
+            function loadSources() {
+                setText('tvboxSources', '读取中…');
+                api().getJSON(url('Sources')).then(function (r) {
+                    if (r.Error) { setText('tvboxSources', '失败: ' + r.Error); return; }
+                    var html = '<div>共 ' + r.Total + ' 个站点，其中 <strong>' + r.SupportedCount +
+                        '</strong> 个可直接同步</div>';
+                    if (r.Warnings && r.Warnings.length) {
+                        html += '<div style="color:#e8a33d">警告: ' + r.Warnings.join('; ') + '</div>';
+                    }
+                    html += '<table style="width:100%;border-collapse:collapse;margin-top:.5em">' +
+                        '<tr style="text-align:left"><th>状态</th><th>名称</th><th>key</th><th>type</th><th>接口</th></tr>';
+                    (r.Sites || []).forEach(function (s) {
+                        html += '<tr style="border-top:1px solid rgba(128,128,128,.25)">' +
+                            '<td title="' + (s.Reason || '') + '">' + (s.Supported ? '✅' : '⛔') + '</td>' +
+                            '<td>' + (s.Name || '') + '</td>' +
+                            '<td><code>' + (s.Key || '') + '</code></td>' +
+                            '<td>' + s.Type + '</td>' +
+                            '<td style="max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + (s.Api || '') + '">' +
+                            (s.Api || '') + '</td></tr>';
+                    });
+                    html += '</table>';
+                    document.getElementById('tvboxSources').innerHTML = html;
+                });
+            }
+
+            function startSync() {
+                setText('tvboxStatus', '正在启动同步…');
+                api().ajax({
+                    type: 'POST',
+                    url: url('Sync')
+                }).then(function (r) {
+                    setText('tvboxStatus', r.Message || '已启动');
+                    setTimeout(refreshStatus, 800);
+                });
+            }
+
+            document.addEventListener('pageshow', function (e) {
+                if (e.target && e.target.id === 'TvBoxConfigPage') load();
+            });
+            document.addEventListener('pagebeforeshow', function (e) {
+                if (e.target && e.target.id === 'TvBoxConfigPage') load();
+            });
+
+            document.addEventListener('DOMContentLoaded', function () {
+                var form = document.getElementById('tvboxForm');
+                if (form) form.addEventListener('submit', save);
+                var b1 = document.getElementById('btnSources');
+                if (b1) b1.addEventListener('click', loadSources);
+                var b2 = document.getElementById('btnSync');
+                if (b2) b2.addEventListener('click', startSync);
+                var b3 = document.getElementById('btnStatus');
+                if (b3) b3.addEventListener('click', refreshStatus);
+                setTimeout(function () {
+                    if (document.getElementById('TvBoxConfigPage') && api()) load();
+                }, 300);
+            });
+        })();
+    </script>
+</div>

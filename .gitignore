@@ -1,0 +1,15 @@
+# 构建产物
+bin/
+obj/
+out/
+dist/
+
+# Emby 参考 DLL（从官方 deb 解出，体积大，不进 git；build.sh 会自动准备）
+lib/
+
+# 本地开发用的 Emby 服务端
+.dev/
+
+# 生成的 strm / 缓存
+strm/
+*.log

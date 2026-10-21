@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Emby 4.10.2.0 的运行时是 Microsoft.NETCore.App 8.0.28（已从官方 deb 里的
+         EmbyServer.runtimeconfig.json 确认），所以插件目标框架锁 net8.0。
+         这样可以直接用共享框架里的 System.Text.Json，无需任何 NuGet 包。 -->
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>TvBox</AssemblyName>
+    <RootNamespace>TvBox.Plugin</RootNamespace>
+    <Version>0.1.0.0</Version>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+    <!-- 不要生成 deps.json / runtimeconfig.json：插件是被 Emby 进程加载的类库 -->
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+    <GenerateRuntimeConfigurationFiles>false</GenerateRuntimeConfigurationFiles>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <!-- Emby 参考程序集：Private=false，绝不能把 Emby 自己的 DLL 打进插件包 -->
+  <ItemGroup>
+    <Reference Include="MediaBrowser.Common">
+      <HintPath>../lib/emby4_10/MediaBrowser.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="MediaBrowser.Controller">
+      <HintPath>../lib/emby4_10/MediaBrowser.Controller.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="MediaBrowser.Model">
+      <HintPath>../lib/emby4_10/MediaBrowser.Model.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- IResponse.OutputWriter 的类型，Emby 自带这个程序集 -->
+    <Reference Include="System.IO.Pipelines">
+      <HintPath>../lib/emby4_10/System.IO.Pipelines.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- 配置页面作为嵌入资源，插件通过 PluginPageInfo.EmbeddedResourcePath 引用 -->
+  <ItemGroup>
+    <EmbeddedResource Include="Configuration/Web/**" />
+  </ItemGroup>
+
+</Project>
