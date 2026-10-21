@@ -661,6 +661,25 @@ public class EmbyManager {
         return s;
     }
 
+    /**
+     * 读插件 XML 里的 HubToken。用来和 hub 自己存的那份对齐 ——
+     * 只要重装过插件 / 在插件页改过配置 / 安装器重新生成过 token，
+     * 两边就会分叉，表现就是「同步显示 token 无效」，而两边各自看都"没错"。
+     */
+    public static String readHubToken(String programdata) {
+        if (programdata == null || programdata.isBlank()) return null;
+        try {
+            Path xml = Path.of(programdata).resolve("plugins").resolve("configurations").resolve("TvBox.xml");
+            if (!Files.isRegularFile(xml)) return null;
+            String txt = Files.readString(xml, StandardCharsets.UTF_8);
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("<HubToken>([^<]*)</HubToken>").matcher(txt);
+            return m.find() ? m.group(1).trim() : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     /** 输出目录白名单：只允许落在数据卷 / 常见媒体挂载点下。 */
     public static boolean underMediaRoots(String path) {
         try {

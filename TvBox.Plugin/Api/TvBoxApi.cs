@@ -78,6 +78,8 @@ namespace TvBox.Plugin.Api
         // ── 采集源 ──
         public string ConfigUrl { get; set; }
         public string SiteNameFilter { get; set; }
+        /// <summary>spider 中转地址，由 spider-hub 自动填写（它知道自己的端口）。</summary>
+        public string SpiderHubUrl { get; set; }
         // ── 同步范围 ──
         public string SiteWhitelist { get; set; }
         public string SiteBlacklist { get; set; }
@@ -425,7 +427,7 @@ namespace TvBox.Plugin.Api
                 EnableScheduledSync = cfg.EnableScheduledSync,
                 SyncIntervalHours = cfg.SyncIntervalHours,
                 ConfigFilePath = p.ConfigurationFilePath,
-                ReadOnly = new[] { "SpiderHubUrl", "ConfigFilePath" },
+                ReadOnly = new[] { "ConfigFilePath" },
             };
         }
 
@@ -439,6 +441,7 @@ namespace TvBox.Plugin.Api
 
             int changed = 0;
             if (req.ConfigUrl != null && req.ConfigUrl.Trim() != cfg.ConfigUrl) { cfg.ConfigUrl = req.ConfigUrl.Trim(); changed++; }
+            if (req.SpiderHubUrl != null && req.SpiderHubUrl.Trim() != cfg.SpiderHubUrl) { cfg.SpiderHubUrl = req.SpiderHubUrl.Trim(); changed++; }
             if (req.SiteWhitelist != null) { cfg.SiteWhitelist = req.SiteWhitelist; changed++; }
             if (req.SiteBlacklist != null) { cfg.SiteBlacklist = req.SiteBlacklist; changed++; }
             if (req.SiteNameFilter != null) { cfg.SiteNameFilter = req.SiteNameFilter; changed++; }

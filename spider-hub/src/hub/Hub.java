@@ -269,6 +269,7 @@ public class Hub {
                 Map<String, Object> pcfg = pluginConfig();
                 Map<String, Object> m = new LinkedHashMap<>();
                 if (pcfg != null) {
+                    ensureHubUrlInPlugin(pcfg);
                     m.put("ok", true);
                     m.put("source", "plugin");
                     m.put("sourceLabel", "Emby 插件（TvBox.xml）");
@@ -963,13 +964,45 @@ public class Hub {
 
     /** 给 hub 用的共享令牌：装插件时写进 TvBox.xml，之后调免登录路由都要带上。 */
     static synchronized String embyToken() {
-        String t = str(settings.get("embyToken"));
-        if (t == null || t.isEmpty()) {
-            t = UUID.randomUUID().toString().replace("-", "");
-            settings.put("embyToken", t);
+        String mine = str(settings.get("embyToken"));
+
+        // 以插件 XML 里的 HubToken 为准。重装插件、在插件页改配置、安装器重新
+        // 生成 token 都会让两边分叉 —— 症状就是「同步显示 token 无效」，
+        // 而 hub 和插件各自看自己的配置都"没错"。
+        String fromXml = EmbyManager.readHubToken(str(settings.get("embyPath")));
+        if (fromXml == null || fromXml.isEmpty()) fromXml = EmbyManager.readHubToken(currentEmbyPath());
+
+        if (fromXml != null && !fromXml.isEmpty()) {
+            if (!fromXml.equals(mine)) {
+                settings.put("embyToken", fromXml);
+                saveSettings();
+                System.out.println("[emby] HubToken 已与插件对齐: " + fromXml.substring(0, Math.min(8, fromXml.length())) + "…");
+            }
+            return fromXml;
+        }
+        if (mine == null || mine.isEmpty()) {
+            mine = UUID.randomUUID().toString().replace("-", "");
+            settings.put("embyToken", mine);
             saveSettings();
         }
-        return t;
+        return mine;
+    }
+
+    /** 当前要操作的 programdata：配置里没有就现查一次 ready 的实例。 */
+    static String currentEmbyPath() {
+        String p = str(settings.get("embyPath"));
+        if (p != null && !p.isEmpty()) return p;
+        try {
+            for (EmbyManager.Instance i : EmbyManager.detect(null)) {
+                if ("ready".equals(i.state)) {
+                    settings.put("embyPath", i.programdata);
+                    saveSettings();
+                    return i.programdata;
+                }
+            }
+        } catch (Exception ignore) {
+        }
+        return null;
     }
 
     /** Emby 基地址：优先用配置，其次直探常见端口，最后从 system.xml 读端口。 */
@@ -1065,11 +1098,35 @@ public class Hub {
         if (base == null) throw new Exception("找不到 Emby 地址");
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("Token", embyToken());
+        // 插件必须知道 spider 中转在哪，否则 type:3 的站点它没法同步。
+        // 这一项由 hub 自动维护（它知道自己的端口），界面只做展示。
+        body.put("SpiderHubUrl", hubSelfUrl());
         for (String k : PLUGIN_CFG_KEYS) {
             if (payload.containsKey(k)) body.put(k, payload.get(k));
             else if (payload.containsKey(lowerFirst(k))) body.put(k, payload.get(lowerFirst(k)));
         }
         return embyPostJson(base + "/TvBox/Config", SpiderPool.Json.stringify(body));
+    }
+
+    /** hub 自己的 TCP 地址，写进插件的 SpiderHubUrl。 */
+    static String hubSelfUrl() {
+        return "http://127.0.0.1:" + tcpPort;
+    }
+
+    /** 插件里的 SpiderHubUrl 是否指向自己；不对就推一次修正。 */
+    static void ensureHubUrlInPlugin(Map<String, Object> pc) {
+        try {
+            if (pc == null) return;
+            String want = hubSelfUrl();
+            String have = str(pc.get("SpiderHubUrl"));
+            if (want.equals(have)) return;
+            Map<String, Object> one = new LinkedHashMap<>();
+            one.put("SpiderHubUrl", want);
+            pushPluginConfig(one);
+            System.out.println("[emby] 已把插件的 SpiderHubUrl 修正为 " + want + "（原值: " + have + "）");
+        } catch (Exception e) {
+            System.out.println("[emby] 修正 SpiderHubUrl 失败: " + e.getMessage());
+        }
     }
 
     static String lowerFirst(String s) {
