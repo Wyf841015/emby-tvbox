@@ -277,3 +277,40 @@ fnpack 硬性要求（踩过的坑）：
 - `bin/` 空目录必须存在
 - `cmd/` 下 9 个脚本缺一不可：`main`、`install_init`、`install_callback`、`upgrade_init`、`upgrade_callback`、`uninstall_init`、`uninstall_callback`、`config_init`、`config_callback`
 - `ICON.PNG`(64×64) + `ICON_256.PNG`(256×256) 必须在根目录，直角满铺正方形
+
+---
+
+## Web 界面（v0.2 Tab 式布局）
+
+按功能区拆成 5 个 Tab，站点/操作记录都用表格展示：
+
+| Tab | 内容 |
+|---|---|
+| **概览** | 4 个 KPI 卡片（站点数/可用/失败/运行时长）+ 运行信息（配置地址、hub 地址、TCP 端口、插件包、Java、Emby）+ 最近 5 条操作 |
+| **站点** | 筛选（全部/仅可用/失败未测）+ 关键词搜索 + 批量探测当前筛选 + 表格（状态/名称/key·class/采集地址/操作）+ 探测结果 JSON |
+| **配置** | TVBox 配置地址 + 保存并加载 + 重新加载 + 载入统计（来源、耗时） |
+| **Emby 插件** | 检测本机 Emby（列候选，带可写标记）+ 手工路径 + 输出目录 + 安装/卸载/查状态 |
+| **操作记录** | 表格（时间/操作/目标/结果/详情/耗时）+ 成功/失败筛选 + 关键词搜索 + 清空 |
+
+Tab 状态会记在 localStorage，刷新后回到上次所在页。
+
+### 操作记录
+
+后端把每个操作落盘到 `$TRIM_PKGVAR/history.json`（最多 300 条，最新的在前）：
+
+| 操作 | 记录时机 | 记录内容 |
+|---|---|---|
+| 保存配置 | 点「保存并加载」 | 配置地址 |
+| 扫描配置 | 配置加载完成 | 站点数 + 实际来源主机 + 耗时 |
+| 探测站点 | 点站点行的「首页」 | 分类数 / 列表数 + 耗时 |
+| 批量探测 | 批量探测结束 | 可用数 / 总数 + 总耗时 |
+| 安装插件 | 安装完成 | Emby 目录 + 大小；失败时记错误原因 |
+| 卸载插件 | 卸载完成 | 备份文件名 |
+
+接口：`GET /api/history`、`POST /api/history/add`、`POST /api/history/clear`
+
+### 单站探测接口
+
+`GET /api/probe?key=<站点key>&record=1` → `{ok, classes, list, ms, parsed}`
+
+`record=0` 时不写记录（批量探测用，避免刷屏）。

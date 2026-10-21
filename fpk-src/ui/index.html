@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>spider-hub · TVBox spider 中转</title>
+<title>tvboxhub · TVBox 源接入 Emby</title>
 <style>
   :root{
     --bg:#0b1220; --panel:#111a2e; --panel2:#16223a; --line:#22304d;
@@ -14,37 +14,60 @@
   body{margin:0;background:linear-gradient(180deg,#0b1220,#0e1728 40%,#0b1220);
        color:var(--text);font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
        min-height:100vh}
-  .wrap{max-width:1180px;margin:0 auto;padding:24px 18px 60px}
-  header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:20px}
-  .logo{width:38px;height:38px;border-radius:10px;
+  .wrap{max-width:1220px;margin:0 auto;padding:22px 16px 60px}
+
+  /* ── 头部 ── */
+  header{display:flex;align-items:center;gap:13px;flex-wrap:wrap;margin-bottom:18px}
+  .logo{width:38px;height:38px;border-radius:10px;flex:0 0 auto;
         background:linear-gradient(135deg,var(--accent),var(--cyan));
         display:flex;align-items:center;justify-content:center;font-weight:700;font-size:17px;color:#06101f}
-  h1{font-size:19px;margin:0;font-weight:650;letter-spacing:.3px}
-  .sub{color:var(--dim);font-size:12.5px;margin-top:2px}
+  h1{font-size:18px;margin:0;font-weight:650;letter-spacing:.3px}
+  .sub{color:var(--dim);font-size:12.5px;margin-top:1px}
   .spacer{flex:1}
-  .badge{font-size:12px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);
-         background:var(--panel);color:var(--dim)}
+  .badge{font-size:12px;padding:3px 10px;border-radius:999px;border:1px solid var(--line);
+         background:var(--panel);color:var(--dim);white-space:nowrap}
   .badge.on{color:#0b1220;background:linear-gradient(135deg,#22c55e,#16a34a);border-color:transparent;font-weight:600}
 
-  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:18px}
+  /* ── Tab ── */
+  .tabs{display:flex;gap:6px;margin-bottom:16px;overflow-x:auto;padding-bottom:2px;
+        scrollbar-width:thin}
+  .tabs::-webkit-scrollbar{height:4px}
+  .tabs::-webkit-scrollbar-thumb{background:var(--line);border-radius:2px}
+  .tab{padding:9px 16px;border-radius:10px;font-size:13.5px;color:var(--dim);cursor:pointer;
+       border:1px solid transparent;white-space:nowrap;transition:.15s;user-select:none}
+  .tab:hover{color:var(--text);background:rgba(79,140,255,.07)}
+  .tab.active{color:var(--text);background:var(--panel2);border-color:var(--line);font-weight:600}
+  .tab .n{display:inline-block;margin-left:6px;font-size:11.5px;padding:0 6px;border-radius:9px;
+          background:rgba(79,140,255,.16);color:#9ec1ff}
+  .pane{display:none}
+  .pane.active{display:block;animation:fade .18s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+  /* ── 卡片 ── */
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:12px;margin-bottom:16px}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
   .card .k{color:var(--dim);font-size:12px;margin-bottom:6px}
   .card .v{font-size:22px;font-weight:650;letter-spacing:.5px}
   .card .v.ok{color:var(--ok)} .card .v.bad{color:var(--bad)} .card .v.accent{color:var(--cyan)}
+  .card .v.sm{font-size:14px;font-weight:500;word-break:break-all;line-height:1.5}
 
   .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px}
   .panel h2{font-size:14.5px;margin:0 0 14px;font-weight:600;display:flex;align-items:center;gap:8px}
   .panel h2::before{content:"";width:3px;height:14px;border-radius:2px;
                     background:linear-gradient(180deg,var(--accent),var(--cyan))}
+
   .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-  input[type=text]{flex:1;min-width:240px;background:#0c1526;border:1px solid var(--line);
+  input[type=text]{flex:1;min-width:220px;background:#0c1526;border:1px solid var(--line);
        border-radius:9px;padding:10px 13px;color:var(--text);font-size:13px;outline:none;transition:.15s}
   input[type=text]:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(79,140,255,.15)}
+  select{background:#0c1526;border:1px solid var(--line);border-radius:9px;padding:9px 12px;
+         color:var(--text);font-size:13px;outline:none}
   button{background:var(--panel2);border:1px solid var(--line);color:var(--text);
          padding:9px 15px;border-radius:9px;font-size:13px;cursor:pointer;transition:.15s;font-weight:500}
   button:hover{border-color:var(--accent);background:#1b2947}
   button.primary{background:linear-gradient(135deg,var(--accent),#3b74e0);border-color:transparent;font-weight:600}
   button.primary:hover{filter:brightness(1.1)}
+  button.danger:hover{border-color:var(--bad);background:rgba(239,68,68,.12)}
   button.tiny{padding:4px 9px;font-size:12px;border-radius:7px}
   button:disabled{opacity:.45;cursor:not-allowed}
 
@@ -58,28 +81,36 @@
   .st{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
   .st.ok{background:var(--ok);box-shadow:0 0 8px rgba(34,197,94,.7)}
   .st.bad{background:var(--bad)} .st.unk{background:#475569}
-  .err{color:#fca5a5;font-size:12px;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .err{color:#fca5a5;font-size:12px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .pill{display:inline-block;font-size:11.5px;padding:1px 8px;border-radius:999px;
+        border:1px solid var(--line);color:var(--dim)}
+  .pill.ok{color:var(--ok);border-color:rgba(34,197,94,.4);background:rgba(34,197,94,.1)}
+  .pill.bad{color:#fca5a5;border-color:rgba(239,68,68,.4);background:rgba(239,68,68,.1)}
 
   pre{background:#08101d;border:1px solid var(--line);border-radius:10px;padding:14px;
       overflow:auto;max-height:420px;font-size:12px;line-height:1.55;margin:10px 0 0;
       font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#bfd4f5}
   .empty{color:var(--dim);text-align:center;padding:26px 0;font-size:13px}
+  .hint{color:var(--dim);font-size:12px;margin-top:10px;line-height:1.7}
+  .hint code{color:#9ec1ff}
   .toast{position:fixed;right:20px;bottom:20px;background:var(--panel2);border:1px solid var(--line);
          border-left:3px solid var(--accent);padding:12px 16px;border-radius:10px;font-size:13px;
          box-shadow:0 12px 32px rgba(0,0,0,.5);opacity:0;transform:translateY(10px);
-         transition:.25s;pointer-events:none;max-width:420px}
+         transition:.25s;pointer-events:none;max-width:420px;z-index:99}
   .toast.show{opacity:1;transform:translateY(0)}
   .toast.ok{border-left-color:var(--ok)} .toast.bad{border-left-color:var(--bad)}
-  .tabs{display:flex;gap:8px;margin-bottom:12px}
-  .tab{padding:6px 13px;border-radius:8px;font-size:12.5px;color:var(--dim);cursor:pointer;border:1px solid transparent}
-  .tab.active{color:var(--text);background:var(--panel2);border-color:var(--line)}
-  .hint{color:var(--dim);font-size:12px;margin-top:10px;line-height:1.7}
-  .hint code{color:#9ec1ff}
+  .kv{display:grid;grid-template-columns:100px 1fr;gap:6px 12px;font-size:13px}
+  .kv .k{color:var(--dim)}
+  .kv .v{word-break:break-all}
+
   @media(max-width:640px){
-    .wrap{padding:16px 12px 50px}
+    .wrap{padding:14px 11px 50px}
     .card .v{font-size:19px}
+    h1{font-size:16px}
+    .tab{padding:8px 12px;font-size:13px}
     table{font-size:12px}
     th:nth-child(4),td:nth-child(4){display:none}
+    .kv{grid-template-columns:78px 1fr}
   }
 </style>
 </head>
@@ -87,112 +118,180 @@
 <div class="wrap">
 
   <header>
-    <div class="logo">S</div>
+    <div class="logo">T</div>
     <div>
-      <h1>spider-hub</h1>
-      <div class="sub">把 TVBox 的 catvod spider 变成标准 MacCMS 采集站</div>
+      <h1>tvboxhub</h1>
+      <div class="sub">TVBox 点播源 → Emby · spider 中转 + 插件管理</div>
     </div>
     <div class="spacer"></div>
     <span class="badge" id="badgeStatus">连接中…</span>
   </header>
 
-  <div class="cards">
-    <div class="card"><div class="k">spider 站点</div><div class="v accent" id="kTotal">–</div></div>
-    <div class="card"><div class="k">已验证可用</div><div class="v ok" id="kOk">–</div></div>
-    <div class="card"><div class="k">未验证 / 失败</div><div class="v bad" id="kBad">–</div></div>
-    <div class="card"><div class="k">运行时长</div><div class="v" id="kUptime" style="font-size:17px">–</div></div>
+  <div class="tabs">
+    <div class="tab active" data-pane="overview" onclick="switchTab('overview',this)">概览</div>
+    <div class="tab" data-pane="sites" onclick="switchTab('sites',this)">站点<span class="n" id="tabSiteCount">0</span></div>
+    <div class="tab" data-pane="config" onclick="switchTab('config',this)">配置</div>
+    <div class="tab" data-pane="emby" onclick="switchTab('emby',this)">Emby 插件</div>
+    <div class="tab" data-pane="logs" onclick="switchTab('logs',this)">操作记录<span class="n" id="tabLogCount">0</span></div>
   </div>
 
-  <div class="panel">
-    <h2>配置</h2>
-    <div class="row">
-      <input type="text" id="configUrl" placeholder="TVBox 配置地址（http 或本机绝对路径）">
-      <button class="primary" onclick="saveConfig()">保存并加载</button>
-      <button onclick="reload()">重新加载</button>
+  <!-- ══════════ 概览 ══════════ -->
+  <div class="pane active" id="pane-overview">
+    <div class="cards">
+      <div class="card"><div class="k">spider 站点</div><div class="v accent" id="kTotal">–</div></div>
+      <div class="card"><div class="k">已验证可用</div><div class="v ok" id="kOk">–</div></div>
+      <div class="card"><div class="k">失败 / 未测</div><div class="v bad" id="kBad">–</div></div>
+      <div class="card"><div class="k">运行时长</div><div class="v" id="kUptime" style="font-size:17px">–</div></div>
     </div>
-    <div class="hint">
-      这里只取配置里 <code>type:3</code> + <code>api:csp_XXX</code> 的 spider 站点。
-      每个站点对外的采集地址是 <code>/v/&lt;key&gt;/api.php/provide/vod/</code>，
-      把它填进 Emby 插件的站点白名单即可。
-    </div>
-  </div>
 
-  <div class="panel">
-    <h2>Emby 插件</h2>
-    <div class="row" style="margin-bottom:10px">
-      <button class="primary" onclick="detectEmby()">检测本机 Emby</button>
-      <input type="text" id="embyPath" placeholder="Emby 数据目录（programdata），可手工填"
-             style="min-width:300px">
-      <button onclick="embyStatus()">查安装状态</button>
+    <div class="panel">
+      <h2>运行信息</h2>
+      <div class="kv">
+        <div class="k">配置文件</div><div class="v"><code id="infoConfig">—</code></div>
+        <div class="k">hub 地址</div><div class="v"><code id="infoHub">—</code></div>
+        <div class="k">TCP 端口</div><div class="v" id="infoPort">—</div>
+        <div class="k">插件包</div><div class="v"><code id="infoDll">—</code></div>
+        <div class="k">Java</div><div class="v" id="infoJava">—</div>
+        <div class="k">Emby</div><div class="v" id="infoEmby">未检测</div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <button class="primary" onclick="goto('sites')">管理站点</button>
+        <button onclick="goto('config')">配置源</button>
+        <button onclick="goto('emby')">安装插件</button>
+      </div>
     </div>
-    <div id="embyList"></div>
 
-    <div class="row" style="margin-top:12px">
-      <input type="text" id="outputRoot" placeholder="剧集输出目录（strm 根目录），如 /vol1/media/tvbox">
-    </div>
-    <div class="row" style="margin-top:10px">
-      <button class="primary" onclick="installPlugin()">安装插件到 Emby</button>
-      <button onclick="uninstallPlugin()">卸载插件</button>
-      <span class="hint" id="pluginHint" style="margin:0"></span>
-    </div>
-    <div class="hint" style="margin-top:10px">
-      插件连接的 hub 地址：<code id="hubAddr">—</code>（安装时自动写入插件配置）
-    </div>
-    <div class="hint">
-      安装会把 <code>TvBox.dll</code> 复制到 <code>&lt;Emby数据目录&gt;/plugins/</code>，
-      并写好插件配置（配置地址 + hub 地址 + 输出目录），**装完重启一次 Emby 即可**。
-      旧版会自动备份成 <code>TvBox.dll.bak-时间戳</code>。
+    <div class="panel">
+      <h2>最近操作</h2>
+      <div id="recentLogs"><div class="empty">还没有操作记录</div></div>
     </div>
   </div>
 
-  <div class="panel">
-    <h2>站点</h2>
-    <div class="tabs">
-      <div class="tab active" onclick="filterSites('all',this)">全部</div>
-      <div class="tab" onclick="filterSites('ok',this)">可用</div>
-      <div class="tab" onclick="filterSites('bad',this)">失败/未测</div>
+  <!-- ══════════ 站点 ══════════ -->
+  <div class="pane" id="pane-sites">
+    <div class="panel">
+      <h2>站点列表</h2>
+      <div class="row" style="margin-bottom:12px">
+        <select id="siteFilter" onchange="renderSites()">
+          <option value="all">全部</option>
+          <option value="ok">仅可用</option>
+          <option value="bad">失败 / 未测</option>
+        </select>
+        <input type="text" id="siteSearch" placeholder="搜索站点名 / class / key"
+               oninput="renderSites()" style="max-width:260px">
+        <button class="primary" onclick="probeAll()" id="btnProbe">批量探测当前</button>
+        <button onclick="loadSites()">刷新</button>
+        <span class="hint" id="probeProgress" style="margin:0"></span>
+      </div>
+      <div id="siteTable"><div class="empty">还没有站点。先去「配置」标签填一个源地址。</div></div>
+
+      <div class="panel" style="margin:14px 0 0;background:#0c1526">
+        <h2 style="font-size:13px">探测结果</h2>
+        <div id="resultBox" class="empty">点站点行里的「首页 / 分类 / 采集」看返回</div>
+      </div>
     </div>
-    <div class="row" style="margin-bottom:12px">
-      <button class="primary" onclick="probeAll()">批量探测全部</button>
-      <button onclick="loadSites()">刷新</button>
-      <span class="hint" id="probeProgress" style="margin:0"></span>
-    </div>
-    <div id="siteTable"></div>
   </div>
 
-  <div class="panel">
-    <h2>结果</h2>
-    <div id="resultBox" class="empty">点上面任意「首页 / 分类 / 详情」按钮看返回</div>
+  <!-- ══════════ 配置 ══════════ -->
+  <div class="pane" id="pane-config">
+    <div class="panel">
+      <h2>TVBox 配置源</h2>
+      <div class="row">
+        <input type="text" id="configUrl" placeholder="TVBox 配置地址（http 或本机绝对路径）">
+        <button class="primary" onclick="saveConfig()" id="btnSave">保存并加载</button>
+        <button onclick="reload()" id="btnReload">重新加载</button>
+      </div>
+      <div class="hint">
+        支持单仓 / 多仓（自动取第一个可用子仓）。只会收下 <code>type:3</code> + <code>api:csp_XXX</code>
+        的 spider 站点，每个站点自动变成标准采集地址
+        <code>/v/&lt;key&gt;/api.php/provide/vod/</code>。
+        <br>GitHub 地址在国内直连常超时，5 秒后会自动换镜像（ghproxy / jsdelivr），无需手动改。
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>载入统计</h2>
+      <div class="kv">
+        <div class="k">站点总数</div><div class="v" id="cfgTotal">—</div>
+        <div class="k">上次来源</div><div class="v"><code id="cfgVia">—</code></div>
+        <div class="k">加载耗时</div><div class="v" id="cfgMs">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════ Emby 插件 ══════════ -->
+  <div class="pane" id="pane-emby">
+    <div class="panel">
+      <h2>本机 Emby</h2>
+      <div class="row" style="margin-bottom:10px">
+        <button class="primary" onclick="detectEmby()">检测本机 Emby</button>
+        <input type="text" id="embyPath" placeholder="Emby 数据目录（programdata），可手工填" style="min-width:300px">
+        <button onclick="embyStatus()">查安装状态</button>
+      </div>
+      <div id="embyList"></div>
+    </div>
+
+    <div class="panel">
+      <h2>安装插件</h2>
+      <div class="row">
+        <input type="text" id="outputRoot" placeholder="剧集输出目录（strm 根目录），如 /vol1/media/tvbox">
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="primary" onclick="installPlugin()" id="btnInstall">安装插件到 Emby</button>
+        <button class="danger" onclick="uninstallPlugin()">卸载插件</button>
+        <span class="hint" id="pluginHint" style="margin:0"></span>
+      </div>
+      <div class="hint" style="margin-top:12px">
+        插件连接的 hub 地址：<code id="hubAddr">—</code>（安装时自动写进插件配置）
+      </div>
+      <div class="hint">
+        安装会把 <code>TvBox.dll</code> 复制到 <code>&lt;Emby数据目录&gt;/plugins/</code>，
+        并写好插件配置（配置地址 + hub 地址 + 输出目录）。装完重启一次 Emby 即可。
+        旧版自动备份成 <code>TvBox.dll.bak-时间戳</code>。
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════ 操作记录 ══════════ -->
+  <div class="pane" id="pane-logs">
+    <div class="panel">
+      <h2>操作记录</h2>
+      <div class="row" style="margin-bottom:12px">
+        <select id="logFilter" onchange="renderLogs()">
+          <option value="all">全部</option>
+          <option value="ok">成功</option>
+          <option value="bad">失败</option>
+        </select>
+        <input type="text" id="logSearch" placeholder="搜索操作 / 目标 / 详情"
+               oninput="renderLogs()" style="max-width:260px">
+        <button onclick="loadLogs()">刷新</button>
+        <button class="danger" onclick="clearLogs()">清空记录</button>
+        <span class="hint" style="margin:0" id="logCount"></span>
+      </div>
+      <div id="logTable"><div class="empty">还没有操作记录</div></div>
+    </div>
   </div>
 
 </div>
 <div class="toast" id="toast"></div>
 
 <script>
-var sites = [];
-var currentFilter = 'all';
-var hubInfo = { tcpPort: 8098 };
-
-// ── API 前缀自动探测 ──
-// fnOS 网关下页面可能落在这些位置，每种都要能活：
-//   /app/tvboxhub/   （标准）
-//   /app/tvboxhub    （没有尾斜杠 —— 相对路径会解析成 /app/api/xxx，打到 fnOS 主服务返回 "Not Found"）
-//   /app/            （某些 WebView 会把应用名截掉）
-//   直接 TCP 访问时是 /
-// 做法：列候选前缀，逐个试，谁返回真 JSON 就记住谁。
+// ══════════ API 前缀自动探测 ══════════
+// fnOS 网关下页面可能落在 /app/tvboxhub/、/app/tvboxhub（无尾斜杠）、/app/ 或直连 /
+// 逐个候选试，谁返回真 JSON 就记住谁。
 var API_CANDIDATES = (function () {
   var p = location.pathname || '/';
   var list = [];
-  list.push(p.slice(-1) === '/' ? p : p + '/');        // 当前目录
-  list.push('/app/tvboxhub/');                          // 本应用的固定前缀
+  list.push(p.slice(-1) === '/' ? p : p + '/');
+  list.push('/app/tvboxhub/');
   var i = p.lastIndexOf('/');
-  if (i > 0) list.push(p.slice(0, i + 1));              // 上一级
+  if (i > 0) list.push(p.slice(0, i + 1));
   list.push('/app/');
   list.push('/');
   var seen = {};
   return list.filter(function (x) { return x && !seen[x] && (seen[x] = 1); });
 })();
-var apiBase = null;   // 已验证可用的前缀
+var apiBase = null;
 
 function looksLikeHtml(t) {
   var s = String(t || '').trim();
@@ -201,41 +300,39 @@ function looksLikeHtml(t) {
 
 function api(path, opt) {
   var rel = path.replace(/^\/+/, '');
-  var tries = apiBase ? [apiBase] : API_CANDIDATES.slice();
-  if (apiBase && API_CANDIDATES.indexOf(apiBase) > 0) {
-    // 已确定前缀时也保留其它候选做兜底（例如应用被换端口）
-    tries = tries.concat(API_CANDIDATES);
-  }
+  var tries = apiBase ? [apiBase].concat(API_CANDIDATES) : API_CANDIDATES.slice();
   var idx = 0, lastErr = null;
-
   function attempt() {
-    if (idx >= tries.length) {
-      return Promise.reject(lastErr || new Error('所有候选前缀都取不到接口'));
-    }
+    if (idx >= tries.length) return Promise.reject(lastErr || new Error('所有候选前缀都取不到接口'));
     var base = tries[idx++];
     return fetch(base + rel, opt).then(function (r) {
       return r.text().then(function (t) {
         if (looksLikeHtml(t)) throw new Error('非 JSON: ' + String(t).trim().slice(0, 40));
         var j;
-        try { j = JSON.parse(t); }
-        catch (e) { throw new Error('非 JSON: ' + String(t).trim().slice(0, 40)); }
+        try { j = JSON.parse(t); } catch (e) { throw new Error('非 JSON: ' + String(t).trim().slice(0, 40)); }
         apiBase = base;
         return j;
       });
-    }).catch(function (e) {
-      lastErr = e;
-      return attempt();
-    });
+    }).catch(function (e) { lastErr = e; return attempt(); });
   }
   return attempt();
 }
+
+// ══════════ 基础 ══════════
+var sites = [], logs = [], hubInfo = { tcpPort: 8098 };
+var cfgState = { via: null, ms: null };
 
 function toast(msg, kind) {
   var t = document.getElementById('toast');
   t.textContent = msg;
   t.className = 'toast show ' + (kind || '');
   clearTimeout(t._h);
-  t._h = setTimeout(function () { t.className = 'toast ' + (kind || ''); }, 3200);
+  t._h = setTimeout(function () { t.className = 'toast ' + (kind || ''); }, 3600);
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 function fmtUptime(s) {
@@ -244,8 +341,35 @@ function fmtUptime(s) {
   return Math.floor(s / 3600) + ' 时 ' + Math.floor((s % 3600) / 60) + ' 分';
 }
 
+function fmtMs(ms) {
+  if (!ms && ms !== 0) return '—';
+  return ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(1) + ' s';
+}
+
+// ══════════ Tab ══════════
+function switchTab(name, el) {
+  document.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('active'); });
+  document.querySelectorAll('.pane').forEach(function (p) { p.classList.remove('active'); });
+  if (el) el.classList.add('active');
+  else {
+    var t = document.querySelector('.tab[data-pane="' + name + '"]');
+    if (t) t.classList.add('active');
+  }
+  var pane = document.getElementById('pane-' + name);
+  if (pane) pane.classList.add('active');
+  if (name === 'logs') loadLogs();
+  if (name === 'overview') loadRecent();
+  if (name === 'emby' && !document.getElementById('embyList').dataset.loaded) detectEmby();
+  try { localStorage.setItem('tvboxhub.tab', name); } catch (e) {}
+}
+
+function goto(name) {
+  switchTab(name, document.querySelector('.tab[data-pane="' + name + '"]'));
+}
+
+// ══════════ 状态 ══════════
 function status() {
-  api('/api/status').then(function (d) {
+  api('api/status').then(function (d) {
     var b = document.getElementById('badgeStatus');
     b.textContent = d.ok ? '运行中 · Java ' + d.javaVersion : '异常';
     b.className = 'badge' + (d.ok ? ' on' : '');
@@ -253,70 +377,79 @@ function status() {
     document.getElementById('kOk').textContent = d.stats.ok;
     document.getElementById('kBad').textContent = d.stats.unknown;
     document.getElementById('kUptime').textContent = fmtUptime(d.uptimeSec);
-    if (d.tcpPort) { hubInfo.tcpPort = d.tcpPort; }
-    var hubEl = document.getElementById('hubAddr');
-    if (hubEl && d.tcpPort) {
-      hubEl.textContent = 'http://' + location.hostname + ':' + d.tcpPort;
-    }
+    document.getElementById('tabSiteCount').textContent = d.stats.total;
+    if (d.tcpPort) hubInfo.tcpPort = d.tcpPort;
+    var hubUrl = location.protocol + '//' + location.hostname + ':' + hubInfo.tcpPort;
+    document.getElementById('hubAddr').textContent = hubUrl;
+    document.getElementById('infoHub').textContent = hubUrl;
+    document.getElementById('infoPort').textContent = d.tcpPort + (d.tcpOk ? '（正常）' : '（未绑定）');
+    document.getElementById('infoConfig').textContent = d.configUrl || '（未设置）';
+    document.getElementById('infoDll').textContent = d.pluginDll || '（缺失）';
+    document.getElementById('infoJava').textContent = 'Java ' + d.javaVersion;
     if (d.configUrl && !document.getElementById('configUrl').value) {
       document.getElementById('configUrl').value = d.configUrl;
     }
+    document.getElementById('cfgTotal').textContent = d.stats.total + ' 个';
   }).catch(function () {
     document.getElementById('badgeStatus').textContent = '连不上 hub';
   });
 }
 
+// ══════════ 站点 ══════════
 function loadSites() {
-  api('/api/sites').then(function (d) {
+  api('api/sites').then(function (d) {
     sites = d.sites || [];
-    render();
+    renderSites();
+    document.getElementById('tabSiteCount').textContent = sites.length;
   });
 }
 
-function filterSites(kind, el) {
-  currentFilter = kind;
-  document.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('active'); });
-  if (el) el.classList.add('active');
-  render();
-}
-
-function render() {
-  var list = sites.filter(function (s) {
-    if (currentFilter === 'ok') return s.ok;
-    if (currentFilter === 'bad') return !s.ok;
+function filteredSites() {
+  var filter = (document.getElementById('siteFilter') || {}).value || 'all';
+  var kw = ((document.getElementById('siteSearch') || {}).value || '').trim().toLowerCase();
+  return sites.filter(function (s) {
+    if (filter === 'ok' && !s.ok) return false;
+    if (filter === 'bad' && s.ok) return false;
+    if (kw) {
+      var hay = (s.name + ' ' + s.key + ' ' + s.class).toLowerCase();
+      if (hay.indexOf(kw) < 0) return false;
+    }
     return true;
   });
+}
+
+function renderSites() {
+  var list = filteredSites();
   var box = document.getElementById('siteTable');
   if (!list.length) {
-    box.innerHTML = '<div class="empty">没有站点。先在上面填配置地址并加载。</div>';
+    box.innerHTML = '<div class="empty">' + (sites.length ? '没有匹配的站点' : '还没有站点。先去「配置」标签填一个源地址。') + '</div>';
     return;
   }
   var html = '<table><thead><tr><th>状态</th><th>名称</th><th>key / class</th><th>采集地址</th><th>操作</th></tr></thead><tbody>';
   list.forEach(function (s, i) {
     var st = s.ok ? 'ok' : (s.lastError ? 'bad' : 'unk');
     html += '<tr>' +
-      '<td><span class="st ' + st + '"></span>' +
-        (s.ok ? '可用' : (s.lastError ? '失败' : '未测')) + '</td>' +
+      '<td><span class="st ' + st + '"></span>' + (s.ok ? '可用' : (s.lastError ? '失败' : '未测')) + '</td>' +
       '<td>' + esc(s.name || '') + '</td>' +
       '<td><code>' + esc(s.key) + '</code><br><span style="color:var(--dim);font-size:11.5px">' +
         esc((s.class || '').replace('com.github.catvod.spider.', 'spider.')) + '</span></td>' +
       '<td><code style="font-size:11.5px">/v/' + encodeURIComponent(s.key) + '/api.php/provide/vod/</code>' +
         (s.lastError ? '<div class="err" title="' + esc(s.lastError) + '">' + esc(s.lastError) + '</div>' : '') + '</td>' +
       '<td style="white-space:nowrap">' +
-        '<button class="tiny" onclick="testHome(' + i + ',this)">首页</button> ' +
-        '<button class="tiny" onclick="testCategory(' + i + ',this)">分类</button> ' +
+        '<button class="tiny" onclick="testHome(' + i + ')">首页</button> ' +
+        '<button class="tiny" onclick="testCategory(' + i + ')">分类</button> ' +
         '<button class="tiny" onclick="testCms(' + i + ')">采集</button>' +
       '</td></tr>';
   });
   html += '</tbody></table>';
   box.innerHTML = html;
-  // 保存筛选后的索引映射
   box._list = list;
 }
 
-function esc(s) {
-  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+function currentSite(i) {
+  var box = document.getElementById('siteTable');
+  var list = box._list || sites;
+  return list[i];
 }
 
 function show(title, data) {
@@ -328,102 +461,137 @@ function show(title, data) {
     esc(title) + '</div><pre>' + esc(json) + '</pre>';
 }
 
-function getSite(btn) {
-  // 从按钮所在行反查站点
-  var tr = btn.closest('tr');
-  var idx = Array.prototype.indexOf.call(tr.parentNode.children, tr);
-  return (document.getElementById('siteTable')._list || sites)[idx];
-}
-
-function testHome(i, btn, silent) {
-  var s = (document.getElementById('siteTable')._list || sites)[i] || getSite(btn);
+function testHome(i) {
+  var s = currentSite(i);
   if (!s) return;
-  if (!silent) show('正在测试 ' + s.name + ' …', {});
-  return api('/api/home?key=' + encodeURIComponent(s.key)).then(function (d) {
-    if (!silent) show('首页 ' + s.name, d);
-    var n = (d.parsed && d.parsed.class) ? d.parsed.class.length : 0;
-    return n;
-  }).catch(function (e) {
-    if (!silent) show('首页失败', { error: String(e) });
-    return 0;
-  });
+  show('正在探测 ' + s.name + ' …', {});
+  api('api/probe?key=' + encodeURIComponent(s.key)).then(function (d) {
+    show('首页 ' + s.name + '（' + fmtMs(d.ms) + '）', d);
+    loadSites();
+  }).catch(function (e) { show('探测失败', { error: String(e) }); });
 }
 
-function testCategory(i, btn) {
-  var s = (document.getElementById('siteTable')._list || sites)[i] || getSite(btn);
+function testCategory(i) {
+  var s = currentSite(i);
   if (!s) return;
   show('正在取分类 ' + s.name + ' …', {});
-  api('/api/home?key=' + encodeURIComponent(s.key)).then(function (h) {
+  api('api/home?key=' + encodeURIComponent(s.key)).then(function (h) {
     var classes = (h.parsed && h.parsed.class) || [];
     if (!classes.length) { show(s.name + ' 没有分类', h); return; }
     var tid = classes[0].type_id;
-    api('/api/category?key=' + encodeURIComponent(s.key) + '&tid=' + encodeURIComponent(tid) + '&pg=1')
-      .then(function (d) { show(s.name + ' 分类 ' + classes[0].type_name + '(' + tid + ') 第1页', d); });
-  });
+    api('api/category?key=' + encodeURIComponent(s.key) + '&tid=' + encodeURIComponent(tid) + '&pg=1')
+      .then(function (d) { show(s.name + ' · ' + classes[0].type_name + '(' + tid + ') 第1页', d); });
+  }).catch(function (e) { show('失败', { error: String(e) }); });
 }
 
 function testCms(i) {
-  var s = (document.getElementById('siteTable')._list || sites)[i];
+  var s = currentSite(i);
   if (!s) return;
-  var url = '/v/' + encodeURIComponent(s.key) + '/api.php/provide/vod/?ac=list';
-  show('MacCMS 采集接口 ' + url, {});
-  api(url).then(function (d) { show('MacCMS ac=list → ' + s.name, d); });
+  var url = 'v/' + encodeURIComponent(s.key) + '/api.php/provide/vod/?ac=list';
+  show('MacCMS 采集接口 → ' + s.name, {});
+  api(url).then(function (d) { show('MacCMS ac=list → ' + s.name, d); })
+          .catch(function (e) { show('采集接口失败', { error: String(e) }); });
 }
 
 function probeAll() {
-  var list = sites.filter(function (s) { return true; });
-  if (!list.length) { toast('没有站点可测', 'bad'); return; }
-  var done = 0, ok = 0;
+  var list = filteredSites();
+  if (!list.length) { toast('当前筛选下没有站点可测', 'bad'); return; }
+  var done = 0, ok = 0, t0 = Date.now();
   var box = document.getElementById('probeProgress');
   box.textContent = '0 / ' + list.length;
   function next(i) {
     if (i >= list.length) {
-      toast('探测完成：' + ok + ' / ' + list.length + ' 可用', 'ok');
+      var ms = Date.now() - t0;
       box.textContent = '完成：' + ok + ' / ' + list.length + ' 可用';
+      toast('探测完成：' + ok + ' / ' + list.length + ' 可用', 'ok');
+      api('api/history/add', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: '批量探测', target: list.length + ' 个站点（当前筛选）',
+          ok: 1, detail: '可用 ' + ok + ' / ' + list.length, ms: ms }) }).then(loadLogs);
       loadSites(); status();
       return;
     }
-    api('/api/home?key=' + encodeURIComponent(list[i].key)).then(function (d) {
-      var n = (d.parsed && d.parsed.class) ? d.parsed.class.length : 0;
-      if (n > 0) ok++;
+    api('api/probe?key=' + encodeURIComponent(list[i].key) + '&record=0').then(function (d) {
+      if (d.classes > 0 || d.list > 0) ok++;
     }).catch(function () {}).then(function () {
       done++;
       box.textContent = done + ' / ' + list.length + '（可用 ' + ok + '）';
-      setTimeout(function () { next(i + 1); }, 120);
+      setTimeout(function () { next(i + 1); }, 100);
     });
   }
   next(0);
 }
 
-// ───────── Emby 插件 ─────────
+// ══════════ 配置 ══════════
+function saveConfig() {
+  var url = document.getElementById('configUrl').value.trim();
+  if (!url) { toast('先填配置地址', 'bad'); return; }
+  var btn = document.getElementById('btnSave');
+  btn.disabled = true; btn.textContent = '正在加载…';
+  toast('正在加载（GitHub 直连 5 秒超时后会走镜像）', '');
+  api('api/save', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ configUrl: url }) })
+    .then(function () { return api('api/reload', { method: 'POST' }); })
+    .then(function (d) {
+      toast(d.msg || '已加载', d.ok ? 'ok' : 'bad');
+      if (d.ok) {
+        cfgState.via = d.via; cfgState.ms = d.ms;
+        document.getElementById('cfgVia').textContent = d.via || '—';
+        document.getElementById('cfgMs').textContent = fmtMs(d.ms);
+      }
+      loadSites(); status(); loadLogs();
+    })
+    .catch(function (e) { toast('失败：' + (e && e.message ? e.message : e), 'bad'); loadLogs(); })
+    .then(function () { btn.disabled = false; btn.textContent = '保存并加载'; });
+}
 
+function reload() {
+  var btn = document.getElementById('btnReload');
+  btn.disabled = true;
+  toast('正在重新加载…', '');
+  api('api/reload', { method: 'POST' }).then(function (d) {
+    toast(d.msg || '已重新加载', d.ok ? 'ok' : 'bad');
+    if (d.ok) {
+      document.getElementById('cfgVia').textContent = d.via || '—';
+      document.getElementById('cfgMs').textContent = fmtMs(d.ms);
+    }
+    loadSites(); status(); loadLogs();
+  }).catch(function (e) { toast('失败：' + (e && e.message ? e.message : e), 'bad'); loadLogs(); })
+    .then(function () { btn.disabled = false; });
+}
+
+// ══════════ Emby ══════════
 function detectEmby() {
   var box = document.getElementById('embyList');
+  box.dataset.loaded = '1';
   box.innerHTML = '<div class="empty">正在扫描…</div>';
-  api('/api/emby/detect').then(function (d) {
+  api('api/emby/detect').then(function (d) {
     if (!d.instances || !d.instances.length) {
-      box.innerHTML = '<div class="empty">没找到本机 Emby。<br>' +
-        '请确认 Emby 已安装并至少启动过一次，或手工填写数据目录。</div>';
+      box.innerHTML = '<div class="empty">没找到本机 Emby。<br>请确认 Emby 已安装并至少启动过一次，或手工填写数据目录。</div>';
+      document.getElementById('infoEmby').textContent = '未找到';
       return;
     }
     var html = '<table><thead><tr><th>状态</th><th>Emby 数据目录</th><th>来源</th><th></th></tr></thead><tbody>';
-    d.instances.forEach(function (it, i) {
+    d.instances.forEach(function (it) {
       html += '<tr>' +
         '<td>' + (it.writable ? '<span class="st ok"></span>可写' : '<span class="st bad"></span>不可写') + '</td>' +
         '<td><code>' + esc(it.programdata) + '</code></td>' +
         '<td style="color:var(--dim);font-size:12px">' + esc(it.source) + '</td>' +
-        '<td><button class="tiny" onclick="pickEmby(\'' + esc(it.programdata).replace(/'/g, "\\'") + '\')">选用</button></td>' +
+        '<td><button class="tiny" onclick="pickEmby(this)" data-path="' + esc(it.programdata) + '">选用</button></td>' +
         '</tr>';
     });
     html += '</tbody></table>';
     if (d.dll) html += '<div class="hint">插件包：<code>' + esc(d.dll) + '</code></div>';
     box.innerHTML = html;
-    if (d.instances.length === 1) document.getElementById('embyPath').value = d.instances[0].programdata;
+    if (d.instances.length === 1) {
+      document.getElementById('embyPath').value = d.instances[0].programdata;
+      embyStatus();
+    }
+    document.getElementById('infoEmby').textContent = '找到 ' + d.instances.length + ' 个';
   }).catch(function (e) { box.innerHTML = '<div class="empty">检测失败: ' + esc(e) + '</div>'; });
 }
 
-function pickEmby(path) {
-  document.getElementById('embyPath').value = path;
+function pickEmby(btn) {
+  document.getElementById('embyPath').value = btn.dataset.path;
   embyStatus();
 }
 
@@ -431,15 +599,13 @@ function embyStatus() {
   var pd = document.getElementById('embyPath').value.trim();
   var hint = document.getElementById('pluginHint');
   if (!pd) { toast('先选或填 Emby 数据目录', 'bad'); return; }
-  api('/api/emby/status?programdata=' + encodeURIComponent(pd)).then(function (d) {
-    hint.textContent = d.installed
-      ? '已安装 · ' + d.size + ' 字节 · ' + d.mtime
-      : '未安装';
+  api('api/emby/status?programdata=' + encodeURIComponent(pd)).then(function (d) {
+    hint.textContent = d.installed ? '已安装 · ' + d.size + ' 字节 · ' + d.mtime : '未安装';
     hint.style.color = d.installed ? 'var(--ok)' : 'var(--dim)';
-    // 记住目录
-    api('/api/save', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    document.getElementById('infoEmby').textContent = (d.installed ? '已安装插件' : '已找到，未安装') + ' · ' + pd;
+    api('api/save', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ embyPath: pd }) });
-  });
+  }).catch(function (e) { toast('查询失败: ' + e, 'bad'); });
 }
 
 function installPlugin() {
@@ -447,76 +613,113 @@ function installPlugin() {
   var out = document.getElementById('outputRoot').value.trim();
   if (!pd) { toast('先选或填 Emby 数据目录', 'bad'); return; }
   if (!out) { toast('填一下剧集输出目录', 'bad'); return; }
+  var btn = document.getElementById('btnInstall');
+  btn.disabled = true;
   var hint = document.getElementById('pluginHint');
   hint.textContent = '正在安装…';
-  api('/api/emby/install', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      programdata: pd,
-      outputRoot: out,
+  api('api/emby/install', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ programdata: pd, outputRoot: out,
       configUrl: document.getElementById('configUrl').value.trim(),
-      hubUrl: location.protocol + '//' + location.hostname + ':' + hubInfo.tcpPort
-    })
+      hubUrl: location.protocol + '//' + location.hostname + ':' + hubInfo.tcpPort })
   }).then(function (d) {
     if (d.ok) {
       toast('安装成功，重启 Emby 生效', 'ok');
-      hint.textContent = '✅ ' + d.msg;
-      hint.style.color = 'var(--ok)';
+      hint.textContent = '✅ ' + d.msg; hint.style.color = 'var(--ok)';
     } else {
       toast(d.msg || '安装失败', 'bad');
-      hint.textContent = '❌ ' + (d.msg || '失败');
-      hint.style.color = 'var(--bad)';
+      hint.textContent = '❌ ' + (d.msg || '失败'); hint.style.color = 'var(--bad)';
     }
-  }).catch(function (e) { toast('失败: ' + e, 'bad'); });
+    loadLogs();
+  }).catch(function (e) { toast('失败: ' + e, 'bad'); })
+    .then(function () { btn.disabled = false; });
 }
 
 function uninstallPlugin() {
   var pd = document.getElementById('embyPath').value.trim();
   if (!pd) { toast('先选或填 Emby 数据目录', 'bad'); return; }
-  api('/api/emby/uninstall', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ programdata: pd })
-  }).then(function (d) { toast(d.msg || '已卸载', d.ok ? 'ok' : 'bad'); embyStatus(); });
+  api('api/emby/uninstall', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ programdata: pd }) })
+    .then(function (d) { toast(d.msg || '已卸载', d.ok ? 'ok' : 'bad'); embyStatus(); loadLogs(); });
 }
 
-function saveConfig() {
-  var url = document.getElementById('configUrl').value.trim();
-  if (!url) { toast('先填配置地址', 'bad'); return; }
-  var btn = document.querySelector('button.primary[onclick*="saveConfig"]');
-  if (btn) { btn.disabled = true; btn.textContent = '正在加载…'; }
-  toast('正在加载（GitHub 直连超时约 5 秒后会走镜像，请稍等）', '');
-  api('/api/save', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ configUrl: url })
-  }).then(function () {
-    return api('/api/reload', { method: 'POST' });
-  }).then(function (d) {
-    toast(d.msg || '已加载', d.ok ? 'ok' : 'bad');
-    loadSites(); status();
-  }).catch(function (e) {
-    toast('失败：' + (e && e.message ? e.message : e), 'bad');
-  }).then(function () {
-    if (btn) { btn.disabled = false; btn.textContent = '保存并加载'; }
+// ══════════ 操作记录 ══════════
+function loadLogs() {
+  api('api/history').then(function (d) {
+    logs = d.records || [];
+    document.getElementById('tabLogCount').textContent = logs.length;
+    renderLogs();
+    loadRecent();
   });
 }
 
-function reload() {
-  toast('正在重新加载…', '');
-  api('/api/reload', { method: 'POST' }).then(function (d) {
-    toast(d.msg || '已重新加载', d.ok ? 'ok' : 'bad');
-    loadSites(); status();
-  }).catch(function (e) {
-    toast('失败：' + (e && e.message ? e.message : e), 'bad');
+function renderLogs() {
+  var filter = (document.getElementById('logFilter') || {}).value || 'all';
+  var kw = ((document.getElementById('logSearch') || {}).value || '').trim().toLowerCase();
+  var list = logs.filter(function (r) {
+    if (filter === 'ok' && !r.ok) return false;
+    if (filter === 'bad' && r.ok) return false;
+    if (kw) {
+      var hay = (r.action + ' ' + r.target + ' ' + r.detail).toLowerCase();
+      if (hay.indexOf(kw) < 0) return false;
+    }
+    return true;
+  });
+  var box = document.getElementById('logTable');
+  document.getElementById('logCount').textContent = '共 ' + logs.length + ' 条，显示 ' + list.length + ' 条';
+  if (!list.length) { box.innerHTML = '<div class="empty">' + (logs.length ? '没有匹配的记录' : '还没有操作记录') + '</div>'; return; }
+  var html = '<table><thead><tr><th>时间</th><th>操作</th><th>目标</th><th>结果</th><th>详情</th><th>耗时</th></tr></thead><tbody>';
+  list.forEach(function (r) {
+    html += '<tr>' +
+      '<td style="white-space:nowrap;color:var(--dim);font-size:12px">' + esc(r.time) + '</td>' +
+      '<td>' + esc(r.action) + '</td>' +
+      '<td><code style="font-size:11.5px">' + esc(shorten(r.target, 48)) + '</code></td>' +
+      '<td><span class="pill ' + (r.ok ? 'ok' : 'bad') + '">' + (r.ok ? '成功' : '失败') + '</span></td>' +
+      '<td style="font-size:12px;color:var(--dim)">' + esc(shorten(r.detail, 70)) + '</td>' +
+      '<td style="white-space:nowrap;color:var(--dim);font-size:12px">' + fmtMs(r.ms) + '</td>' +
+      '</tr>';
+  });
+  html += '</tbody></table>';
+  box.innerHTML = html;
+}
+
+function loadRecent() {
+  var box = document.getElementById('recentLogs');
+  if (!box) return;
+  if (!logs.length) { box.innerHTML = '<div class="empty">还没有操作记录</div>'; return; }
+  var html = '<table><thead><tr><th>时间</th><th>操作</th><th>结果</th><th>详情</th></tr></thead><tbody>';
+  logs.slice(0, 5).forEach(function (r) {
+    html += '<tr><td style="white-space:nowrap;color:var(--dim);font-size:12px">' + esc(r.time) + '</td>' +
+      '<td>' + esc(r.action) + '</td>' +
+      '<td><span class="pill ' + (r.ok ? 'ok' : 'bad') + '">' + (r.ok ? '成功' : '失败') + '</span></td>' +
+      '<td style="font-size:12px;color:var(--dim)">' + esc(shorten(r.detail, 60)) + '</td></tr>';
+  });
+  html += '</tbody></table>';
+  box.innerHTML = html;
+}
+
+function clearLogs() {
+  if (!confirm('确定清空所有操作记录？')) return;
+  api('api/history/clear', { method: 'POST' }).then(function () {
+    toast('已清空', 'ok'); loadLogs();
   });
 }
 
+function shorten(s, n) {
+  s = String(s == null ? '' : s);
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+// ══════════ 启动 ══════════
 status();
 loadSites();
-detectEmby();
+loadLogs();
 setInterval(status, 15000);
+
+// 恢复上次所在 tab（默认概览）
+try {
+  var last = localStorage.getItem('tvboxhub.tab');
+  if (last && document.getElementById('pane-' + last)) goto(last);
+} catch (e) {}
 </script>
 </body>
 </html>

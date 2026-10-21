@@ -43,6 +43,50 @@ public class Hub {
     static SpiderPool pool = new SpiderPool();
     static ExecutorService workers = Executors.newFixedThreadPool(8);
     static UnixHttp unix;
+
+    // ── 操作记录（扫描/添加/安装等），落盘到 PKGVAR/history.json ──
+    static final java.util.List<Map<String, Object>> history = new java.util.ArrayList<>();
+    static final int HISTORY_MAX = 300;
+    static Path historyFile;
+
+    /** 记一条操作。 */
+    static synchronized void record(String action, String target, boolean ok, String detail, long ms) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("ts", System.currentTimeMillis());
+        m.put("time", new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new java.util.Date()));
+        m.put("action", action);
+        m.put("target", target == null ? "" : target);
+        m.put("ok", ok);
+        m.put("detail", detail == null ? "" : detail);
+        m.put("ms", ms);
+        history.add(0, m);                     // 最新的在前
+        while (history.size() > HISTORY_MAX) history.remove(history.size() - 1);
+        saveHistory();
+    }
+
+    static synchronized void loadHistory() {
+        try {
+            if (historyFile != null && Files.isRegularFile(historyFile)) {
+                Object o = SpiderPool.Json.parse(Files.readString(historyFile, StandardCharsets.UTF_8));
+                if (o instanceof List) {
+                    history.clear();
+                    for (Object x : (List<?>) o) if (x instanceof Map) history.add((Map<String, Object>) x);
+                }
+            }
+        } catch (Exception e) {
+            System.out.println("读取操作记录失败: " + e.getMessage());
+        }
+    }
+
+    static synchronized void saveHistory() {
+        try {
+            if (historyFile != null) {
+                Files.writeString(historyFile, SpiderPool.Json.stringify(history), StandardCharsets.UTF_8);
+            }
+        } catch (Exception e) {
+            System.out.println("保存操作记录失败: " + e.getMessage());
+        }
+    }
     static Path dataFile;
     static Map<String, Object> settings = new LinkedHashMap<>();
     static long started = System.currentTimeMillis();
@@ -83,7 +127,11 @@ public class Hub {
         System.setProperty("hub.prefix", hubPrefix);
 
         dataFile = configFile;
+        historyFile = configFile.toAbsolutePath().getParent() == null
+                ? Path.of("history.json")
+                : configFile.toAbsolutePath().getParent().resolve("history.json");
         loadSettings();
+        loadHistory();
 
         // spider classpath：优先用参数，其次读配置
         List<File> jars = new ArrayList<>();
@@ -198,6 +246,9 @@ public class Hub {
                 m.put("javaVersion", System.getProperty("java.version"));
                 m.put("tcpPort", tcpPort);
                 m.put("tcpOk", tcpOk);
+                m.put("pluginDll", pluginDll == null ? null
+                        : (Files.isRegularFile(pluginDll) ? pluginDll.toString() : "缺失"));
+                m.put("historyCount", history.size());
                 sendJson(ex, 200, m);
                 return;
             }
@@ -278,6 +329,7 @@ public class Hub {
                     }
                     saveSettings();
                 }
+                record("保存配置", str(settings.get("configUrl")), true, "配置已写入", 0);
                 sendJson(ex, 200, ok("已保存"));
                 return;
             }
@@ -287,10 +339,81 @@ public class Hub {
                     sendJson(ex, 200, fail("先设置配置地址"));
                     return;
                 }
-                int n = reload(url);
-                Map<String, Object> okm = ok("已加载 " + n + " 个 spider 站点");
-                okm.put("via", lastFetchedVia);
-                sendJson(ex, 200, okm);
+                long t0 = System.currentTimeMillis();
+                try {
+                    int n = reload(url);
+                    long ms = System.currentTimeMillis() - t0;
+                    Map<String, Object> okm = ok("已加载 " + n + " 个 spider 站点");
+                    okm.put("via", lastFetchedVia);
+                    okm.put("count", n);
+                    okm.put("ms", ms);
+                    record("扫描配置", url, n > 0, "站点 " + n + " 个 · 来源 " + briefVia(lastFetchedVia), ms);
+                    sendJson(ex, 200, okm);
+                } catch (Exception e) {
+                    long ms = System.currentTimeMillis() - t0;
+                    record("扫描配置", url, false, String.valueOf(e.getMessage()), ms);
+                    Map<String, Object> fm = fail(String.valueOf(e.getMessage()));
+                    fm.put("ms", ms);
+                    sendJson(ex, 200, fm);
+                }
+                return;
+            }
+            case "/api/history": {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("ok", true);
+                m.put("total", history.size());
+                m.put("records", history);
+                sendJson(ex, 200, m);
+                return;
+            }
+            case "/api/history/add": {   // 前端补记（如批量探测汇总）
+                Map<String, String> req = parseForm(readBody(ex));
+                record(req.getOrDefault("action", "操作"),
+                        req.getOrDefault("target", ""),
+                        !"0".equals(req.getOrDefault("ok", "1")),
+                        req.getOrDefault("detail", ""),
+                        (long) num(req.get("ms")));
+                sendJson(ex, 200, ok("已记录"));
+                return;
+            }
+            case "/api/history/clear": {
+                history.clear();
+                saveHistory();
+                record("清空记录", "", true, "手动清空", 0);
+                sendJson(ex, 200, ok("已清空"));
+                return;
+            }
+            case "/api/probe": {         // 单站探测（可记录）
+                String key = q.get("key");
+                boolean rec = !"0".equals(q.getOrDefault("record", "1"));
+                long t0 = System.currentTimeMillis();
+                try {
+                    String raw = call(key, () -> pool.get(key).homeContent(false), 45);
+                    long ms = System.currentTimeMillis() - t0;
+                    Object parsed = tryParse(raw);
+                    int nClass = 0, nList = 0;
+                    if (parsed instanceof Map) {
+                        Object c = ((Map<?, ?>) parsed).get("class");
+                        Object l = ((Map<?, ?>) parsed).get("list");
+                        nClass = c instanceof List ? ((List<?>) c).size() : 0;
+                        nList = l instanceof List ? ((List<?>) l).size() : 0;
+                    }
+                    if (rec) record("探测站点", key, nClass > 0 || nList > 0,
+                            "分类 " + nClass + " / 列表 " + nList, ms);
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("ok", true);
+                    m.put("classes", nClass);
+                    m.put("list", nList);
+                    m.put("ms", ms);
+                    m.put("parsed", parsed);
+                    sendJson(ex, 200, m);
+                } catch (Exception e) {
+                    long ms = System.currentTimeMillis() - t0;
+                    if (rec) record("探测站点", key, false, String.valueOf(e.getMessage()), ms);
+                    Map<String, Object> m = fail(String.valueOf(e.getMessage()));
+                    m.put("ms", ms);
+                    sendJson(ex, 200, m);
+                }
                 return;
             }
             case "/api/emby/detect": {
@@ -323,8 +446,11 @@ public class Hub {
                 if (pluginDll == null || !Files.isRegularFile(pluginDll)) {
                     sendJson(ex, 200, fail("安装包里没有 TvBox.dll")); return;
                 }
+                long t0 = System.currentTimeMillis();
                 Map<String, Object> r = EmbyManager.install(pd, Files.readAllBytes(pluginDll), buildPluginXml(req));
+                long ms = System.currentTimeMillis() - t0;
                 if (Boolean.TRUE.equals(r.get("ok"))) { settings.put("embyPath", pd); saveSettings(); }
+                record("安装插件", pd, Boolean.TRUE.equals(r.get("ok")), String.valueOf(r.get("msg")), ms);
                 sendJson(ex, 200, r);
                 return;
             }
@@ -332,7 +458,9 @@ public class Hub {
                 Map<String, String> req = parseForm(readBody(ex));
                 String pd = firstNonEmpty(req.get("programdata"), str(settings.get("embyPath")));
                 if (pd == null || pd.isEmpty()) { sendJson(ex, 200, fail("还没选 Emby 目录")); return; }
-                sendJson(ex, 200, EmbyManager.uninstall(pd));
+                Map<String, Object> ru = EmbyManager.uninstall(pd);
+                record("卸载插件", pd, Boolean.TRUE.equals(ru.get("ok")), String.valueOf(ru.get("msg")), 0);
+                sendJson(ex, 200, ru);
                 return;
             }
             default:
@@ -561,6 +689,11 @@ public class Hub {
 
     static String hostOf(String url) {
         try { return java.net.URI.create(url).getHost(); } catch (Exception e) { return url; }
+    }
+
+    static String briefVia(String via) {
+        if (via == null) return "未知";
+        try { return java.net.URI.create(via).getHost(); } catch (Exception e) { return via; }
     }
 
     static String brief(Throwable e) {
