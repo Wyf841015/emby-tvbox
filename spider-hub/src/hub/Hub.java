@@ -184,6 +184,7 @@ public class Hub {
                 //（含 install/save/history clear），而本进程是 root。
                 HttpServer server = HttpServer.create(new InetSocketAddress(java.net.InetAddress.getLoopbackAddress(), tryPort), 0);
                 server.createContext("/", Hub::handle);
+                startTvBoxFileServer();
                 server.setExecutor(Executors.newFixedThreadPool(16));
                 server.start();
                 tcpPort = tryPort;
@@ -855,12 +856,47 @@ public class Hub {
                 case "videolist": {
                     String ids = q.get("ids");
                     if (ids != null && !ids.isEmpty()) {
-                        List<String> idList = new ArrayList<>(Arrays.asList(ids.split(",")));
-                        String raw = call(key, () -> {
-                            Spider s = pool.get(key);
-                            return s.detailContent(idList);
-                        }, 60);
-                        sendCms(ex, wrapList(raw, null));
+                        // 逐个 id 调 detailContent 再合并。
+                        // 为什么不能一次传多个：不少 spider 的 detailContent 里按自己约定的
+                        // 分隔符拆 id，传多个会让它拿到长度对不上的数组直接崩。
+                        // 实测 Sao火：单个 id → 22 集正常；传两个 id → ArrayIndexOutOfBoundsException。
+                        String[] parts = ids.split(",");
+                        StringBuilder merged = new StringBuilder();
+                        int okCount = 0;
+                        String lastErr = null;
+                        for (String one : parts) {
+                            if (one == null || one.isEmpty()) continue;
+                            final String oneId = one;
+                            try {
+                                String raw = call(key, () -> {
+                                    Spider s = pool.get(key);
+                                    return s.detailContent(new ArrayList<>(List.of(oneId)));
+                                }, 60);
+                                if (raw == null || raw.isBlank()) continue;
+                                Object parsed = tryParse(raw);
+                                Object lst = (parsed instanceof Map) ? ((Map<?, ?>) parsed).get("list") : null;
+                                if (!(lst instanceof List) || ((List<?>) lst).isEmpty()) continue;
+                                String oneJson = SpiderPool.Json.stringify(lst);
+                                if (okCount > 0) merged.append(",");
+                                merged.append(oneJson.substring(1, oneJson.length() - 1));  // 去掉外层 []
+                                okCount++;
+                            } catch (Exception e) {
+                                lastErr = String.valueOf(e.getMessage());
+                            }
+                        }
+                        if (okCount == 0) {
+                            sendCms(ex, fail(lastErr == null ? "详情为空" : lastErr));
+                            return;
+                        }
+                        Map<String, Object> m = new LinkedHashMap<>();
+                        m.put("code", 1);
+                        m.put("msg", "数据列表");
+                        m.put("page", 1);
+                        m.put("pagecount", 1);
+                        m.put("limit", "20");
+                        m.put("total", okCount);
+                        m.put("list", SpiderPool.Json.parse("[" + merged + "]"));
+                        sendCms(ex, m);
                         return;
                     }
                     String tid = q.getOrDefault("t", "1");
@@ -1551,4 +1587,116 @@ public class Hub {
         }
         return "<h1>spider-hub</h1><p>web/index.html 没找到</p>";
     }
+
+    /**
+     * TVBox 客户端的本地文件服务（127.0.0.1:9978）。
+     *
+     * 为什么要它：catvod 的 spider 里大量写死
+     *     http://127.0.0.1:9978/file/TVBox/bili_cookie.txt
+     * 也就是 TVBox App 自带的那个小文件服务。我们跑在服务端，这个地址不存在，
+     * cookie 读不到 → B 站系列（csp_Bili）11 个站全部 NPE / 返回非 JSON。
+     *
+     * 这里补一个：/file/<path> 读 PKGVAR/data/file/<path>，/proxy?url= 透传。
+     * 用户把 bili_cookie.txt 丢到 data/file/TVBox/ 下就能用。
+     */
+    static int filePort = 0;
+
+    static void startTvBoxFileServer() {
+        int want = 9978;
+        Object v = settings.get("fileServerPort");
+        if (v != null) {
+            try { want = Integer.parseInt(String.valueOf(v).trim()); } catch (Exception ignore) { }
+        }
+        for (int p = want; p < want + 5; p++) {
+            try {
+                HttpServer fs = HttpServer.create(new java.net.InetSocketAddress(
+                        java.net.InetAddress.getLoopbackAddress(), p), 0);
+                fs.createContext("/", Hub::handleFileRequest);
+                fs.setExecutor(java.util.concurrent.Executors.newFixedThreadPool(4));
+                fs.start();
+                filePort = p;
+                System.out.println("[fileserver] TVBox 本地文件服务: http://127.0.0.1:" + p
+                        + "/file/  根目录 " + dataDir.resolve("file"));
+                return;
+            } catch (Exception e) {
+                // 端口被占，试下一个
+            }
+        }
+        System.out.println("[fileserver] 起不来（端口被占），依赖 127.0.0.1:9978 的站点会读不到 cookie");
+    }
+
+    static void handleFileRequest(com.sun.net.httpserver.HttpExchange ex) {
+        try {
+            String path = ex.getRequestURI().getPath();
+            String query = ex.getRequestURI().getRawQuery();
+
+            // /proxy?url=xxx —— TVBox 同款透传，spider 用来绕 CORS
+            if (path.startsWith("/proxy")) {
+                String target = null;
+                if (query != null) {
+                    for (String kv : query.split("&")) {
+                        int i = kv.indexOf('=');
+                        if (i > 0 && "url".equals(kv.substring(0, i)))
+                            target = java.net.URLDecoder.decode(kv.substring(i + 1), StandardCharsets.UTF_8);
+                    }
+                }
+                if (target == null) { sendBytes(ex, 400, "text/plain", "missing url".getBytes(StandardCharsets.UTF_8)); return; }
+                try {
+                    java.net.HttpURLConnection c = (java.net.HttpURLConnection) java.net.URI.create(target).toURL().openConnection();
+                    c.setConnectTimeout(8000);
+                    c.setReadTimeout(15000);
+                    c.setRequestProperty("User-Agent", "okhttp/3.12.0");
+                    c.setInstanceFollowRedirects(true);
+                    int code = c.getResponseCode();
+                    java.io.InputStream in = code >= 400 ? c.getErrorStream() : c.getInputStream();
+                    byte[] body = in == null ? new byte[0] : in.readAllBytes();
+                    String ct = c.getContentType();
+                    sendBytes(ex, code, ct == null ? "application/octet-stream" : ct, body);
+                    return;
+                } catch (Exception e) {
+                    sendBytes(ex, 502, "text/plain", ("proxy error: " + e).getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
+            }
+
+            System.out.println("[fileserver] 请求 " + path + (query == null ? "" : "?" + query));
+
+            if (!path.startsWith("/file/")) {
+                byte[] hint = ("TVBox 本地文件服务\n"
+                        + "  GET /file/<相对路径>   读 " + dataDir.resolve("file") + "/<相对路径>\n"
+                        + "  GET /proxy?url=<url>   透传\n").getBytes(StandardCharsets.UTF_8);
+                sendBytes(ex, 200, "text/plain; charset=utf-8", hint);
+                return;
+            }
+
+            String rel = path.substring("/file/".length());
+            java.nio.file.Path root = dataDir.resolve("file").normalize();
+            java.nio.file.Path target = root.resolve(rel).normalize();
+            if (!target.startsWith(root)) { sendBytes(ex, 403, "text/plain", "forbidden".getBytes(StandardCharsets.UTF_8)); return; }
+            if (!java.nio.file.Files.isRegularFile(target)) {
+                sendBytes(ex, 404, "text/plain; charset=utf-8",
+                        ("文件不存在: " + target + "\n把 cookie 等文件放到 " + root + " 下即可").getBytes(StandardCharsets.UTF_8));
+                return;
+            }
+            byte[] body = java.nio.file.Files.readAllBytes(target);
+            String ct = target.toString().endsWith(".json") ? "application/json"
+                      : target.toString().endsWith(".txt") ? "text/plain; charset=utf-8"
+                      : "application/octet-stream";
+            sendBytes(ex, 200, ct, body);
+        } catch (Exception e) {
+            try { sendBytes(ex, 500, "text/plain", String.valueOf(e).getBytes(StandardCharsets.UTF_8)); } catch (Exception ignore) { }
+        } finally {
+            try { ex.close(); } catch (Exception ignore) { }
+        }
+    }
+
+    static void sendBytes(com.sun.net.httpserver.HttpExchange ex, int code, String contentType, byte[] body) throws java.io.IOException {
+        ex.getResponseHeaders().set("Content-Type", contentType);
+        ex.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+        ex.sendResponseHeaders(code, body.length == 0 ? -1 : body.length);
+        if (body.length > 0) {
+            try (java.io.OutputStream os = ex.getResponseBody()) { os.write(body); }
+        }
+    }
+
 }

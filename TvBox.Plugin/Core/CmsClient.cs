@@ -334,9 +334,19 @@ namespace TvBox.Plugin.Core
                 if (st2 >= 400) return (false, "首个分片返回 " + st2);
                 if (t2.Contains("html") || t2.Contains("xml"))
                     return (false, "首个分片是错误页（" + t2 + "）");
+                // 有的源把小说封面图当 HLS 分片：URL 没有扩展名，content-type 是 image/*
+                // 或者返回的就是图片字节。ffmpeg 会直接拒掉整个播放列表。
+                if (t2.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+                    return (false, "首个分片是图片（" + t2 + "），源已失效");
                 return (true, "");
             }
-            catch (OperationCanceledException) { throw; }
+            catch (OperationCanceledException)
+            {
+                // 注意：HttpClient 超时抛的是 TaskCanceledException（OperationCanceledException 子类）。
+                // 如果不区分，任何一个地址慢一点都会被上层当成"用户手动停止"，整轮同步直接中断。
+                if (ct.IsCancellationRequested) throw;
+                return (false, "校验超时");
+            }
             catch (Exception ex)
             {
                 return (false, "校验异常: " + ex.GetType().Name);

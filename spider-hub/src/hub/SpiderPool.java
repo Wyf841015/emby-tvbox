@@ -185,6 +185,25 @@ public class SpiderPool {
                 }
             }
 
+            // ★ 必须置 InitCheck.ok = true ★
+            // catvod 混淆代码里有个闸门 merge.m.Gate.pass()，它只读 InitCheck.ok；
+            // 而 InitCheck.ok 只有在 InitCheck.check(Context) 校验过 APK 签名后才为 true ——
+            // JVM 上永远过不了。ok=false 时走 okhttp 的 HTTP 助手全部退化：
+            //     merge.k.b.a()      → null（OkHttpClient 建不出来）
+            //     merge.k.b.h(url)   → ""（空响应）
+            //     merge.k.b.f(...)   → null → 调用处直接 NPE
+            // 实测影响：AppGet(csp_Bili ×10)、AppDrama、App99、一大批 AppXxx 全站 0 数据。
+            // 置 true 等价于"签名校验通过"。
+            try {
+                Class<?> initCheck = Class.forName("com.github.catvod.spider.merge.m.InitCheck", true, loader);
+                java.lang.reflect.Field okField = initCheck.getDeclaredField("ok");
+                okField.setAccessible(true);
+                okField.setBoolean(null, true);
+                System.out.println("[spider] InitCheck.ok = true（放行 okhttp 通道）");
+            } catch (Throwable t) {
+                System.out.println("[spider] InitCheck.ok 置位失败: " + t);
+            }
+
             Object got = readInitContext(initCls);
             catvodContextReady = got != null;
             System.out.println(catvodContextReady

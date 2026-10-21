@@ -67,6 +67,16 @@ public class Spider {
     }
 
     // ── 宿主/子类可能调用的辅助方法 ──
+    /**
+     * catvod 的 Spider.safeDns()：返回一个"更可靠"的 DNS 给 OkHttp 用。
+     * 混淆代码里 merge.k.b 建 OkHttpClient 时会调 Spider.safeDns() 链式设置 dns，
+     * 缺这个静态方法就是 NoSuchMethodError，整条 okhttp 通道直接断。
+     * 这里返回系统 DNS；如需防污染可以换成自定义实现。
+     */
+    public static okhttp3.Dns safeDns() {
+        return okhttp3.Dns.SYSTEM;
+    }
+
     public static String emptyResult() {
         return "{\"class\":[],\"list\":[]}";
     }

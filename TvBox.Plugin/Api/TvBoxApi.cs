@@ -697,6 +697,20 @@ namespace TvBox.Plugin.Api
                 var u = new Uri(originalUrl);
                 name = Path.GetFileName(u.AbsolutePath);
                 if (string.IsNullOrWhiteSpace(name)) name = "stream";
+
+                // 分片没有扩展名、或者扩展名不是 hls 认识的媒体后缀时，统一改成 .ts。
+                // 有的源分片长这样：.../novel-images/76b535...（没有扩展名），
+                // ffmpeg 的 hls 解复用器会直接报 not in allowed_segment_extensions 拒掉整张列表。
+                var ext = Path.GetExtension(name).ToLowerInvariant();
+                bool known = ext == ".ts" || ext == ".m4s" || ext == ".mp4" || ext == ".aac"
+                          || ext == ".mp3" || ext == ".m4a" || ext == ".vtt" || ext == ".key"
+                          || ext == ".m3u8" || ext == ".mpd" || ext == ".webm" || ext == ".mkv"
+                          || ext == ".flv" || ext == ".mov" || ext == ".avi";
+                if (!known)
+                {
+                    if (ext.Length > 0) name = name.Substring(0, name.Length - ext.Length);
+                    name = name + ".ts";
+                }
                 foreach (var c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
                 if (name.Length > 64) name = name.Substring(name.Length - 64);
             }

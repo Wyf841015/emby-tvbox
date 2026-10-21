@@ -11,6 +11,11 @@ HOST_SRC="../spider-host/src"
 [ -d "$HOST_SRC" ] || { echo "缺少 $HOST_SRC（Spider 基类和 android stub）" >&2; exit 1; }
 
 rm -rf out && mkdir -p out
-javac -encoding UTF-8 -d out \
+CP_LIB=""
+for j in ../fpk-src/ui/lib/*.jar; do
+  [ -f "$j" ] && CP_LIB="$CP_LIB:$j"
+done
+
+javac -encoding UTF-8 -d out -cp ".${CP_LIB}" \
   $(find "$HOST_SRC" src -name '*.java')
 echo "编译完成: $(find out -name '*.class' | wc -l) 个 class"

@@ -130,7 +130,11 @@ namespace TvBox.Plugin.Core
                         flags[idx] = ok;
                         if (!ok) onDead?.Invoke(why);
                     }
-                    catch (OperationCanceledException) { throw; }
+                    catch (OperationCanceledException)
+                    {
+                        if (ct.IsCancellationRequested) throw;   // 真·用户取消
+                        flags[idx] = false;                      // 只是这一集超时
+                    }
                     catch { flags[idx] = false; }
                     finally { sem.Release(); }
                 }, ct));
@@ -701,6 +705,21 @@ namespace TvBox.Plugin.Core
                             }
                             else
                             {
+                                // 电影分支也要校验（之前只有剧集分支校验，死链电影照样写出来）
+                                if (cfg.VerifyPlayUrl)
+                                {
+                                    var mvUrl = line.Episodes[0]?.Url;
+                                    var (mok, mwhy) = await client.VerifyPlayableAsync(mvUrl, ct).ConfigureAwait(false);
+                                    if (!mok)
+                                    {
+                                        summary.Items++;
+                                        summary.Skipped++;
+                                        Update(p => p.ItemsSkipped++);
+                                        _log("     [" + (item.Name ?? item.Id) + "] 跳过：播放地址不可用（" + mwhy + "）");
+                                        if (cfg.RequestDelayMs > 0) await Task.Delay(cfg.RequestDelayMs, ct).ConfigureAwait(false);
+                                        continue;
+                                    }
+                                }
                                 var o = writer.WriteMovie(site.DisplayName, item, line);
                                 if (!string.IsNullOrEmpty(o.Path)) keep.Add(o.Path);
                                 if (!string.IsNullOrEmpty(o.Path))   // 存在即可（含内容未变）
