@@ -21,6 +21,25 @@ public class Base64 {
         return java.util.Base64.getDecoder().decode(str);
     }
 
+    /**
+     * Android 的 Base64 有一组「把 flags 写成第二个位置」的重载，其中
+     * decode(byte[], int) 被不少 spider 直接用来解开配置/接口返回的 base64。
+     * 纯 JVM 上缺这个方法会 NoSuchMethodError（整站直接判死，如「魔方」）。
+     */
+    public static byte[] decode(byte[] input, int flags) {
+        return decode(new String(input, java.nio.charset.StandardCharsets.UTF_8), flags);
+    }
+
+    public static byte[] decode(byte[] input, int offset, int len, int flags) {
+        byte[] slice = new byte[len];
+        System.arraycopy(input, offset, slice, 0, len);
+        return decode(slice, flags);
+    }
+
+    public static byte[] decode(String str, int flags, int dummy) {
+        return decode(str, flags);
+    }
+
     public static byte[] encode(byte[] input, int flags) {
         return encodeToString(input, flags).getBytes(java.nio.charset.StandardCharsets.UTF_8);
     }

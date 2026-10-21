@@ -19,3 +19,17 @@ done
 javac -encoding UTF-8 -d out -cp ".${CP_LIB}" \
   $(find "$HOST_SRC" src -name '*.java')
 echo "编译完成: $(find out -name '*.class' | wc -l) 个 class"
+
+# ── 用 Android 版 org.json 覆盖 lib/json.jar 的严格版 ──
+# lib/json.jar 是 org.json 官方新版，getString() 遇到数字直接抛
+#   JSONException: JSONObject["tag_id"] is not a string (class java.lang.Integer : 3)
+# Android 自带的 org.json 是宽松的（JSON.toString 会把数字/布尔转成字符串），
+# 大量 spider（好看短剧 / 金牌影视 / 一起 …）依赖这个行为。
+# hub.jar 在 classpath 最前面（-cp hub.jar:lib/*），把宽松版打进 hub.jar 就一定生效。
+VENDOR_JSON="$(cd .. && pwd)/spider-host/vendor/android-json.jar"
+if [ -f "$VENDOR_JSON" ]; then
+  ( cd out && jar xf "$VENDOR_JSON" && rm -rf META-INF )
+  echo "已合并 Android 版 org.json（宽松 getString）"
+else
+  echo "⚠️ 缺少 $VENDOR_JSON，继续用 lib/json.jar 的严格版" >&2
+fi
