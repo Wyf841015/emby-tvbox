@@ -75,14 +75,68 @@ namespace TvBox.Plugin.Api
     public class UpdateConfig : IReturn<SimpleResult>
     {
         public string Token { get; set; }
+        // ── 采集源 ──
+        public string ConfigUrl { get; set; }
+        public string SiteNameFilter { get; set; }
+        // ── 同步范围 ──
         public string SiteWhitelist { get; set; }
         public string SiteBlacklist { get; set; }
         public int? MaxPagesPerCategory { get; set; }
         public int? MaxItemsPerRun { get; set; }
         public int? Concurrency { get; set; }
         public int? TimeoutSeconds { get; set; }
+        public int? RequestDelayMs { get; set; }
         public bool? ExcludeCloudDrive { get; set; }
+        // ── 输出与播放 ──
         public string OutputRoot { get; set; }
+        public string EmbyBaseUrl { get; set; }
+        public string Referer { get; set; }
+        public string UserAgent { get; set; }
+        public bool? UseProxy { get; set; }
+        public bool? AllowPrivateHosts { get; set; }
+        public bool? CleanupOrphans { get; set; }
+        // ── 定时 ──
+        public bool? EnableScheduledSync { get; set; }
+        public int? SyncIntervalHours { get; set; }
+    }
+
+    /// <summary>
+    /// 读取插件完整配置。spider-hub 的 Web 界面用它把「配置」页渲染成和插件配置页
+    /// 完全相同的字段与取值 —— 两边共用一个真相源（plugins/configurations/TvBox.xml）。
+    /// </summary>
+    [Unauthenticated]
+    [Route("/TvBox/Config", "GET", Summary = "读取插件完整配置")]
+    public class GetConfig : IReturn<ConfigResult>
+    {
+        public string Token { get; set; }
+    }
+
+    public class ConfigResult : SimpleResult
+    {
+        public string ConfigUrl { get; set; }
+        public string SpiderHubUrl { get; set; }
+        public string OutputRoot { get; set; }
+        public string EmbyBaseUrl { get; set; }
+        public string SiteWhitelist { get; set; }
+        public string SiteBlacklist { get; set; }
+        public string SiteNameFilter { get; set; }
+        public int MaxPagesPerCategory { get; set; }
+        public int MaxItemsPerRun { get; set; }
+        public int Concurrency { get; set; }
+        public int RequestDelayMs { get; set; }
+        public int TimeoutSeconds { get; set; }
+        public string UserAgent { get; set; }
+        public string Referer { get; set; }
+        public bool UseProxy { get; set; }
+        public bool AllowPrivateHosts { get; set; }
+        public bool CleanupOrphans { get; set; }
+        public bool ExcludeCloudDrive { get; set; }
+        public bool EnableScheduledSync { get; set; }
+        public int SyncIntervalHours { get; set; }
+        /// <summary>配置文件绝对路径，界面上显示便于排查。</summary>
+        public string ConfigFilePath { get; set; }
+        /// <summary>只读字段（由安装器/运行环境决定）。</summary>
+        public string[] ReadOnly { get; set; }
     }
 
     [Unauthenticated]
@@ -338,6 +392,81 @@ namespace TvBox.Plugin.Api
                 Success = ok,
                 Message = ok ? "已请求停止，当前条目结束后会退出" : "停止请求未生效（可能刚好结束）",
             };
+        }
+
+        // ── 读配置（hub 界面镜像用）──
+        public object Get(GetConfig req)
+        {
+            var p = P;
+            if (!HubOk(req?.Token)) return new ConfigResult { Success = false, Message = "token 无效" };
+            var cfg = p?.Configuration;
+            if (cfg == null) return new ConfigResult { Success = false, Message = "插件未初始化" };
+            return new ConfigResult
+            {
+                Success = true,
+                ConfigUrl = cfg.ConfigUrl,
+                SpiderHubUrl = cfg.SpiderHubUrl,
+                OutputRoot = cfg.OutputRoot,
+                EmbyBaseUrl = cfg.EmbyBaseUrl,
+                SiteWhitelist = cfg.SiteWhitelist,
+                SiteBlacklist = cfg.SiteBlacklist,
+                SiteNameFilter = cfg.SiteNameFilter,
+                MaxPagesPerCategory = cfg.MaxPagesPerCategory,
+                MaxItemsPerRun = cfg.MaxItemsPerRun,
+                Concurrency = cfg.Concurrency,
+                RequestDelayMs = cfg.RequestDelayMs,
+                TimeoutSeconds = cfg.TimeoutSeconds,
+                UserAgent = cfg.UserAgent,
+                Referer = cfg.Referer,
+                UseProxy = cfg.UseProxy,
+                AllowPrivateHosts = cfg.AllowPrivateHosts,
+                CleanupOrphans = cfg.CleanupOrphans,
+                ExcludeCloudDrive = cfg.ExcludeCloudDrive,
+                EnableScheduledSync = cfg.EnableScheduledSync,
+                SyncIntervalHours = cfg.SyncIntervalHours,
+                ConfigFilePath = p.ConfigurationFilePath,
+                ReadOnly = new[] { "SpiderHubUrl", "ConfigFilePath" },
+            };
+        }
+
+        // ── 写配置（hub 界面 + 插件自带配置页共用同一份 TvBox.xml）──
+        public object Post(UpdateConfig req)
+        {
+            var p = P;
+            if (!HubOk(req?.Token)) return new SimpleResult { Success = false, Message = "token 无效" };
+            var cfg = p?.Configuration;
+            if (cfg == null) return new SimpleResult { Success = false, Message = "插件未初始化" };
+
+            int changed = 0;
+            if (req.ConfigUrl != null && req.ConfigUrl.Trim() != cfg.ConfigUrl) { cfg.ConfigUrl = req.ConfigUrl.Trim(); changed++; }
+            if (req.SiteWhitelist != null) { cfg.SiteWhitelist = req.SiteWhitelist; changed++; }
+            if (req.SiteBlacklist != null) { cfg.SiteBlacklist = req.SiteBlacklist; changed++; }
+            if (req.SiteNameFilter != null) { cfg.SiteNameFilter = req.SiteNameFilter; changed++; }
+            if (req.MaxPagesPerCategory.HasValue) { cfg.MaxPagesPerCategory = Math.Clamp(req.MaxPagesPerCategory.Value, 1, 50); changed++; }
+            if (req.MaxItemsPerRun.HasValue) { cfg.MaxItemsPerRun = Math.Max(0, req.MaxItemsPerRun.Value); changed++; }
+            if (req.Concurrency.HasValue) { cfg.Concurrency = Math.Clamp(req.Concurrency.Value, 1, 16); changed++; }
+            if (req.TimeoutSeconds.HasValue) { cfg.TimeoutSeconds = Math.Clamp(req.TimeoutSeconds.Value, 5, 120); changed++; }
+            if (req.RequestDelayMs.HasValue) { cfg.RequestDelayMs = Math.Clamp(req.RequestDelayMs.Value, 0, 5000); changed++; }
+            if (req.ExcludeCloudDrive.HasValue) { cfg.ExcludeCloudDrive = req.ExcludeCloudDrive.Value; changed++; }
+            if (!string.IsNullOrWhiteSpace(req.OutputRoot)) { cfg.OutputRoot = req.OutputRoot.Trim(); changed++; }
+            if (req.EmbyBaseUrl != null) { cfg.EmbyBaseUrl = req.EmbyBaseUrl.Trim(); changed++; }
+            if (req.Referer != null) { cfg.Referer = req.Referer; changed++; }
+            if (!string.IsNullOrWhiteSpace(req.UserAgent)) { cfg.UserAgent = req.UserAgent.Trim(); changed++; }
+            if (req.UseProxy.HasValue) { cfg.UseProxy = req.UseProxy.Value; changed++; }
+            if (req.AllowPrivateHosts.HasValue) { cfg.AllowPrivateHosts = req.AllowPrivateHosts.Value; changed++; }
+            if (req.CleanupOrphans.HasValue) { cfg.CleanupOrphans = req.CleanupOrphans.Value; changed++; }
+            if (req.EnableScheduledSync.HasValue) { cfg.EnableScheduledSync = req.EnableScheduledSync.Value; changed++; }
+            if (req.SyncIntervalHours.HasValue) { cfg.SyncIntervalHours = Math.Clamp(req.SyncIntervalHours.Value, 1, 168); changed++; }
+
+            try
+            {
+                p.SaveConfiguration();
+            }
+            catch (Exception ex)
+            {
+                return new SimpleResult { Success = false, Message = "保存失败: " + ex.Message };
+            }
+            return new SimpleResult { Success = true, Message = changed + " 项已保存" };
         }
 
         // ── 单站探测（排错用）──

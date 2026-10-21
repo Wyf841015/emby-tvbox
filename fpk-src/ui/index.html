@@ -119,6 +119,12 @@
     th:nth-child(4),td:nth-child(4){display:none}
     .kv{grid-template-columns:78px 1fr}
   }
+
+    .form-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:10px 14px; margin-bottom:6px; }
+    .form-grid label { display:flex; flex-direction:column; gap:5px; font-size:12.5px; color:var(--dim); }
+    .form-grid input { width:100%; }
+    .chk { display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--dim); cursor:pointer; }
+    .chk input { width:auto; margin:0; }
 </style>
 </head>
 <body>
@@ -285,6 +291,43 @@
     </div>
 
     <div class="panel">
+      <h2>插件配置 <span class="pill" id="pcSource">读取中…</span></h2>
+      <div class="hint" style="margin:0 0 10px">
+        这些字段和 Emby 插件配置页是<strong>同一份</strong>
+        <code>plugins/configurations/TvBox.xml</code>：这里改插件立刻生效，插件页改了这里刷新也能看到。
+        <span id="pcPath" style="display:block;margin-top:4px"></span>
+      </div>
+      <div class="form-grid">
+        <label>配置源地址<input type="text" id="pcConfigUrl" placeholder="https://... / lmw.json"></label>
+        <label>站点名过滤<input type="text" id="pcNameFilter" placeholder="逗号分隔，留空=全部"></label>
+        <label>白名单<input type="text" id="pcWhitelist" placeholder="站点 key，逗号分隔，留空=全部"></label>
+        <label>黑名单<input type="text" id="pcBlacklist" placeholder="站点 key，逗号分隔"></label>
+        <label>每分类页数<input type="number" id="pcPages" min="1" max="50"></label>
+        <label>最多条目<input type="number" id="pcMaxItems" min="0" placeholder="0=不限"></label>
+        <label>并发<input type="number" id="pcConc" min="1" max="16"></label>
+        <label>超时（秒）<input type="number" id="pcTimeout" min="5" max="120"></label>
+        <label>请求间隔（毫秒）<input type="number" id="pcDelay" min="0" max="5000"></label>
+        <label>输出目录<input type="text" id="pcOutputRoot" placeholder="/vol1/media/tvbox"></label>
+        <label>Emby 访问地址<input type="text" id="pcEmbyBase" placeholder="http://127.0.0.1:8096"></label>
+        <label>Referer（可选）<input type="text" id="pcReferer" placeholder="部分源需要"></label>
+        <label>User-Agent<input type="text" id="pcUA"></label>
+        <label>定时同步间隔（小时）<input type="number" id="pcInterval" min="1" max="168"></label>
+      </div>
+      <div class="row" style="flex-wrap:wrap;gap:14px;margin:10px 0">
+        <label class="chk"><input type="checkbox" id="pcExcludeNd"> 排除网盘类源</label>
+        <label class="chk"><input type="checkbox" id="pcUseProxy"> 播放走本机代理</label>
+        <label class="chk"><input type="checkbox" id="pcAllowPrivate"> 允许代理到内网地址</label>
+        <label class="chk"><input type="checkbox" id="pcCleanup"> 同步后清理孤儿文件</label>
+        <label class="chk"><input type="checkbox" id="pcSched"> 启用定时同步</label>
+      </div>
+      <div class="row">
+        <button class="primary" onclick="pcSave()" id="btnPcSave">保存配置</button>
+        <button onclick="pcLoad()">重新读取</button>
+        <span class="hint" id="pcMsg" style="margin:0"></span>
+      </div>
+    </div>
+
+    <div class="panel">
       <h2>载入统计</h2>
       <div class="kv">
         <div class="k">站点总数</div><div class="v" id="cfgTotal">—</div>
@@ -430,6 +473,7 @@ function fmtMs(ms) {
 
 // ══════════ Tab ══════════
 function switchTab(name, el) {
+  if (name === 'config' || name === 'sync') pcLoad();
   document.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('active'); });
   document.querySelectorAll('.pane').forEach(function (p) { p.classList.remove('active'); });
   if (el) el.classList.add('active');
@@ -624,6 +668,99 @@ function probeAll() {
 }
 
 // ══════════ 配置 ══════════
+
+// ══════════ 插件配置镜像（配置页 = 插件 TvBox.xml，同一份数据）══════════
+var PC_FIELDS = {
+  ConfigUrl: 'pcConfigUrl', SiteNameFilter: 'pcNameFilter',
+  SiteWhitelist: 'pcWhitelist', SiteBlacklist: 'pcBlacklist',
+  MaxPagesPerCategory: 'pcPages', MaxItemsPerRun: 'pcMaxItems',
+  Concurrency: 'pcConc', TimeoutSeconds: 'pcTimeout', RequestDelayMs: 'pcDelay',
+  OutputRoot: 'pcOutputRoot', EmbyBaseUrl: 'pcEmbyBase',
+  Referer: 'pcReferer', UserAgent: 'pcUA', SyncIntervalHours: 'pcInterval'
+};
+var PC_CHECKS = {
+  ExcludeCloudDrive: 'pcExcludeNd', UseProxy: 'pcUseProxy',
+  AllowPrivateHosts: 'pcAllowPrivate', CleanupOrphans: 'pcCleanup',
+  EnableScheduledSync: 'pcSched'
+};
+
+function pcLoad() {
+  var badge = document.getElementById('pcSource');
+  api('api/config').then(function (d) {
+    var c = d.config || {};
+    var plugin = d.source === 'plugin';
+    if (badge) {
+      badge.textContent = plugin ? '来源：Emby 插件' : '来源：本地缓存（插件未连接）';
+      badge.className = 'pill ' + (plugin ? 'ok' : 'bad');
+    }
+    var pathEl = document.getElementById('pcPath');
+    if (pathEl) pathEl.innerHTML = c.ConfigFilePath
+      ? '配置文件：<code>' + esc(c.ConfigFilePath) + '</code>'
+      : (d.hint ? esc(d.hint) : '');
+    Object.keys(PC_FIELDS).forEach(function (k) {
+      var el = document.getElementById(PC_FIELDS[k]);
+      if (el && c[k] !== undefined && c[k] !== null) el.value = c[k];
+    });
+    Object.keys(PC_CHECKS).forEach(function (k) {
+      var el = document.getElementById(PC_CHECKS[k]);
+      if (el) el.checked = !!c[k];
+    });
+    // 同步范围卡片也铺同一份值，保证两个 tab 显示一致
+    var w = document.getElementById('cfgWhitelist');
+    if (w) w.value = c.SiteWhitelist || '';
+    var pg = document.getElementById('cfgPages');
+    if (pg && c.MaxPagesPerCategory) pg.value = c.MaxPagesPerCategory;
+    var mi = document.getElementById('cfgMaxItems');
+    if (mi && c.MaxItemsPerRun !== undefined) mi.value = c.MaxItemsPerRun;
+    var cc = document.getElementById('cfgConc');
+    if (cc && c.Concurrency) cc.value = c.Concurrency;
+    var cn = document.getElementById('cfgExcludeNd');
+    if (cn) cn.checked = (c.ExcludeCloudDrive !== false);
+    window._pcLoaded = true;
+  }).catch(function (e) {
+    window._pcLoaded = false;
+    if (badge) { badge.textContent = '读取失败'; badge.className = 'pill bad'; }
+  });
+}
+
+function pcSave() {
+  if (!window._pcLoaded) { toast('配置还没读取完，等一秒再点', 'bad'); return; }
+  var btn = document.getElementById('btnPcSave');
+  var msg = document.getElementById('pcMsg');
+  var body = {};
+  Object.keys(PC_FIELDS).forEach(function (k) {
+    var el = document.getElementById(PC_FIELDS[k]);
+    if (!el) return;
+    var v = el.value.trim();
+    if (k === 'MaxPagesPerCategory' || k === 'MaxItemsPerRun' || k === 'Concurrency' ||
+        k === 'TimeoutSeconds' || k === 'RequestDelayMs' || k === 'SyncIntervalHours') {
+      if (v !== '') body[k] = parseInt(v, 10);
+    } else if (v !== '') {
+      body[k] = v;
+    }
+  });
+  Object.keys(PC_CHECKS).forEach(function (k) {
+    var el = document.getElementById(PC_CHECKS[k]);
+    if (el) body[k] = !!el.checked;
+  });
+  if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
+  if (msg) msg.textContent = '';
+  api('api/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }).then(function (d) {
+    toast(d.msg || (d.ok ? '已保存' : '保存失败'), d.ok ? 'ok' : 'bad');
+    if (msg) msg.textContent = d.msg || '';
+    pcLoad();
+    status(); loadLogs();
+  }).catch(function (e) {
+    toast('保存失败: ' + (e && e.message ? e.message : e), 'bad');
+  }).then(function () {
+    if (btn) { btn.disabled = false; btn.textContent = '保存配置'; }
+  });
+}
+
 function saveConfig() {
   var url = document.getElementById('configUrl').value.trim();
   if (!url) { toast('先填配置地址', 'bad'); return; }
@@ -863,13 +1000,8 @@ function useKnownGood() {
   toast('已填入实测可用的 6 个站点，记得点「保存范围」', 'ok');
 }
 
+// 只更新提示文字：输入框的值统一由 pcLoad() 从插件配置填，避免两个数据源打架
 function fillScope(s) {
-  document.getElementById('cfgWhitelist').value = s.SiteWhitelist || '';
-  document.getElementById('cfgPages').value = s.MaxPagesPerCategory || 3;
-  document.getElementById('cfgMaxItems').value = s.MaxItemsPerRun || 0;
-  document.getElementById('cfgConc').value = s.Concurrency || 3;
-  var nd = document.getElementById('cfgExcludeNd');
-  if (nd) nd.checked = (s.ExcludeCloudDrive !== false);
   var n = (s.SiteWhitelist || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean).length;
   document.getElementById('scopeHint').textContent = n
     ? '当前只同步 ' + n + ' 个站点'
@@ -877,6 +1009,7 @@ function fillScope(s) {
 }
 
 function saveSyncScope() {
+  if (!window._pcLoaded) { toast('配置还没读取完，等一秒再点', 'bad'); return; }
   var btn = document.getElementById('btnScope');
   btn.disabled = true; btn.textContent = '保存中…';
   var body = {
@@ -886,15 +1019,14 @@ function saveSyncScope() {
     Concurrency: parseInt(document.getElementById('cfgConc').value, 10) || 3,
     ExcludeCloudDrive: !!document.getElementById('cfgExcludeNd').checked
   };
-  api('api/emby/config', {
+  api('api/save', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   }).then(function (d) {
     if (!d.ok) { toast(d.msg || '保存失败', 'bad'); return; }
-    var r = d.result || {};
-    if (r.Success === false) toast(r.Message || '保存失败', 'bad');
-    else toast('已保存并生效', 'ok');
+    toast('已保存并生效', 'ok');
+    pcLoad();
     return refreshSyncStatus();
   }).catch(function (e) {
     toast('保存失败: ' + e, 'bad');
@@ -929,7 +1061,6 @@ function checkWritablePath(path, boxId) {
 }
 
 function checkOutputWritable() {
-  var p = document.getElementById('cfgWhitelist') ? null : null;
   // 用插件当前生效的 OutputRoot（status 里带回来）
   api('api/emby/sync/status').then(function (d) {
     var root = (d && d.status && d.status.OutputRoot) || '';

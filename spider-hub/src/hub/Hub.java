@@ -265,6 +265,36 @@ public class Hub {
                 sendJson(ex, 200, m);
                 return;
             }
+            case "/api/config": {           // 配置镜像：插件可达就读插件，否则用本地缓存
+                Map<String, Object> pcfg = pluginConfig();
+                Map<String, Object> m = new LinkedHashMap<>();
+                if (pcfg != null) {
+                    m.put("ok", true);
+                    m.put("source", "plugin");
+                    m.put("sourceLabel", "Emby 插件（TvBox.xml）");
+                    m.put("config", pcfg);
+                    // 顺手把本地缓存对齐，hub 自己加载配置时用同一份
+                    String cu = str(pcfg.get("ConfigUrl"));
+                    if (cu != null && !cu.isEmpty() && !cu.equals(str(settings.get("configUrl")))) {
+                        settings.put("configUrl", cu);
+                        saveSettings();
+                    }
+                    String eb = str(pcfg.get("EmbyBaseUrl"));
+                    if (eb != null && !eb.isEmpty()) settings.put("embyBaseUrl", eb);
+                } else {
+                    m.put("ok", true);
+                    m.put("source", "local");
+                    m.put("sourceLabel", "本地缓存（插件未连接）");
+                    Map<String, Object> local = new LinkedHashMap<>();
+                    local.put("ConfigUrl", str(settings.get("configUrl")));
+                    local.put("EmbyBaseUrl", str(settings.get("embyBaseUrl")));
+                    local.put("OutputRoot", str(settings.get("outputRoot")));
+                    m.put("config", local);
+                    m.put("hint", "Emby 插件不可达，这里显示的是 hub 自己的缓存。装好插件（Emby 插件标签）后会自动共用插件配置。");
+                }
+                sendJson(ex, 200, m);
+                return;
+            }
             case "/api/status": {
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("ok", true);
@@ -367,34 +397,90 @@ public class Hub {
                     return;
                 }
                 if (!(o instanceof Map)) {
-                    // 以前这里会「解析失败也算保存成功」，用户以为配置生效了其实没有
                     sendJson(ex, 200, fail("请求体必须是 JSON 对象"));
                     return;
                 }
-                int applied = 0, rejected = 0;
-                List<String> rejectedKeys = new ArrayList<>();
-                for (Map.Entry<?, ?> e : ((Map<?, ?>) o).entrySet()) {
+                Map<?, ?> in = (Map<?, ?>) o;
+
+                // hub 独有的键（插件不认识，只写本地）
+                java.util.Set<String> LOCAL_KEYS = new java.util.HashSet<>(Arrays.asList(
+                        "embyPath", "embyToken", "publicUrl", "spiderJar"));
+                // hub 与插件共用的键：本地存一份缓存，同时推给插件（插件那份才是权威）
+                java.util.Map<String, String> SHARED = new LinkedHashMap<>();
+                SHARED.put("configUrl", "ConfigUrl");
+                SHARED.put("outputRoot", "OutputRoot");
+                SHARED.put("embyBaseUrl", "EmbyBaseUrl");
+
+                List<String> ignoredKeys = new ArrayList<>();
+                int localApplied = 0;
+                Map<String, Object> pluginPayload = new LinkedHashMap<>();
+
+                for (Map.Entry<?, ?> e : in.entrySet()) {
                     String k = String.valueOf(e.getKey());
-                    if (!SAVE_KEYS.contains(k)) {           // 只认白名单，别把任意键塞进 settings
-                        rejected++;
-                        if (rejectedKeys.size() < 6) rejectedKeys.add(k);
+                    Object v = e.getValue();
+                    if (LOCAL_KEYS.contains(k)) {
+                        settings.put(k, v);
+                        localApplied++;
                         continue;
                     }
-                    settings.put(k, e.getValue());
-                    applied++;
+                    // 共用键（小写形式）→ 既存本地缓存，也进插件负载
+                    if (SHARED.containsKey(k)) {
+                        settings.put(k, v);
+                        localApplied++;
+                        pluginPayload.put(SHARED.get(k), v);
+                        continue;
+                    }
+                    // 插件原生键（首字母大写，如 ConfigUrl/MaxPagesPerCategory）
+                    if (java.util.Arrays.asList(PLUGIN_CFG_KEYS).contains(k)) {
+                        pluginPayload.put(k, v);
+                        if (SHARED.containsValue(k)) settings.put(lowerFirst(k), v);
+                        continue;
+                    }
+                    // 其余插件键用小写传进来也接受
+                    String cap = Character.toUpperCase(k.charAt(0)) + k.substring(1);
+                    if (java.util.Arrays.asList(PLUGIN_CFG_KEYS).contains(cap)) {
+                        pluginPayload.put(cap, v);
+                    } else {
+                        ignoredKeys.add(k);
+                    }
                 }
-                if (applied > 0) saveSettings();
-                record("保存配置", str(settings.get("configUrl")), true,
-                        "写入 " + applied + " 项" + (rejected > 0 ? "，忽略 " + rejected + " 项" : ""), 0);
-                Map<String, Object> m;
-                if (applied == 0) {
-                    m = fail("没有可保存的字段（请求体缺少已知配置项）");
-                    if (rejected > 0) m.put("ignored", rejectedKeys);
-                } else {
-                    m = ok("已保存 " + applied + " 项");
-                    if (rejected > 0) m.put("ignored", rejectedKeys);
+
+                boolean pluginOk = false;
+                String pluginMsg = null;
+                if (!pluginPayload.isEmpty()) {
+                    try {
+                        if (embyBase() == null) throw new Exception("找不到 Emby 地址");
+                        String resp = pushPluginConfig(pluginPayload);
+                        Object ro = SpiderPool.Json.parse(resp);
+                        boolean okResp = ro instanceof Map
+                                && Boolean.TRUE.equals(((Map<?, ?>) ro).get("Success"));
+                        pluginOk = okResp;
+                        pluginMsg = ro instanceof Map ? str(((Map<?, ?>) ro).get("Message")) : resp;
+                        if (!okResp) pluginMsg = pluginMsg == null ? resp : pluginMsg;
+                    } catch (Exception pe) {
+                        pluginMsg = "推给插件失败: " + (pe.getMessage() == null ? pe.getClass().getSimpleName() : pe.getMessage());
+                    }
                 }
-                sendJson(ex, 200, m);
+
+                if (localApplied > 0) saveSettings();
+
+                StringBuilder msg = new StringBuilder();
+                if (localApplied > 0) msg.append("本地 ").append(localApplied).append(" 项");
+                if (!pluginPayload.isEmpty()) {
+                    msg.append(msg.length() > 0 ? "，" : "")
+                       .append(pluginOk ? "插件已保存 " + pluginPayload.size() + " 项"
+                                        : "插件未保存（" + (pluginMsg == null ? "不可达" : pluginMsg) + "）");
+                }
+                Map<String, Object> r = ok(msg.length() == 0 ? "没有可保存的字段" : msg.toString());
+                r.put("pluginSaved", pluginOk);
+                if (!pluginPayload.isEmpty() && !pluginOk) {
+                    r.put("ok", false);
+                    r.put("msg", "插件保存失败：" + (pluginMsg == null ? "Emby 不可达" : pluginMsg)
+                            + "；本地缓存已更新，插件恢复后会以插件为准");
+                }
+                if (!ignoredKeys.isEmpty()) r.put("ignored", ignoredKeys);
+                record("保存配置", str(settings.get("configUrl")), true, String.valueOf(r.get("msg")), 0);
+                sendJson(ex, 200, r);
                 return;
             }
             case "/api/reload": {
@@ -937,6 +1023,57 @@ public class Hub {
                 .POST(HttpRequest.BodyPublishers.ofString(json, StandardCharsets.UTF_8))
                 .build();
         return EMBY_HTTP.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)).body();
+    }
+
+    /**
+     * 插件配置的字段清单 —— hub 的「配置」页和插件的配置页展示同一套字段、同一份取值。
+     * 真相源是 plugins/configurations/TvBox.xml，hub 这边只是镜像。
+     */
+    static final String[] PLUGIN_CFG_KEYS = {
+            "ConfigUrl", "SiteNameFilter", "SiteWhitelist", "SiteBlacklist",
+            "MaxPagesPerCategory", "MaxItemsPerRun", "Concurrency", "TimeoutSeconds",
+            "RequestDelayMs", "ExcludeCloudDrive", "OutputRoot", "EmbyBaseUrl",
+            "Referer", "UserAgent", "UseProxy", "AllowPrivateHosts", "CleanupOrphans",
+            "EnableScheduledSync", "SyncIntervalHours", "SpiderHubUrl", "ConfigFilePath"
+    };
+
+    /** 读插件配置。插件不可达/未安装 → 返回 null。 */
+    static Map<String, Object> pluginConfig() {
+        try {
+            String base = embyBase();
+            if (base == null) return null;
+            String body = embyHttp("GET", base + "/TvBox/Config?token=" + embyToken());
+            Object o = SpiderPool.Json.parse(body);
+            if (!(o instanceof Map)) return null;
+            Map<?, ?> m = (Map<?, ?>) o;
+            if (!Boolean.TRUE.equals(m.get("Success")) && !Boolean.TRUE.equals(m.get("success"))) {
+                // 兼容大小写不同的成功标志；明确 false 才算失败
+                Object okv = m.containsKey("Success") ? m.get("Success") : m.get("success");
+                if (okv != null) return null;
+            }
+            Map<String, Object> out = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> e : m.entrySet()) out.put(String.valueOf(e.getKey()), e.getValue());
+            return out;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 写插件配置（只挑插件认识的字段发过去），返回插件的应答文本。 */
+    static String pushPluginConfig(Map<String, Object> payload) throws Exception {
+        String base = embyBase();
+        if (base == null) throw new Exception("找不到 Emby 地址");
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("Token", embyToken());
+        for (String k : PLUGIN_CFG_KEYS) {
+            if (payload.containsKey(k)) body.put(k, payload.get(k));
+            else if (payload.containsKey(lowerFirst(k))) body.put(k, payload.get(lowerFirst(k)));
+        }
+        return embyPostJson(base + "/TvBox/Config", SpiderPool.Json.stringify(body));
+    }
+
+    static String lowerFirst(String s) {
+        return s == null || s.isEmpty() ? s : Character.toLowerCase(s.charAt(0)) + s.substring(1);
     }
 
     static String embyHttp(String method, String url) throws Exception {
