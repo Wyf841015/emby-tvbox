@@ -116,6 +116,13 @@ namespace TvBox.Plugin
         /// <summary>上次同步的摘要，给配置页展示。</summary>
         public string LastSyncSummary { get; set; } = string.Empty;
 
+        /// <summary>
+        /// 批量拉详情时每批的 id 个数（默认 16）。
+        /// 一批里只要有一个 spider 卡住就会整批超时，所以代码会自动对半拆开重试；
+        /// 这个值越大请求越少、但单批失败时丢的范围也越大。
+        /// </summary>
+        public int DetailBatchSize { get; set; } = 16;
+
         /// <summary>同步开关：关掉后定时任务直接跳过。</summary>
         public bool EnableScheduledSync { get; set; }
 

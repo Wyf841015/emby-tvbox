@@ -621,6 +621,63 @@ namespace TvBox.Plugin.Core
         private static bool Contains(List<string> set, string key) =>
             key != null && set.Any(x => string.Equals(x, key, StringComparison.OrdinalIgnoreCase));
 
+        // ───────────────────── 详情批量拉取（超时自动拆半）─────────────────────
+
+        /// <summary>
+        /// 批量拉详情，失败就对半拆开重试。
+        ///
+        /// 实测（生产 47 站）：一批 20 个 id 里只要有一个 spider 卡住，整批 20 条全丢，
+        /// 日志就是反复刷「拉详情失败 (20 个): HttpClient.Timeout of 20 seconds elapsing」。
+        /// 拆开之后卡住的只剩最后那 1~2 条，其余照常入库。
+        /// </summary>
+        private async Task<List<VodItem>> GetDetailsResilientAsync(
+            CmsClient client, TvBoxSite site, List<string> ids, PluginConfiguration cfg, CancellationToken ct)
+        {
+            var all = new List<VodItem>();
+            int size = Math.Max(1, cfg.DetailBatchSize);
+            foreach (var batch in Chunk(ids, size))
+            {
+                ct.ThrowIfCancellationRequested();
+                all.AddRange(await GetDetailBatchAsync(client, site, batch.ToList(), cfg, ct, 0).ConfigureAwait(false));
+            }
+            return all;
+        }
+
+        private async Task<List<VodItem>> GetDetailBatchAsync(
+            CmsClient client, TvBoxSite site, List<string> batch, PluginConfiguration cfg,
+            CancellationToken ct, int depth)
+        {
+            try
+            {
+                var r = await client.GetDetailAsync(site, batch, ct).ConfigureAwait(false);
+                return r ?? new List<VodItem>();
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex)
+            {
+                if (batch.Count <= 1 || depth >= 5)
+                {
+                    _log($"     拉详情失败 ({batch.Count} 个): {ShortErr(ex)}");
+                    return new List<VodItem>();
+                }
+                int mid = batch.Count / 2;
+                _log($"     拉详情失败 ({batch.Count} 个)，拆成 {mid}+{batch.Count - mid} 重试: {ShortErr(ex)}");
+                var left = await GetDetailBatchAsync(client, site, batch.Take(mid).ToList(), cfg, ct, depth + 1)
+                                 .ConfigureAwait(false);
+                await DelayAsync(cfg, ct).ConfigureAwait(false);
+                var right = await GetDetailBatchAsync(client, site, batch.Skip(mid).ToList(), cfg, ct, depth + 1)
+                                  .ConfigureAwait(false);
+                return left.Concat(right).ToList();
+            }
+        }
+
+        private static string ShortErr(Exception ex)
+        {
+            var m = ex?.Message ?? "";
+            if (m.Contains("Timeout", StringComparison.OrdinalIgnoreCase)) return "等待超时";
+            return m.Length > 90 ? m.Substring(0, 90) : m;
+        }
+
         // ───────────────────── 增量 / 元数据 / 汇报 小工具 ─────────────────────
 
         /// <summary>增量命中：把上次写出的文件并进 keep 并计数，返回 true 表示可以跳过详情请求。</summary>
@@ -765,18 +822,25 @@ namespace TvBox.Plugin.Core
                                         listedById.TryGetValue(id, out var li) ? li : null, keep, summary))
                         .ToList();
                     if (distinct.Count == 0) continue;
-                    foreach (var batch in Chunk(distinct, 20))
+                    foreach (var batch in Chunk(distinct, Math.Max(1, cfg.DetailBatchSize)))
                     {
                         ct.ThrowIfCancellationRequested();
                         List<VodItem> details;
                         try
                         {
-                            details = await client.GetDetailAsync(site, batch, ct).ConfigureAwait(false);
+                            // 整批超时就对半拆开重试，别让一个卡住的 spider 带走其他 19 条
+                            details = await GetDetailBatchAsync(client, site, batch.ToList(), cfg, ct, 0)
+                                            .ConfigureAwait(false);
                         }
                         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                         catch (Exception ex)
                         {
-                            _log($"     拉详情失败 ({batch.Count} 个): {ex.Message}");
+                            _log($"     拉详情失败 ({batch.Count()} 个): {ShortErr(ex)}");
+                            summary.Errors++;
+                            continue;
+                        }
+                        if (details == null || details.Count == 0)
+                        {
                             summary.Errors++;
                             continue;
                         }
