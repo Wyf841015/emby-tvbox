@@ -44,8 +44,15 @@ namespace TvBox.Plugin.Core
         /// <summary>总集数（所有线路里最多的那条）。</summary>
         public int EpisodeCount => Lines.Count == 0 ? 0 : Lines.Max(l => l.Episodes.Count);
 
-        /// <summary>是剧集还是电影：多集就当剧集处理。</summary>
-        public bool IsSeries => EpisodeCount > 1;
+        /// <summary>
+        /// 真正有意义的集数：排除「正片」「原片」「HD」这类整片别名。
+        /// 源站常把一部电影拆成「正片 + 原片」两条地址，按 EpisodeCount 会被误判成 2 集剧集。
+        /// </summary>
+        public int EffectiveEpisodeCount => Lines.Count == 0 ? 0
+            : Lines.Max(l => l.Episodes.Count(e => !StrmWriter.IsPlaceholderEpisode(e.Name)));
+
+        /// <summary>是剧集还是电影：有多集真分集才算剧集；只有「正片/原片」的按电影处理。</summary>
+        public bool IsSeries => EffectiveEpisodeCount > 1;
     }
 
     public class PagedResult

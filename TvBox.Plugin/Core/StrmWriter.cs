@@ -17,11 +17,17 @@ namespace TvBox.Plugin.Core
     /// <summary>
     /// 把 TVBox 的点播条目写成 Emby 能直接扫的 .strm 文件树。
     ///
-    /// 目录结构（两个库根分开，因为 Emby 的「电影」和「电视剧」库类型不能混）：
-    ///   &lt;root&gt;/movies/&lt;站点名&gt;/&lt;片名 (年份)&gt;/&lt;片名&gt;.strm
-    ///   &lt;root&gt;/tv/&lt;站点名&gt;/&lt;剧名 (年份)&gt;/Season 01/&lt;剧名&gt; - S01E01 - &lt;集名&gt;.strm
+    /// 目录结构完全按 Emby 官方命名规范（这样后续 Emby 才能正确刮削剧集信息）：
+    ///   &lt;root&gt;/movies/&lt;片名 (年份)&gt;/&lt;片名 (年份)&gt;.strm
+    ///   &lt;root&gt;/tv/&lt;剧名 (年份)&gt;/Season 01/&lt;剧名 (年份)&gt; - S01E01 - &lt;集名&gt;.strm
     ///
-    /// 片名带年份是为了让 Emby 的刮削器能可靠匹配（否则同名不同版全串）。
+    /// 关键点（少一条 Emby 就认不出来）：
+    ///   · 片名/剧名后面带 (年份)，同名不同版才不会串
+    ///   · 集文件必须是「剧名 - SxxEyy - 集名」，季目录必须是 Season NN
+    ///   · 电影文件名与所在目录同名
+    ///   · 不再插入「站点名」这一层 —— Emby 以「含 Season 目录的那层」当剧名，
+    ///     中间多一层会让刮削器拿站点名去匹配；去掉后同一部剧多个源会自然合并
+    ///     （先同步的站先占集号，后同集的覆盖 URL，等于多源冗余）。
     /// </summary>
     public class StrmWriter
     {
@@ -81,36 +87,64 @@ namespace TvBox.Plugin.Core
 
         // ───────────────────── 写入 ─────────────────────
 
+        /// <summary>
+        /// 电影：&lt;root&gt;/movies/&lt;片名 (年份)&gt;/&lt;片名 (年份)&gt;.strm
+        /// siteName 只用于日志，不再进路径（进了 Emby 就认不出片名）。
+        /// </summary>
         public WriteOutcome WriteMovie(string siteName, VodItem item, VodLine line)
         {
             var ep = line?.Episodes?.FirstOrDefault();
             if (ep == null) return default;
 
-            var folder = SafeName(WithYear(item.Name, item.Year));
-            var dir = Path.Combine(MoviesRoot, SafeName(siteName), folder);
-            var file = Path.Combine(dir, SafeName(StripYear(item.Name)) + ".strm");
+            var folder = SafeName(TitleWithYear(item.Name, item.Year));
+            var dir = Path.Combine(MoviesRoot, folder);
+            var file = Path.Combine(dir, folder + ".strm");
             return WriteStrmFile(file, ep.Url);
         }
 
+        /// <summary>
+        /// 剧集：&lt;root&gt;/tv/&lt;剧名 (年份)&gt;/Season NN/&lt;剧名 (年份)&gt; - SxxEyy - &lt;集名&gt;.strm
+        ///
+        /// 集号优先从集名里解析（第12集 / EP12 / S02E05 / 纯数字 12），解析不到才按顺序补。
+        /// 集名能解析出季号就按季分目录，否则一律 Season 01。
+        /// 同一季内集号保证不重复：源站常把「正片」「原片」和 2、3、4… 混在一个列表里，
+        /// 直接按顺序编号会让正片占掉第 1 集、后面整体错位。
+        /// </summary>
         public List<WriteOutcome> WriteSeries(string siteName, VodItem item, VodLine line)
         {
             var results = new List<WriteOutcome>();
             if (line?.Episodes == null || line.Episodes.Count == 0) return results;
 
-            var showName = StripYear(item.Name);
-            var showFolder = SafeName(WithYear(item.Name, item.Year));
-            var showDir = Path.Combine(TvRoot, SafeName(siteName), showFolder);
-            var seasonDir = Path.Combine(showDir, "Season 01");
+            var baseTitle = SafeName(TitleWithYear(item.Name, item.Year));
+            var showDir = Path.Combine(TvRoot, baseTitle);
+            var used = new Dictionary<int, HashSet<int>>();
+
+            // 有真实分集时，跳过「正片 / 原片 / HD」这类整片别名：
+            // 它们只是同一部片的多条线路，写进去会把第 1、2 集的号占掉，后面整体错位。
+            var realCount = line.Episodes.Count(e => !IsPlaceholderEpisode(e.Name));
 
             for (int i = 0; i < line.Episodes.Count; i++)
             {
                 var ep = line.Episodes[i];
-                var num = i + 1;
-                var epTitle = string.IsNullOrWhiteSpace(ep.Name) ? "第" + num + "集" : ep.Name.Trim();
-                // 集名里常带 # / 这类字符，去掉后拼进文件名
-                var fileName = $"{SafeName(showName)} - S01E{num:00} - {SafeName(epTitle)}.strm";
-                var file = Path.Combine(seasonDir, fileName);
-                results.Add(WriteStrmFile(file, ep.Url));
+                if (realCount > 1 && IsPlaceholderEpisode(ep.Name)) continue;
+                var epTitle = CleanEpisodeTitle(ep.Name, out var season, out var num);
+                if (season <= 0) season = 1;
+                if (num <= 0) num = i + 1;
+
+                if (!used.TryGetValue(season, out var set))
+                {
+                    set = new HashSet<int>();
+                    used[season] = set;
+                }
+                while (set.Contains(num)) num++;
+                set.Add(num);
+
+                var seasonDir = Path.Combine(showDir, "Season " + season.ToString("00"));
+                var name = new StringBuilder(baseTitle)
+                    .Append(" - S").Append(season.ToString("00"))
+                    .Append("E").Append(num.ToString("00"));
+                if (!string.IsNullOrEmpty(epTitle)) name.Append(" - ").Append(SafeName(epTitle));
+                results.Add(WriteStrmFile(Path.Combine(seasonDir, name + ".strm"), ep.Url));
             }
             return results;
         }
@@ -217,14 +251,214 @@ namespace TvBox.Plugin.Core
             return removed;
         }
 
-        // ───────────────────── 命名工具 ─────────────────────
+        // ───────────────────── 命名工具（Emby 规范） ─────────────────────
 
-        private static string WithYear(string name, string year)
+        private static readonly System.Text.RegularExpressions.Regex ReSeasonEp =
+            new System.Text.RegularExpressions.Regex(@"[Ss](\d{1,2})\s*[Ee](\d{1,4})",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+        private static readonly System.Text.RegularExpressions.Regex ReSeasonCn =
+            new System.Text.RegularExpressions.Regex(@"第\s*([0-9一二三四五六七八九十]+)\s*季",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+        private static readonly System.Text.RegularExpressions.Regex ReSeasonEn =
+            new System.Text.RegularExpressions.Regex(@"\b[Ss]eason\s*(\d{1,2})\b",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+        private static readonly System.Text.RegularExpressions.Regex ReEpCn =
+            new System.Text.RegularExpressions.Regex(@"第\s*([0-9一二三四五六七八九十百千]+)\s*[集话期回]",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+        private static readonly System.Text.RegularExpressions.Regex ReEpEn =
+            new System.Text.RegularExpressions.Regex(@"\b[Ee][Pp]?\s*(\d{1,4})\b",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+        private static readonly System.Text.RegularExpressions.Regex ReEpPlain =
+            new System.Text.RegularExpressions.Regex(@"^\s*(\d{1,4})\s*$",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+        private static readonly System.Text.RegularExpressions.Regex ReEpNumPrefix =
+            new System.Text.RegularExpressions.Regex(@"^\s*(\d{1,4})[\s\.\-、:_]+",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        /// <summary>这些集名不是真正的集名，只是「整片」的别名。</summary>
+        private static readonly HashSet<string> PlaceholderEpisodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            var n = StripYear(name);
-            var y = ExtractYear(year);
+            "正片", "原片", "正片1", "高清", "超清", "蓝光", "完整版", "未删减", "未删减版",
+            "国语", "粤语", "中字", "双语", "HD", "BD", "TC", "TS", "预告", "花絮", "彩蛋", "片花", "PV"
+        };
+
+        /// <summary>
+        /// 「国语中字」「粤语中字」「繁中」这类是同一部片的语言版本，不是分集。
+        /// 实测《火拼》这类条目会把国语/粤语两条地址列成一个列表，按集处理会变成
+        /// S01E01（国语中字）/ S01E02（粤语中字），Emby 刮削必然错乱。
+        /// </summary>
+        private static readonly System.Text.RegularExpressions.Regex ReLanguageVersion =
+            new System.Text.RegularExpressions.Regex(
+                @"^(?:(?:国|粤|英|日|韩|泰|法|德|俄)语?(?:中字|字幕|版)?|双语(?:中字)?|中字|无字|繁中|简中|中英(?:双字|字幕)?|中文字幕|HD中字|BD中字|[Hh][Dd]|[Bb][Dd]|4K)$",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        /// <summary>判断某条分集名是不是「正片/原片/国语中字」这类整片别名。</summary>
+        public static bool IsPlaceholderEpisode(string epName)
+        {
+            if (string.IsNullOrWhiteSpace(epName)) return false;   // 没名字 = 普通分集
+            var k = System.Text.RegularExpressions.Regex.Replace(epName.Trim(), @"\s+", "");
+            if (PlaceholderEpisodes.Contains(k)) return true;      // 正片 / 原片 / HD …
+            return ReLanguageVersion.IsMatch(k);                   // 国语中字 / 粤语中字 / 繁中 …
+        }
+
+        /// <summary>片名 + (年份)。年份优先取 vod_year，其次从片名末尾的括号里抠。</summary>
+        public static string TitleWithYear(string name, string year)
+        {
+            var n = CleanTitle(name);
+            var y = ExtractYear(year) ?? YearFromTitle(name);
             return string.IsNullOrEmpty(y) ? n : $"{n} ({y})";
         }
+
+        /// <summary>
+        /// 从集名解析季号 / 集号，并返回「干净的集名」（去掉 第N集 / SxxEyy 这类与文件名重复的部分）。
+        /// 返回 null 表示这集没有额外集名（文件名只写 SxxEyy）。
+        /// </summary>
+        public static string CleanEpisodeTitle(string raw, out int season, out int num)
+        {
+            season = 0;
+            num = 0;
+            var s0 = (raw ?? "").Trim();
+            if (s0.Length == 0) return null;
+
+            var m = ReSeasonEp.Match(s0);
+            if (m.Success)
+            {
+                int.TryParse(m.Groups[1].Value, out season);
+                int.TryParse(m.Groups[2].Value, out num);
+            }
+            if (season <= 0)
+            {
+                var a = ReSeasonCn.Match(s0);
+                if (a.Success) season = CnToInt(a.Groups[1].Value);
+                if (season <= 0)
+                {
+                    var b = ReSeasonEn.Match(s0);
+                    if (b.Success) int.TryParse(b.Groups[1].Value, out season);
+                }
+            }
+            if (num <= 0)
+            {
+                var c = ReEpCn.Match(s0);
+                if (c.Success) num = CnToInt(c.Groups[1].Value);
+                if (num <= 0)
+                {
+                    var d = ReEpEn.Match(s0);
+                    if (d.Success) int.TryParse(d.Groups[1].Value, out num);
+                }
+                if (num <= 0)
+                {
+                    var e = ReEpPlain.Match(s0);
+                    if (e.Success) int.TryParse(e.Groups[1].Value, out num);
+                }
+                if (num <= 0)
+                {
+                    var f = ReEpNumPrefix.Match(s0);
+                    if (f.Success) int.TryParse(f.Groups[1].Value, out num);
+                }
+            }
+
+            var t = s0;
+            foreach (var re in new[] { ReSeasonEp, ReSeasonCn, ReSeasonEn, ReEpCn, ReEpEn })
+                t = re.Replace(t, " ");
+            t = t.Trim(' ', '-', '—', '_', '.', '、', ':', '：', '|', '/', '#');
+            t = System.Text.RegularExpressions.Regex.Replace(t, @"\s{2,}", " ").Trim();
+            // 集名本来就是「2」「12.」这类纯数字：集号已进文件名，别再拼一遍「- 2」
+            if (System.Text.RegularExpressions.Regex.IsMatch(t, @"^\d{1,4}[\.、]?$")) return null;
+            t = ReEpNumPrefix.Replace(t, "").Trim(' ', '-', '_', '.', '、', ':', '：');
+            if (t.Length == 0) return null;
+            var k2 = System.Text.RegularExpressions.Regex.Replace(t, @"\s+", "");
+            if (PlaceholderEpisodes.Contains(k2) || ReLanguageVersion.IsMatch(k2)) return null;
+            if (t.Length > 60) t = t.Substring(0, 60).Trim();
+            return t;
+        }
+
+        /// <summary>中文数字转整数（一 ~ 九千九百九十九，覆盖 第X集/第X季 的常见写法）。</summary>
+        public static int CnToInt(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return 0;
+            if (int.TryParse(s, out var direct)) return direct;
+            const string digits = "零一二三四五六七八九";
+            int total = 0, cur = 0;
+            foreach (var ch in s)
+            {
+                if (ch == '十') { total += (cur == 0 ? 1 : cur) * 10; cur = 0; }
+                else if (ch == '百') { total += (cur == 0 ? 1 : cur) * 100; cur = 0; }
+                else if (ch == '千') { total += (cur == 0 ? 1 : cur) * 1000; cur = 0; }
+                else
+                {
+                    var i = digits.IndexOf(ch);
+                    if (i >= 0) cur = i;
+                }
+            }
+            return total + cur;
+        }
+
+        private static readonly System.Text.RegularExpressions.Regex NoiseBracket =
+            new System.Text.RegularExpressions.Regex(
+                @"[\(\[（【]\s*(?:HD|BD|高清|超清|蓝光|4K|8K|1080P?|2160P?|720P?|国语|粤语|英语|中字|中文字幕|双字|双语|未删减|导演剪辑|完整版|TC|TS|WEB[- ]?DL|HDTV|REMUX)\s*[\)\]）】]",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+        private static readonly System.Text.RegularExpressions.Regex NoiseTailWord =
+            new System.Text.RegularExpressions.Regex(
+                @"[\s\-_·|]*\b(?:HD|BD|4K|8K|1080P|2160P|WEB[- ]?DL|HDTV|REMUX|TC|TS)\b[\s\-_·|]*$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+        // 「更新至20集 / 全40集」这些位置不固定（常被 (年份)、[HD] 隔开），所以不锚定结尾
+        private static readonly System.Text.RegularExpressions.Regex NoiseStatus =
+            new System.Text.RegularExpressions.Regex(
+                @"[\s\-_·|]*(?:更新至\s*\d+\s*[集话期]|全\s*\d+\s*集|已?完结|连载中|高清版|蓝光版|国语版|中字版|抢先版)",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+        private static readonly System.Text.RegularExpressions.Regex YearInBrackets =
+            new System.Text.RegularExpressions.Regex(@"[\(（]\s*((?:19|20)\d{2})\s*[\)）]\s*$",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        /// <summary>
+        /// 片名清洗：去 emoji、去「HD/蓝光/国语/中字/更新至N集」这类噪声尾巴。
+        /// Emby 拿这个名字去 TMDB 匹配，带装饰字符基本必失败。
+        /// </summary>
+        public static string CleanTitle(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return "未命名";
+            var s = StripEmoji(name).Trim();
+            for (int i = 0; i < 5; i++)
+            {
+                var before = s;
+                s = NoiseBracket.Replace(s, "");
+                s = NoiseTailWord.Replace(s, "");
+                s = NoiseStatus.Replace(s, "");
+                s = YearInBrackets.Replace(s, "");   // 年份由 TitleWithYear 统一补，避免出现两次
+                s = s.Trim(' ', '-', '_', '·', '|', '/', '、', ':', '：');
+                s = System.Text.RegularExpressions.Regex.Replace(s, @"\s{2,}", " ");
+                if (s == before) break;
+            }
+            return s.Length == 0 ? "未命名" : s;
+        }
+
+        /// <summary>去掉 emoji 和各种装饰符号（Emby 匹配片名时这些字符是纯噪声）。</summary>
+        public static string StripEmoji(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return string.Empty;
+            var sb = new StringBuilder(s.Length);
+            foreach (var ch in s)
+            {
+                var cat = char.GetUnicodeCategory(ch);
+                if (cat == System.Globalization.UnicodeCategory.OtherSymbol
+                    || cat == System.Globalization.UnicodeCategory.OtherNotAssigned
+                    || cat == System.Globalization.UnicodeCategory.Format
+                    || cat == System.Globalization.UnicodeCategory.PrivateUse
+                    || cat == System.Globalization.UnicodeCategory.Surrogate)
+                    continue;
+                sb.Append(ch);
+            }
+            return sb.ToString();
+        }
+
+        private static string YearFromTitle(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return null;
+            var m = YearInBrackets.Match(name.Trim());
+            return m.Success ? m.Groups[1].Value : null;
+        }
+
+        private static string WithYear(string name, string year) => TitleWithYear(name, year);
 
         /// <summary>片名里本身可能带 "(2023)"，剥掉避免重复。</summary>
         private static string StripYear(string name)
@@ -252,6 +486,8 @@ namespace TvBox.Plugin.Core
         public static string SafeName(string name)
         {
             if (string.IsNullOrWhiteSpace(name)) return "未命名";
+            name = StripEmoji(name);
+            if (name.Length == 0) return "未命名";
             var sb = new StringBuilder(name.Length);
             foreach (var ch in name)
             {

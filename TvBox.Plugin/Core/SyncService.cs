@@ -140,7 +140,7 @@ namespace TvBox.Plugin.Core
                 }, ct));
             }
             try { await Task.WhenAll(tasks).ConfigureAwait(false); }
-            catch (OperationCanceledException) { throw; }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             finally { sem.Dispose(); }
 
             for (int i = 0; i < episodes.Count; i++)
@@ -262,7 +262,7 @@ namespace TvBox.Plugin.Core
                             var n = await SyncOneSiteAsync(site, cfg, writer, keep, ct, summary).ConfigureAwait(false);
                             _log($"   {site.DisplayName}: {n} 个条目");
                         }
-                        catch (OperationCanceledException) { throw; }
+                        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                         catch (Exception ex)
                         {
                             summary.SitesFailed++;
@@ -433,7 +433,7 @@ namespace TvBox.Plugin.Core
                 {
                     res = await client.GetListAsync(site, null, page, ct).ConfigureAwait(false);
                 }
-                catch (OperationCanceledException) { throw; }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch (Exception ex)
                 {
                     _log("     第 " + page + " 页失败: " + ex.Message);
@@ -516,7 +516,7 @@ namespace TvBox.Plugin.Core
                         }
                         if (!string.IsNullOrEmpty(writer.LastError)) _lastWriteError = writer.LastError;
                     }
-                    catch (OperationCanceledException) { throw; }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                     catch (Exception ex)
                     {
                         summary.Errors++;
@@ -622,7 +622,7 @@ namespace TvBox.Plugin.Core
                         {
                             pr = await client.GetListAsync(site, cat.Id, page, ct).ConfigureAwait(false);
                         }
-                        catch (OperationCanceledException) { throw; }
+                        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                         catch (Exception ex)
                         {
                             _log($"     分类 {cat.Name} 第 {page} 页失败: {ex.Message}");
@@ -650,7 +650,7 @@ namespace TvBox.Plugin.Core
                         {
                             details = await client.GetDetailAsync(site, batch, ct).ConfigureAwait(false);
                         }
-                        catch (OperationCanceledException) { throw; }
+                        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                         catch (Exception ex)
                         {
                             _log($"     拉详情失败 ({batch.Count} 个): {ex.Message}");
