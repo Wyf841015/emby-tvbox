@@ -128,6 +128,11 @@ public class SpiderPool {
             if (f != null && f.isFile()) urls.add(f.toURI().toURL());
         }
         // 父加载器用系统 classpath，保证基类和 android stub 能解析到
+        try {
+            com.tvboxhost.AndroidCrypto.install();   // 安卓填充名 → JCE 填充名
+        } catch (Throwable t) {
+            System.err.println("[spider] 注册 Android 加密别名失败: " + t);
+        }
         spiderLoader = new URLClassLoader(urls.toArray(new URL[0]), SpiderPool.class.getClassLoader());
         initCatvodContext(spiderLoader);
     }

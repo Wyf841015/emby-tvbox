@@ -6,6 +6,9 @@ public class Context {
     public Context getApplicationContext() { return this; }
     public Object getSystemService(String name) { return null; }
     public String getPackageName() { return "tvbox.host"; }
+
+    private static final ContentResolver RESOLVER = new ContentResolver();
+    public ContentResolver getContentResolver() { return RESOLVER; }
     public android.content.res.Resources getResources() { return new android.content.res.Resources(); }
     public java.io.File getCacheDir() { return new java.io.File(System.getProperty("java.io.tmpdir")); }
     public java.io.File getFilesDir() { return getCacheDir(); }

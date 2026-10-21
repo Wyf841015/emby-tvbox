@@ -116,6 +116,7 @@ namespace TvBox.Plugin.Api
 
     public class ConfigResult : SimpleResult
     {
+        public bool VerifyPlayUrl { get; set; }
         public string ConfigUrl { get; set; }
         public string SpiderHubUrl { get; set; }
         public string OutputRoot { get; set; }
@@ -152,8 +153,8 @@ namespace TvBox.Plugin.Api
     }
 
     [Unauthenticated]
-    [Route("/TvBox/Stream/{Name}", "GET", Summary = "播放地址代理（补 Referer / UA，并重写 HLS 分片地址）")]
-    [Route("/TvBox/Stream", "GET", Summary = "播放地址代理（兼容无扩展名写法）")]
+    [Route("/TvBox/Stream/{Name}", "GET,HEAD", Summary = "播放地址代理（补 Referer / UA，并重写 HLS 分片地址）")]
+    [Route("/TvBox/Stream", "GET,HEAD", Summary = "播放地址代理（兼容无扩展名写法）")]
     public class StreamProxy : IReturnVoid
     {
         /// <summary>
@@ -425,6 +426,7 @@ namespace TvBox.Plugin.Api
                 AllowPrivateHosts = cfg.AllowPrivateHosts,
                 CleanupOrphans = cfg.CleanupOrphans,
                 ExcludeCloudDrive = cfg.ExcludeCloudDrive,
+                VerifyPlayUrl = cfg.VerifyPlayUrl,
                 EnableScheduledSync = cfg.EnableScheduledSync,
                 SyncIntervalHours = cfg.SyncIntervalHours,
                 ConfigFilePath = p.ConfigurationFilePath,
@@ -585,7 +587,7 @@ namespace TvBox.Plugin.Api
         //     而 Emby 内部 ffmpeg 拉流不会带 token，不加会直接 401。
         //  2) 不能用 Response.OutputWriter 自己写再 return null —— Emby 会当成空响应返回 204。
         //     正确做法是用 IHttpResultFactory.GetResult 返回 Stream 结果。
-        public object Get(StreamProxy req)
+        public object Any(StreamProxy req)
         {
             try
             {
@@ -620,7 +622,17 @@ namespace TvBox.Plugin.Api
                 };
                 var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };
 
-                var request = new HttpRequestMessage(HttpMethod.Get, rawUrl);
+                // 有些播放器（VidHub / AVPlayer）先 HEAD 探测、并对分片发 Range 请求，
+                // 不转发 Range 会退化成整段下载，客户端还可能直接判定不支持 seek。
+                string rangeHeader = null;
+                try { rangeHeader = Request?.Headers["Range"]; } catch { }
+
+                var isHead = false;
+                try { isHead = string.Equals(Request?.Verb, "HEAD", StringComparison.OrdinalIgnoreCase); } catch { }
+
+                var request = new HttpRequestMessage(isHead ? HttpMethod.Head : HttpMethod.Get, rawUrl);
+                if (!string.IsNullOrEmpty(rangeHeader))
+                    request.Headers.TryAddWithoutValidation("Range", rangeHeader);
                 if (cfg != null && !string.IsNullOrWhiteSpace(cfg.UserAgent))
                     request.Headers.TryAddWithoutValidation("User-Agent", cfg.UserAgent);
                 var refToUse = referer ?? cfg?.Referer;
@@ -645,10 +657,30 @@ namespace TvBox.Plugin.Api
                         "application/vnd.apple.mpegurl", null);
                 }
 
+                // HEAD 只要头，不要体（播放器常用 HEAD 探测是否可播）
+                if (isHead)
+                {
+                    resp.Dispose();
+                    http.Dispose();
+                    SafeHeader("Accept-Ranges", "bytes");
+                    return Factory().GetResult(Request, new MemoryStream(Array.Empty<byte>()), contentType, null);
+                }
+
                 var upstream = resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult();
                 // Stream 的生命周期交给 Emby，Dispose 时连带释放 response / client
-                return Factory().GetResult(Request,
+                var result = Factory().GetResult(Request,
                     new ResponseOwnedStream(upstream, resp, http), contentType, null);
+
+                // 透传上游的 206 / Content-Range，否则客户端会以为不支持分段拖动
+                SafeHeader("Accept-Ranges", "bytes");
+                var cr = resp.Content.Headers.ContentRange;
+                if (cr != null) SafeHeader("Content-Range", cr.ToString());
+                if (result is MediaBrowser.Model.Services.IHttpResult hr && (int)resp.StatusCode == 206)
+                {
+                    hr.Status = 206;
+                    hr.StatusCode = System.Net.HttpStatusCode.PartialContent;
+                }
+                return result;
             }
             catch (Exception ex)
             {
@@ -673,6 +705,12 @@ namespace TvBox.Plugin.Api
             if (!string.IsNullOrWhiteSpace(referer))
                 path += "&r=" + SyncService.Base64UrlEncode(referer);
             return path;
+        }
+
+        /// <summary>写一个响应头。IHttpResult 没有 ResponseHeaders，只能走 IResponse。</summary>
+        private void SafeHeader(string name, string value)
+        {
+            try { Response?.AddHeader(name, value); } catch { }
         }
 
         private static IHttpResultFactory Factory()

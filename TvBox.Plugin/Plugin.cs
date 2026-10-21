@@ -98,15 +98,67 @@ namespace TvBox.Plugin
             if (cfg != null && !string.IsNullOrWhiteSpace(cfg.EmbyBaseUrl))
                 return cfg.EmbyBaseUrl.Trim().TrimEnd('/');
 
+            int p2 = 8096;
             try
             {
                 var port = _serverConfig?.Configuration?.HttpServerPortNumber ?? 0;
-                if (port <= 0) port = 8096;
-                return "http://127.0.0.1:" + port;
+                if (port > 0) p2 = port;
+            }
+            catch { }
+
+            // 关键：不能写 127.0.0.1。
+            // strm 是交给客户端（电视/手机/VidHub）去播的，客户端拿到 127.0.0.1 会去连它自己，
+            // 必然播不了。这里自动挑本机可被局域网访问的 IPv4。
+            var lan = DetectLanAddress();
+            if (lan != null) return "http://" + lan + ":" + p2;
+            return "http://127.0.0.1:" + p2;
+        }
+
+        /// <summary>
+        /// 找一个局域网可达的本机 IPv4：跳过回环、链路本地、docker/veth 网桥。
+        /// 优先 192.168/10./172.16-31 这类私网地址。
+        /// </summary>
+        public static string DetectLanAddress()
+        {
+            try
+            {
+                var candidates = new System.Collections.Generic.List<System.Net.IPAddress>();
+                foreach (var ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (ni.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+                    if (ni.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback) continue;
+                    var name = (ni.Name ?? "").ToLowerInvariant();
+                    if (name.StartsWith("docker") || name.StartsWith("veth") || name.StartsWith("br-")
+                        || name.StartsWith("virbr") || name.StartsWith("cni") || name.StartsWith("flannel")
+                        || name.StartsWith("tun") || name.StartsWith("wg")) continue;
+
+                    foreach (var ua in ni.GetIPProperties().UnicastAddresses)
+                    {
+                        var ip = ua.Address;
+                        if (ip.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) continue;
+                        var b = ip.GetAddressBytes();
+                        if (b[0] == 127) continue;                                  // 回环
+                        if (b[0] == 169 && b[1] == 254) continue;                   // 链路本地
+                        if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) continue;      // docker 默认网段
+                        if (b[0] == 10 && b[1] == 88) continue;                     // 常见 overlay
+                        candidates.Add(ip);
+                    }
+                }
+
+                // 私网优先，其次随便一个
+                foreach (var ip in candidates)
+                {
+                    var b = ip.GetAddressBytes();
+                    bool priv = b[0] == 192 && b[1] == 168
+                             || b[0] == 10
+                             || (b[0] == 172 && b[1] >= 16 && b[1] <= 31);
+                    if (priv) return ip.ToString();
+                }
+                return candidates.Count > 0 ? candidates[0].ToString() : null;
             }
             catch
             {
-                return "http://127.0.0.1:8096";
+                return null;
             }
         }
 
