@@ -16,7 +16,12 @@
     --text:#e8eefb; --text-2:#b6c4da; --dim:#7d8ea8;
     /* 这两个变量被 CSS 引用了很久却从没定义过：简介正文/表格次要列全部退化成继承色 */
     --fg:var(--text); --muted:var(--dim);
+    /* 浮层底色。--panel 之前被 .dlg 引用却从未定义（回退成写死的深色），
+       导致详情、播放这类弹窗不跟主题走 */
+    --panel:#141f31; --overlay:rgba(3,7,18,.62); --overlay-strong:rgba(0,0,0,.82); --video-bg:#000;
     --ok:#2ecc71; --warn:var(--gold); --bad:#f2555a;
+    /* 当文字用时的语义色：亮色主题必须压深，否则白底上对比度只有 2:1 */
+    --ok-text:var(--ok); --warn-text:var(--warn); --bad-text:var(--bad);
 
     --accent:var(--brand); --accent-soft:rgba(51,112,255,.12); --accent-line:rgba(51,112,255,.36);
     --ok-soft:rgba(46,204,113,.12); --bad-soft:rgba(242,85,90,.12);
@@ -36,6 +41,8 @@
     --line:#d9e2f0; --line-soft:#e6ecf6;
     --text:#16233a; --text-2:#374861; --dim:#57687f;
     --fg:var(--text); --muted:var(--dim);
+    --panel:#ffffff; --overlay:rgba(16,28,48,.34); --overlay-strong:rgba(10,18,32,.55); --video-bg:#0b1220;
+    --ok-text:#12864a; --warn-text:#8a5a00; --bad-text:#c62b31;
     --accent-soft:rgba(51,112,255,.09); --accent-line:rgba(51,112,255,.30);
     --ok-soft:rgba(46,204,113,.14); --bad-soft:rgba(242,85,90,.12);
     --sh-1:0 1px 2px rgba(22,35,58,.07);
@@ -139,7 +146,7 @@
   .card:hover{border-color:var(--accent-line);box-shadow:var(--sh-2);transform:translateY(-1px)}
   .card .k{color:var(--dim);font-size:11.5px;letter-spacing:.6px;text-transform:uppercase;margin-bottom:7px;font-weight:600}
   .card .v{font-size:25px;font-weight:700;letter-spacing:-.4px;line-height:1.15;font-variant-numeric:tabular-nums}
-  .card .v.ok{color:var(--ok)} .card .v.bad{color:var(--bad)} .card .v.accent{color:var(--brand-2)}
+  .card .v.ok{color:var(--ok-text)} .card .v.bad{color:var(--bad-text)} .card .v.accent{color:var(--brand-2)}
   .card .v.sm{font-size:13.5px;font-weight:500;word-break:break-all;line-height:1.5;letter-spacing:0}
 
   /* ═══════════════ 面板 ═══════════════ */
@@ -188,8 +195,8 @@
   button.primary:hover{filter:brightness(1.08);box-shadow:0 8px 22px rgba(51,112,255,.36)}
   button.accent{color:var(--brand);border-color:var(--accent-line);background:var(--accent-soft);font-weight:650}
   button.accent:hover{background:var(--brand);color:#fff;border-color:transparent}
-  button.danger{color:var(--bad);border-color:rgba(242,85,90,.4)}
-  button.danger:hover{background:var(--bad-soft);border-color:var(--bad)}
+  button.danger{color:var(--bad-text);border-color:rgba(242,85,90,.4)}
+  button.danger:hover{background:var(--bad-soft);border-color:var(--bad-text)}
   button.tiny{height:26px;padding:0 9px;font-size:12px;border-radius:var(--r-xs)}
   button:disabled{opacity:.42;cursor:not-allowed;transform:none;box-shadow:none}
   .icon-btn{width:34px;padding:0;font-size:15px}
@@ -221,8 +228,8 @@
     display:inline-block;font-size:11.5px;padding:1px 9px;border-radius:var(--r-full);line-height:18px;
     border:1px solid var(--line);color:var(--dim);background:var(--surface-2);white-space:nowrap;
   }
-  .pill.ok{color:var(--ok);border-color:rgba(46,204,113,.42);background:var(--ok-soft)}
-  .pill.bad{color:var(--bad);border-color:rgba(242,85,90,.42);background:var(--bad-soft)}
+  .pill.ok{color:var(--ok-text);border-color:rgba(46,204,113,.42);background:var(--ok-soft)}
+  .pill.bad{color:var(--bad-text);border-color:rgba(242,85,90,.42);background:var(--bad-soft)}
 
   /* 站点表：列宽固定，避免类型列过宽、操作列晃动 */
   #siteTableSync table th:nth-child(1), #siteTable table th:nth-child(1),
@@ -255,12 +262,12 @@
   .empty{color:var(--dim);text-align:center;padding:28px 12px;font-size:13px}
   .panel > .empty{min-height:112px;display:grid;place-items:center}
   /* ── 详情弹窗 ── */
-  .mask{position:fixed;inset:0;background:rgba(3,7,18,.62);z-index:900;display:none;align-items:center;justify-content:center;padding:20px}
+  .mask{position:fixed;inset:0;background:var(--overlay);z-index:900;display:none;align-items:center;justify-content:center;padding:20px}
   .mask.show{display:flex}
   /* 播放器必须盖在详情弹窗之上（两个遮罩 z-index 一样时，DOM 靠后的会压住先出现的） */
   #playerMask{z-index:1000}
   #dlgMask{z-index:900}
-  .dlg{width:min(760px,100%);max-height:86vh;overflow:auto;background:var(--panel,#161b26);border:1px solid var(--line);border-radius:16px;box-shadow:0 24px 60px rgba(0,0,0,.45)}
+  .dlg{width:min(760px,100%);max-height:86vh;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--sh-3)}
   .dlg-head{display:flex;align-items:center;gap:10px;padding:16px 18px;border-bottom:1px solid var(--line);position:sticky;top:0;background:inherit;z-index:2}
   .dlg-head h3{margin:0;font-size:16px}
   .dlg-head .x{margin-left:auto;cursor:pointer;border:none;background:transparent;color:var(--muted);font-size:20px;line-height:1}
@@ -281,9 +288,9 @@
   .ver{font-size:11.5px;color:var(--dim);background:var(--surface-2);border:1px solid var(--line);
        border-radius:var(--r-full);padding:1px 8px;letter-spacing:.3px;white-space:nowrap}
   @media(max-width:640px){ .topbar .crumb{display:none} }
-  .spon-mask{position:fixed;inset:0;background:rgba(3,7,18,.62);z-index:1200;display:none;align-items:center;justify-content:center;padding:20px}
+  .spon-mask{position:fixed;inset:0;background:var(--overlay);z-index:1200;display:none;align-items:center;justify-content:center;padding:20px}
   .spon-mask.show{display:flex}
-  .spon-box{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:0 24px 60px rgba(0,0,0,.45);padding:20px 22px;max-width:420px;width:100%;text-align:center}
+  .spon-box{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--sh-3);padding:20px 22px;max-width:420px;width:100%;text-align:center}
   .spon-head{display:flex;align-items:center;gap:8px;margin-bottom:10px}
   .spon-head h3{margin:0;font-size:16px}
   .spon-head .x{margin-left:auto;border:none;background:transparent;color:var(--dim);font-size:20px;line-height:1;cursor:pointer}
@@ -292,7 +299,7 @@
   .spon-qr{text-align:center}
   .spon-qr p{font-size:13px;font-weight:600;margin:0 0 8px;color:var(--text)}
   .spon-qr img{max-width:152px;max-height:210px;width:auto;height:auto;object-fit:contain;border-radius:var(--r-sm);border:1px solid var(--line);cursor:zoom-in;background:#fff}
-  .spon-full{position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:1300;display:none;align-items:center;justify-content:center}
+  .spon-full{position:fixed;inset:0;background:var(--overlay-strong);z-index:1300;display:none;align-items:center;justify-content:center}
   .spon-full.show{display:flex}
   .spon-full img{max-width:86%;max-height:86%;border-radius:var(--r);background:#fff}
   .qq-num{font-size:28px;font-weight:800;letter-spacing:2px;color:var(--accent);padding:12px;border-radius:var(--r);background:var(--surface-2);cursor:pointer;user-select:all}
@@ -313,6 +320,11 @@
   .cfg-row.bad .ic{color:#ef4444}
   .cfg-row .fix{display:block;color:var(--dim);font-size:12px;margin-top:2px}
   html[data-theme="light"] .cfg-row .nm{color:#5a6b84}
+    /* 浅色主题下状态药丸：文字用深色版，边框加实一点 */
+    html[data-theme="light"] .pill.ok{color:var(--ok-text);border-color:rgba(18,134,74,.45);background:rgba(18,134,74,.10)}
+    html[data-theme="light"] .pill.bad{color:var(--bad-text);border-color:rgba(198,43,49,.45);background:rgba(198,43,49,.10)}
+    html[data-theme="light"] .cfg-row.ok .ic{color:var(--ok-text)}
+    html[data-theme="light"] .cfg-row.bad .ic{color:var(--bad-text)}
   @media(max-width:560px){ .cfg-row{grid-template-columns:18px 96px 1fr;gap:8px;font-size:12.5px} }
   .hint{color:var(--dim);font-size:12px;margin-top:10px;line-height:1.7}
   .hint code{color:var(--brand-2)}
@@ -352,7 +364,7 @@
     pointer-events:none;color:var(--text);
   }
   .toast.show{opacity:1;transform:translateY(0)}
-  .toast.ok{border-left-color:var(--ok)} .toast.bad{border-left-color:var(--bad)}
+  .toast.ok{border-left-color:var(--ok-text)} .toast.bad{border-left-color:var(--bad-text)}
 
   /* ═══════════════ 响应式 ═══════════════ */
   @media(max-width:900px){
@@ -443,6 +455,11 @@
   html[data-theme="light"] .pbar{background:#dde5f0}
   html[data-theme="light"] pre{background:#f5f8fd;color:#2c3d57;border-color:var(--line)}
   html[data-theme="light"] .toast{background:#fff;box-shadow:var(--sh-3)}
+    /* 弹窗在浅色主题下的边框与海报占位底 */
+    html[data-theme="light"] .dlg{border-color:#c3d1e4}
+    html[data-theme="light"] .dlg-head{border-bottom-color:#dde6f4}
+    html[data-theme="light"] .dlg-body img{background:#eef3fb}
+    html[data-theme="light"] .spon-box{border-color:#c3d1e4}
 </style>
 </head>
 <body>
@@ -454,7 +471,7 @@
       <div class="brand-text">
         <div class="brand-line">
           <h1>TvBox For Emby</h1>
-          <span class="ver">v0.3.1</span>
+          <span class="ver">v0.3.2</span>
         </div>
         <div class="sub">点播源 → Emby</div>
       </div>
@@ -842,7 +859,7 @@
       <button class="x" onclick="closePlayer()">✕</button>
     </div>
     <div style="padding:14px 18px 18px">
-      <video id="playerVideo" controls playsinline autoplay style="width:100%;max-height:70vh;background:#000;border-radius:10px"></video>
+      <video id="playerVideo" controls playsinline autoplay style="width:100%;max-height:70vh;background:var(--video-bg);border-radius:10px"></video>
       <div class="hint" id="playerHint" style="margin-top:8px"></div>
     </div>
   </div>
@@ -1458,13 +1475,13 @@ function showDetail(idx) {
   api('/api/detail?key=' + encodeURIComponent(it.site) + '&id=' + encodeURIComponent(it.id)).then(function (r) {
     if (_dlgIdx !== idx) return;
     if (!r || !r.ok || !r.item) {
-      document.getElementById('dlgMeta').innerHTML = '<div style="color:#ef4444">拉详情失败：'
+      document.getElementById('dlgMeta').innerHTML = '<div style="color:var(--bad-text)">拉详情失败：'
         + esc((r && r.msg) || '源没返回数据') + '</div>';
       return;
     }
     renderDetail(r.item);
   }).catch(function (e) {
-    document.getElementById('dlgMeta').innerHTML = '<div style="color:#ef4444">拉详情失败：' + esc(e.message) + '</div>';
+    document.getElementById('dlgMeta').innerHTML = '<div style="color:var(--bad-text)">拉详情失败：' + esc(e.message) + '</div>';
   });
 }
 
@@ -1698,7 +1715,7 @@ function loadSites() {
     var msg = '站点列表加载失败: ' + (e && e.message ? e.message : e);
     ['siteTable', 'siteTableSync'].forEach(function (id) {
       var box = document.getElementById(id);
-      if (box) box.innerHTML = '<div class="empty" style="color:#ef4444">' + esc(msg) + '</div>';
+      if (box) box.innerHTML = '<div class="empty" style="color:var(--bad-text)">' + esc(msg) + '</div>';
     });
     toast(msg, 'err');
   });
@@ -2096,7 +2113,7 @@ function detectEmby() {
 
     var readyList = list.filter(function (x) { return x.state === 'ready'; });
     if (!readyList.length) {
-      html += '<div class="hint" style="color:var(--warn)">' +
+      html += '<div class="hint" style="color:var(--warn-text)">' +
         '⚠️ 找到的目录都还没被 Emby 初始化（缺 <code>config/system.xml</code>）。' +
         '先在 fnOS 应用中心启动一次 Emby，等它把配置生成出来再回来装插件。</div>';
     }
@@ -2125,10 +2142,10 @@ function embyStatus() {
   api('api/emby/status?programdata=' + encodeURIComponent(pd)).then(function (d) {
     if (d.installed) {
       hint.textContent = '已安装 · ' + d.size + ' 字节 · ' + d.mtime;
-      hint.style.color = 'var(--ok)';
+      hint.style.color = 'var(--ok-text)';
     } else if (d.initialized === false) {
       hint.textContent = '未安装 · 该目录还没被 Emby 初始化（缺 config/system.xml）';
-      hint.style.color = 'var(--warn)';
+      hint.style.color = 'var(--warn-text)';
     } else {
       hint.textContent = '未安装';
       hint.style.color = 'var(--dim)';
@@ -2151,7 +2168,7 @@ function selfUpdatePlugin() {
       if (d.ok) {
         toast(d.updated ? '插件已更新' : '已是最新', 'ok');
         hint.textContent = '✅ ' + (d.msg || '');
-        hint.style.color = 'var(--ok)';
+        hint.style.color = 'var(--ok-text)';
         if (d.restarting) {
           hint.textContent += ' ｜ Emby 正在重启，稍等 30 秒后刷新本页';
           setTimeout(function () { embyStatus(); }, 30000);
@@ -2159,14 +2176,14 @@ function selfUpdatePlugin() {
       } else {
         toast(d.msg || '自更新失败', 'bad');
         hint.textContent = '❌ ' + (d.msg || '失败');
-        hint.style.color = 'var(--bad)';
+        hint.style.color = 'var(--bad-text)';
       }
       loadLogs();
     })
     .catch(function (e) {
       // Emby 重启会让请求直接断开，这属于正常现象
       hint.textContent = '⚠️ 请求中断（可能是 Emby 正在重启）：' + e;
-      hint.style.color = 'var(--warn)';
+      hint.style.color = 'var(--warn-text)';
     })
     .then(function () { btn.disabled = false; });
 }
@@ -2177,18 +2194,18 @@ function detectDocker() {
   api('api/emby/docker').then(function (d) {
     if (!d.available) {
       hint.textContent = '⚠️ ' + (d.hint || 'docker 不可用');
-      hint.style.color = 'var(--warn)';
+      hint.style.color = 'var(--warn-text)';
       return;
     }
     var cs = d.containers || [];
     if (!cs.length) {
       hint.textContent = '没找到 emby 容器（可手动填容器名）';
-      hint.style.color = 'var(--warn)';
+      hint.style.color = 'var(--warn-text)';
       return;
     }
     if (cs.length === 1) document.getElementById('embyContainer').value = cs[0].name;
     hint.textContent = '找到 ' + cs.length + ' 个：' + cs.map(function (c) { return c.name; }).join('、');
-    hint.style.color = 'var(--ok)';
+    hint.style.color = 'var(--ok-text)';
   }).catch(function (e) { hint.textContent = '检测失败: ' + e; });
 }
 
@@ -2211,13 +2228,13 @@ function installPlugin() {
     if (d.ok) {
       toast('安装成功' + via + (d.needsRestart === false ? '' : '，重启 Emby 生效'), 'ok');
       hint.textContent = '✅ ' + via + ' ' + (d.msg || '');
-      hint.style.color = 'var(--ok)';
-      if (d.warning) { hint.textContent += ' ⚠️ ' + d.warning; hint.style.color = 'var(--warn)'; }
+      hint.style.color = 'var(--ok-text)';
+      if (d.warning) { hint.textContent += ' ⚠️ ' + d.warning; hint.style.color = 'var(--warn-text)'; }
       if (d.tried && d.tried.length) hint.textContent += ' ｜ 尝试过程: ' + d.tried.join(' → ');
     } else {
       toast(d.msg || '安装失败', 'bad');
       hint.textContent = '❌ ' + (d.msg || '失败');
-      hint.style.color = 'var(--bad)';
+      hint.style.color = 'var(--bad-text)';
       if (d.tried && d.tried.length) hint.textContent += ' ｜ ' + d.tried.join(' → ');
     }
     embyStatus(); loadLogs();
@@ -2370,7 +2387,7 @@ function checkWritablePath(path, boxId) {
   if (!path) { toast('没有路径可测', 'bad'); return; }
   box.innerHTML = '<div class="hint">正在以 Emby 身份写入测试（' + esc(path) + '）…</div>';
   api('api/emby/write-check?path=' + encodeURIComponent(path)).then(function (d) {
-    if (!d.ok) { box.innerHTML = '<div class="hint" style="color:var(--bad)">探测失败: ' + esc(d.msg || '') + '</div>'; return; }
+    if (!d.ok) { box.innerHTML = '<div class="hint" style="color:var(--bad-text)">探测失败: ' + esc(d.msg || '') + '</div>'; return; }
     var r = d.result || {};
     var rows = (r.Items || []).map(function (it) {
       var st = it.Writable ? '<span class="st ok"></span>可写' : '<span class="st bad"></span>不可写';
@@ -2383,7 +2400,7 @@ function checkWritablePath(path, boxId) {
       rows + '</tbody></table>';
     toast(r.Ok ? '✓ 输出目录可写' : '✗ 有目录写不进去', r.Ok ? 'ok' : 'bad');
   }).catch(function (e) {
-    box.innerHTML = '<div class="hint" style="color:var(--bad)">探测失败: ' + esc(String(e)) + '</div>';
+    box.innerHTML = '<div class="hint" style="color:var(--bad-text)">探测失败: ' + esc(String(e)) + '</div>';
   });
 }
 
