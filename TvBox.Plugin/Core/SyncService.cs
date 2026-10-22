@@ -656,6 +656,26 @@ namespace TvBox.Plugin.Core
                                     client, line.Episodes, site, cfg, ct,
                                     why => { dead++; reasons.AddOrUpdate(ShortReason(why), 1, (_, v) => v + 1); },
                                     note => _log("     [" + (item.Name ?? item.Id) + "] " + note)).ConfigureAwait(false);
+                                // 线路兜底：TVBox 客户端是逐条线路试的，我们只挑「最佳线路」，
+                                // 这条线挂了就整条跳过 —— 实测有源第 2、3 条线路是好的。
+                                if (live.Count == 0 && detail.Lines != null && detail.Lines.Count > 1)
+                                {
+                                    foreach (var cand in detail.Lines.Skip(1).Take(3))
+                                    {
+                                        if (cand?.Episodes == null || cand.Episodes.Count == 0) continue;
+                                        var candLine = ResolvePrivateIds(new VodLine { Name = cand.Name, Episodes = cand.Episodes }, site, cfg);
+                                        int dead2 = 0;
+                                        var live2 = await FilterPlayableEpisodesAsync(client, candLine.Episodes, site, cfg, ct,
+                                            _ => dead2++, _ => { }).ConfigureAwait(false);
+                                        if (live2.Count > 0)
+                                        {
+                                            _log("     [" + (item.Name ?? item.Id) + "] 线路兜底：换到「" + cand.Name + "」(" + live2.Count + " 集)");
+                                            line = new VodLine { Name = candLine.Name, Episodes = live2 };
+                                            live = live2;
+                                            break;
+                                        }
+                                    }
+                                }
                                 if (live.Count == 0)
                                 {
                                     summary.Skipped++; Update(p => p.ItemsSkipped++);
@@ -1052,6 +1072,26 @@ namespace TvBox.Plugin.Core
                                         client, line.Episodes, site, cfg, ct,
                                         why => { dead++; reasons.AddOrUpdate(ShortReason(why), 1, (_, v) => v + 1); },
                                         note => _log("     [" + (item.Name ?? item.Id) + "] " + note)).ConfigureAwait(false);
+                                    // 线路兜底：TVBox 客户端是逐条线路试的，我们只挑「最佳线路」，
+                                    // 这条线挂了就整条跳过 —— 实测有源第 2、3 条线路是好的。
+                                    if (live.Count == 0 && item.Lines != null && item.Lines.Count > 1)
+                                    {
+                                        foreach (var cand in item.Lines.Skip(1).Take(3))
+                                        {
+                                            if (cand?.Episodes == null || cand.Episodes.Count == 0) continue;
+                                            var candLine = ResolvePrivateIds(new VodLine { Name = cand.Name, Episodes = cand.Episodes }, site, cfg);
+                                            int dead2 = 0;
+                                            var live2 = await FilterPlayableEpisodesAsync(client, candLine.Episodes, site, cfg, ct,
+                                                _ => dead2++, _ => { }).ConfigureAwait(false);
+                                            if (live2.Count > 0)
+                                            {
+                                                _log("     [" + (item.Name ?? item.Id) + "] 线路兜底：换到「" + cand.Name + "」(" + live2.Count + " 集)");
+                                                line = new VodLine { Name = candLine.Name, Episodes = live2 };
+                                                live = live2;
+                                                break;
+                                            }
+                                        }
+                                    }
                                     if (live.Count == 0)
                                     {
                                         summary.Items++;

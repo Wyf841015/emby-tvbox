@@ -1,5 +1,43 @@
 # emby-tvbox
 
+## v0.13.0 — 把 TVBox 源码里剩下的接口补齐（proxy / 直播 / 解析接口 / DoH）
+
+对着 catvod 的 `Spider` 基类逐项核对，这次把之前没接的补上：
+
+**1. `Spider.proxy(params)`** — 站点自己造的代理地址
+很多 spider 返回的播放地址形如 `/proxy?do=spider&key=<站点>&…`，TVBox 会把它交给该站的
+`Spider.proxy()`。hub 的 9978 文件服务现在识别 `key=` 参数并分发到对应 spider，
+返回值（okhttp3 Response / byte[] / String）用反射统一抠成字节流输出。
+
+**2. `liveContent()` → 直播**
+- hub `GET /live/<key>`：把 spider 的 `{"lives":[{"name":"组","channels":[{"name":"台","urls":[...]}]}]}`
+  转成标准 M3U
+- 插件 `GET /TvBox/Live[?key=站点]`：不带 key 就把同步名单里所有站点的直播合并
+- 用法：Emby「Live TV → 添加 M3U tuner」填 `http://192.168.1.10:8096/TvBox/Live`
+（当前名单里 4 个站都没有直播数据，接口通了但没内容；`网络直播`/`轮回DJ` 缺 spider 类）
+
+**3. `parse=1` 支持自定义解析接口**
+新建 `data/parse-apis.txt`，一行一个模板（`{url}` 占位），parse=1 时按顺序试；
+解决 `Sao火`/`布布` 这类只给网页地址、必须外部解析的源。内置 JSON 试探仍然保底。
+
+**4. filter 兜底**
+有些 spider 只有 `filter=true` 才吐数据（客户端默认传 false）。现在
+`categoryContent(false, {})` 拿空会自动再用 `(true, {})` 试一遍，日志里出现
+`[cms] filter=true 才拿到数据` 就是命中了。
+
+**5. `safeDns()` 换 DoH**
+改用阿里 DoH（223.5.5.5）解析，失败回落系统 DNS。被污染/本地解析不到的源站能救回一批。
+
+**6. 多线路兜底**
+插件原来只挑「最佳线路」，那条线挂了整条跳过。现在全集不可用时，
+自动换第 2~4 条线路再验一遍，日志 `[线路兜底] 换到「xxx」`。
+
+顺带修的：`/TvBox/Play` 的 `[Unauthenticated]` 上一版被我改漏过一次（401
+Access token is invalid），已在回归测试里确认修复。
+
+实测：`/TvBox/Play` → 200 `application/vnd.apple.mpegurl` 567KB，分片 200 `video/mp2t`；
+`/TvBox/Live?key=农民影视` → 200；`/proxy?url=` 透传 200。
+
 ## v0.12.0 — 补上 Spider.playerContent 这一层（私有分集 id 现在能播）
 
 上一版探测发现 152 个源里只有 2 个「直接可播」，其余大量源的 `vod_play_url` 根本不是地址：

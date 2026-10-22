@@ -74,8 +74,48 @@ public class Spider {
      * 这里返回系统 DNS；如需防污染可以换成自定义实现。
      */
     public static okhttp3.Dns safeDns() {
-        return okhttp3.Dns.SYSTEM;
+        return DOH;
     }
+
+    /**
+     * 走阿里 DoH（223.5.5.5）解析，失败回落到系统 DNS。
+     *
+     * 为什么不用系统 DNS：部分源站域名被污染/本地 DNS 解析不到，
+     * spider 建 OkHttpClient 时都挂这个 dns，用 DoH 能救回一批"解析失败"的源。
+     * 用 HttpURLConnection 直连 IP，避免自己递归到自己。
+     */
+    private static final okhttp3.Dns DOH = hostname -> {
+        try {
+            java.net.URL u = new java.net.URL("https://223.5.5.5/resolve?name="
+                    + java.net.URLEncoder.encode(hostname, java.nio.charset.StandardCharsets.UTF_8)
+                    + "&type=A");
+            java.net.HttpURLConnection c = (java.net.HttpURLConnection) u.openConnection();
+            c.setConnectTimeout(3000);
+            c.setReadTimeout(3000);
+            c.setRequestProperty("Accept", "application/dns-json");
+            if (c instanceof javax.net.ssl.HttpsURLConnection)
+                ((javax.net.ssl.HttpsURLConnection) c).setHostnameVerifier((h, session) -> true);   // 直连 IP，证书绑的是 IP
+            if (c.getResponseCode() == 200) {
+                java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+                try (java.io.InputStream in = c.getInputStream()) {
+                    byte[] buf = new byte[4096];
+                    int n;
+                    while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+                }
+                String body = bos.toString("UTF-8");
+                java.util.List<java.net.InetAddress> addrs = new java.util.ArrayList<>();
+                java.util.regex.Matcher m = java.util.regex.Pattern
+                        .compile("\"data\":\"(\\d{1,3}(?:\\.\\d{1,3}){3})\"").matcher(body);
+                while (m.find()) {
+                    try {
+                        addrs.add(java.net.InetAddress.getByName(m.group(1)));
+                    } catch (Exception ignore) { }
+                }
+                if (!addrs.isEmpty()) return addrs;
+            }
+        } catch (Exception ignore) { }
+        return okhttp3.Dns.SYSTEM.lookup(hostname);
+    };
 
     public static String emptyResult() {
         return "{\"class\":[],\"list\":[]}";

@@ -294,6 +294,10 @@ public class Hub {
                 handlePlay(ex, path);
                 return;
             }
+            if (path.startsWith("/live/")) {
+                handleLive(ex, path);
+                return;
+            }
             if (path.startsWith("/v/")) {
                 // 记一条请求行：插件跟 curl 拿到不同结果时，靠这个对齐请求差异
                 System.out.println("[cms] " + ex.getRequestURI().getRawPath()
@@ -482,7 +486,7 @@ public class Hub {
                 String pg = q.getOrDefault("pg", "1");
                 String raw = call(key, () -> {
                     Spider s = pool.get(key);
-                    return s.categoryContent(tid, pg, false, new HashMap<>());
+                    return categoryFallback(s, tid, pg);
                 }, 60);
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("ok", true);
@@ -1071,6 +1075,38 @@ public class Hub {
     }
 
     /** MacCMS 兼容接口：/v/<key>/api.php/provide/vod/?ac=... */
+    /**
+     * 有些 spider 必须带 filter=true 才肯吐数据（它们把 filter 当成"给我带筛选参数的结果"），
+     * 而 TVBox 客户端在没选筛选条件时传的是 false。这里做两级兜底：
+     *   (filter=false, extend={}) → 空就再来 (filter=true, extend={})
+     * 两边都空才认为是真的没数据。
+     */
+    static String categoryFallback(Object spiderObj, String tid, String pg) {
+        try {
+            com.github.catvod.crawler.Spider sp = (com.github.catvod.crawler.Spider) spiderObj;
+            String raw = sp.categoryContent(tid, pg, false, new HashMap<>());
+            if (hasItems(raw)) return raw;
+            String raw2 = sp.categoryContent(tid, pg, true, new HashMap<>());
+            if (hasItems(raw2)) {
+                System.out.println("[cms] filter=true 才拿到数据 tid=" + tid + " pg=" + pg);
+                return raw2;
+            }
+            return raw;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 粗略判断 categoryContent 的 JSON 里有没有 list 内容。 */
+    static boolean hasItems(String raw) {
+        if (raw == null) return false;
+        String compact = raw.replaceAll("\\s", "");
+        int i = compact.indexOf("\"list\":[");
+        if (i < 0) return false;
+        int j = i + 8;
+        return j < compact.length() && compact.charAt(j) != ']';
+    }
+
     static void handleCms(HttpExchange ex, String path) throws Exception {
         String rest = path.substring(3);                 // <key>/api.php/...
         int slash = rest.indexOf('/');
@@ -1150,7 +1186,7 @@ public class Hub {
                     }
                     String raw = call(key, () -> {
                         Spider s = pool.get(key);
-                        return s.categoryContent(tid, pg, false, new HashMap<>());
+                        return categoryFallback(s, tid, pg);
                     }, 60);
                     sendCms(ex, wrapList(raw, null));
                     return;
@@ -2398,6 +2434,87 @@ public class Hub {
      * 我们之前直接把私有 id 当 URL 用，这些源就整站同步不到。
      * 这个端点补上这一层：解析出真地址后 302 过去（json=1 则返回 JSON 说明）。
      */
+    /**
+     * spider.proxy() 可能返回 okhttp3.Response / ResponseBody / byte[] / String，
+     * 统一抠成 byte[]（顺便带回 content-type）。
+     */
+    static byte[] proxyBody(Object out, String[] ctOut) {
+        try {
+            if (out instanceof byte[]) return (byte[]) out;
+            if (out instanceof String) return ((String) out).getBytes(StandardCharsets.UTF_8);
+            try {
+                Object ctv = out.getClass().getMethod("contentType").invoke(out);
+                if (ctv != null) ctOut[0] = String.valueOf(ctv);
+            } catch (Exception ignore) { }
+            Object body = out;
+            try {
+                Object b = out.getClass().getMethod("body").invoke(out);
+                if (b != null) body = b;
+            } catch (Exception ignore) { }
+            try {
+                Object bytes = body.getClass().getMethod("bytes").invoke(body);
+                if (bytes instanceof byte[]) return (byte[]) bytes;
+            } catch (Exception ignore) { }
+            try {
+                Object strv = body.getClass().getMethod("string").invoke(body);
+                if (strv != null) return String.valueOf(strv).getBytes(StandardCharsets.UTF_8);
+            } catch (Exception ignore) { }
+        } catch (Exception ignore) { }
+        return null;
+    }
+
+    /**
+     * GET /live/&lt;key&gt; —— 直播源。
+     * spider.liveContent() 给 {"lives":[{"name":"组","channels":[{"name":"台","urls":["http://…"]}]}]}，
+     * 这里转成标准 M3U，Emby 的 Live TV → M3U tuner 能直接用。
+     */
+    static void handleLive(com.sun.net.httpserver.HttpExchange ex, String path) {
+        try {
+            String key = java.net.URLDecoder.decode(path.substring("/live/".length()), StandardCharsets.UTF_8);
+            String raw = call(key, () -> pool.get(key).liveContent(null), 45);
+            if (raw == null || raw.isBlank()) {
+                send(ex, 404, "text/plain; charset=utf-8", "这个站点没有直播源（liveContent 返回空）");
+                return;
+            }
+            Object parsed = tryParse(raw);
+            StringBuilder m3u = new StringBuilder("#EXTM3U\n");
+            int n = 0;
+            if (parsed instanceof Map && ((Map<?, ?>) parsed).get("lives") instanceof List) {
+                for (Object g : (List<?>) ((Map<?, ?>) parsed).get("lives")) {
+                    if (!(g instanceof Map)) continue;
+                    String gname = m3uEsc(str(((Map<?, ?>) g).get("name")));
+                    Object chs = ((Map<?, ?>) g).get("channels");
+                    if (!(chs instanceof List)) continue;
+                    for (Object c : (List<?>) chs) {
+                        if (!(c instanceof Map)) continue;
+                        String cname = m3uEsc(str(((Map<?, ?>) c).get("name")));
+                        Object urls = ((Map<?, ?>) c).get("urls");
+                        if (!(urls instanceof List)) continue;
+                        for (Object u : (List<?>) urls) {
+                            String uu = u instanceof Map ? str(((Map<?, ?>) u).get("url")) : str(u);
+                            if (uu.isBlank()) continue;
+                            m3u.append("#EXTINF:-1 group-title=\"").append(gname)
+                               .append("\",").append(cname).append("\n").append(uu).append("\n");
+                            n++;
+                        }
+                    }
+                }
+            }
+            if (n == 0) {
+                send(ex, 404, "text/plain; charset=utf-8", "直播数据解析不出频道: " + abbrev(raw, 120));
+                return;
+            }
+            send(ex, 200, "audio/x-mpegurl; charset=utf-8", m3u.toString());
+        } catch (Exception e) {
+            try { send(ex, 502, "text/plain; charset=utf-8", "liveContent 失败: " + explain(e)); } catch (Exception ignore) { }
+        }
+    }
+
+    static String m3uEsc(String s) {
+        if (s == null) return "";
+        return s.replace("\"", "'").replace("\n", " ").replace("\r", "");
+    }
+
     static void handlePlay(com.sun.net.httpserver.HttpExchange ex, String path) {
         try {
             Map<String, String> q = query(ex.getRequestURI().getRawQuery());
@@ -2462,7 +2579,57 @@ public class Hub {
     }
 
     /** 解析接口形如 ?url=@|… 或直接返回 {"url":…}，尽量抠出直链。 */
+    /**
+     * 用户可配的解析接口：data/parse-apis.txt，一行一个模板，{url} 会被替换成待解析地址。
+     * 例：https://api.example.com/parse?url={url}
+     * 这是 parse=1 场景（Sao火/布布 这类只给网页地址的源）唯一的解，内置的 JSON 试探覆盖不到。
+     */
+    static java.util.List<String> parseApiTemplates() {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        try {
+            Path f = dataDir.resolve("parse-apis.txt");
+            if (!java.nio.file.Files.exists(f)) return out;
+            for (String line : java.nio.file.Files.readAllLines(f, StandardCharsets.UTF_8)) {
+                String t = line.trim();
+                if (t.isEmpty() || t.startsWith("#")) continue;
+                out.add(t);
+            }
+        } catch (Exception ignore) { }
+        return out;
+    }
+
     static String tryParseService(String url) {
+        // 1) 先按用户配置的解析接口试
+        for (String tpl : parseApiTemplates()) {
+            try {
+                String target = tpl.contains("{url}")
+                        ? tpl.replace("{url}", java.net.URLEncoder.encode(url, StandardCharsets.UTF_8))
+                        : tpl + java.net.URLEncoder.encode(url, StandardCharsets.UTF_8);
+                HttpRequest req = HttpRequest.newBuilder(java.net.URI.create(sanitizeForUri(target)))
+                        .timeout(Duration.ofSeconds(20))
+                        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                        .GET().build();
+                HttpResponse<String> resp = PROBE_HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+                String body = resp.body();
+                if (body == null) continue;
+                Object p = tryParse(body);
+                if (p instanceof Map) {
+                    String u = str(((Map<?, ?>) p).get("url"));
+                    if (u.startsWith("http")) {
+                        System.out.println("[play] 用户解析接口解出: " + abbrev(u, 100));
+                        return u;
+                    }
+                }
+                java.util.regex.Matcher mm = java.util.regex.Pattern
+                        .compile("https?:[^\\s\"'<>()\\]*?\\.(?:m3u8|mp4|flv|ts|mkv)(?:\\?[^\\s\"'<>()\\]*)?").matcher(body);
+                if (mm.find()) return mm.group();
+            } catch (Exception ignore) { }
+        }
+        // 2) 再把地址本身当解析接口试（原有行为）
+        return tryParseInline(url);
+    }
+
+    static String tryParseInline(String url) {
         try {
             String[] r = fetchOnce(url);
             // fetchOnce 只返回 {ok,msg}，这里要正文，单独再拉一次
@@ -2497,6 +2664,24 @@ public class Hub {
             String query = ex.getRequestURI().getRawQuery();
 
             // /proxy?url=xxx —— TVBox 同款透传，spider 用来绕 CORS
+            if (path.startsWith("/proxy") && query != null && query.contains("key=")) {
+                Map<String, String> p2 = query(query);
+                String key2 = p2.get("key");
+                if (key2 != null) {
+                    try {
+                        Object out = pool.get(key2).proxy(p2);
+                        if (out == null) { sendBytes(ex, 404, "text/plain", "spider.proxy returned null".getBytes(StandardCharsets.UTF_8)); return; }
+                        String[] ct = new String[]{"application/octet-stream"};
+                        byte[] body = proxyBody(out, ct);
+                        if (body == null) { sendBytes(ex, 502, "text/plain", "spider.proxy bad type".getBytes(StandardCharsets.UTF_8)); return; }
+                        sendBytes(ex, 200, ct[0], body);
+                        return;
+                    } catch (Exception e) {
+                        sendBytes(ex, 502, "text/plain", ("spider.proxy failed: " + explain(e)).getBytes(StandardCharsets.UTF_8));
+                        return;
+                    }
+                }
+            }
             if (path.startsWith("/proxy")) {
                 String target = null;
                 if (query != null) {

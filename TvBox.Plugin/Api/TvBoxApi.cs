@@ -185,6 +185,14 @@ namespace TvBox.Plugin.Api
     }
 
     [Unauthenticated]
+    [Route("/TvBox/Live", "GET", Summary = "直播源：把 hub /live/<站点> 的 M3U 转出来，Emby Live TV 直接填这个地址")]
+    public class LiveProxy : IReturnVoid
+    {
+        /// <summary>站点 key，如「网络直播」。不填则返回所有同步站点合并后的列表。</summary>
+        public string Key { get; set; }
+    }
+
+    [Unauthenticated]   // 播放器/Emby 校验都不会带 token
     [Route("/TvBox/Play", "GET,HEAD", Summary = "把 spider 的私有分集 id 解析成真地址（内部走 hub /play/）")]
     public class PlayResolve : IReturnVoid
     {
@@ -773,6 +781,70 @@ namespace TvBox.Plugin.Api
         /// 局域网客户端连不上；Emby 本来就在局域网可达，所以由它代跳一次。
         /// hub 内部调 Spider.playerContent(flag, id) —— TVBox 客户端播放前做的同一件事。
         /// </summary>
+        /// <summary>
+        /// 直播：hub 的 /live/&lt;key&gt; 已经产出标准 M3U，这里原样转出去（顺带处理 key 省略时合并多站）。
+        /// Emby 的「Live TV → 添加 M3U tuner」填 http://&lt;lan&gt;:8096/TvBox/Live?key=网络直播 即可。
+        /// </summary>
+        public object Any(LiveProxy req)
+        {
+            var cfg = P?.Configuration;
+            var hub = (cfg?.SpiderHubUrl ?? string.Empty).Trim().TrimEnd('/');
+            if (hub.Length == 0) return PlainText(400, "插件里没配 hub 地址");
+            try
+            {
+                var keys = new List<string>();
+                if (!string.IsNullOrWhiteSpace(req?.Key)) keys.Add(req.Key.Trim());
+                else
+                {
+                    // 同步名单在 hub 侧（hub.json），问它要
+                    try
+                    {
+                        using var hc = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+                        var js = hc.GetStringAsync(hub + "/api/sync-sites").GetAwaiter().GetResult();
+                        using var doc = System.Text.Json.JsonDocument.Parse(js);
+                        if (doc.RootElement.TryGetProperty("sites", out var arr) &&
+                            arr.ValueKind == System.Text.Json.JsonValueKind.Array)
+                            foreach (var el in arr.EnumerateArray())
+                                if (el.GetString() is string k2 && k2.Trim().Length > 0) keys.Add(k2.Trim());
+                    }
+                    catch { }
+                }
+                var sb = new System.Text.StringBuilder("#EXTM3U\n");
+                int added = 0;
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(90) };
+                foreach (var key in keys)
+                {
+                    try
+                    {
+                        var body = http.GetStringAsync(hub + "/live/" + Uri.EscapeDataString(key)).GetAwaiter().GetResult();
+                        if (string.IsNullOrWhiteSpace(body) || !body.Contains("#EXTINF")) continue;
+                        foreach (var line in body.Split('\n'))
+                        {
+                            if (line.StartsWith("#EXTINF")) { sb.Append(line.Replace("group-title=\"", "group-title=\"" + key + "·")); }
+                            else if (line.StartsWith("http")) { sb.Append(line); added++; }
+                            sb.Append('\n');
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        try { P?.Logger.Debug("[live] " + key + ": " + ex.Message); } catch { }
+                    }
+                }
+                if (added == 0) return PlainText(404, "没有可用的直播源（先确认站点有直播数据）");
+                return new LiveResult { Body = sb.ToString() };
+            }
+            catch (Exception ex)
+            {
+                return PlainText(500, "直播聚合失败: " + ex.Message);
+            }
+        }
+
+        /// <summary>直接把 M3U 文本写回去（Emby 的 Live TV 拉的是裸列表）。</summary>
+        public class LiveResult
+        {
+            public string Body { get; set; }
+        }
+
         public object Any(PlayResolve req)
         {
             var cfg = P?.Configuration;
