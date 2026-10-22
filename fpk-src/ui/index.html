@@ -264,6 +264,25 @@
   .kv2 .k2{color:var(--muted)}
   .syn{font-size:13px;line-height:1.7;color:var(--muted);white-space:pre-wrap;max-height:190px;overflow:auto;padding:0 18px 6px}
   .dlg-foot{display:flex;gap:8px;padding:0 18px 18px;flex-wrap:wrap}
+  /* ── 赞助 / 联系 ── */
+  .spon-btn{background:linear-gradient(135deg,#ffe4ef,#ffd0e2);color:#a3164f;border-color:transparent}
+  .spon-btn:hover{filter:brightness(1.04)}
+  html[data-theme="light"] .spon-btn{background:linear-gradient(135deg,#ffe4ef,#ffd0e2);color:#a3164f}
+  .spon-mask{position:fixed;inset:0;background:rgba(3,7,18,.62);z-index:1200;display:none;align-items:center;justify-content:center;padding:20px}
+  .spon-mask.show{display:flex}
+  .spon-box{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:0 24px 60px rgba(0,0,0,.45);padding:20px 22px;max-width:420px;width:100%;text-align:center}
+  .spon-head{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+  .spon-head h3{margin:0;font-size:16px}
+  .spon-head .x{margin-left:auto;border:none;background:transparent;color:var(--dim);font-size:20px;line-height:1;cursor:pointer}
+  .spon-tip{color:var(--dim);font-size:13px;margin:0 0 4px}
+  .spon-qr-row{display:flex;gap:18px;justify-content:center;margin-top:14px;flex-wrap:wrap}
+  .spon-qr{text-align:center}
+  .spon-qr p{font-size:13px;font-weight:600;margin:0 0 8px;color:var(--text)}
+  .spon-qr img{max-width:152px;max-height:210px;width:auto;height:auto;object-fit:contain;border-radius:var(--r-sm);border:1px solid var(--line);cursor:zoom-in;background:#fff}
+  .spon-full{position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:1300;display:none;align-items:center;justify-content:center}
+  .spon-full.show{display:flex}
+  .spon-full img{max-width:86%;max-height:86%;border-radius:var(--r);background:#fff}
+  .qq-num{font-size:28px;font-weight:800;letter-spacing:2px;color:var(--accent);padding:12px;border-radius:var(--r);background:var(--surface-2);cursor:pointer;user-select:all}
   .hint{color:var(--dim);font-size:12px;margin-top:10px;line-height:1.7}
   .hint code{color:var(--brand-2)}
   .pbar{height:9px;border-radius:var(--r-full);background:var(--line);overflow:hidden;margin-top:8px}
@@ -404,7 +423,7 @@
       <div>
         <h1>tvboxhub</h1>
         <div class="sub">TVBox 源 → Emby</div>
-        <div class="sub" style="opacity:.65">v0.16.3</div>
+        <div class="sub" style="opacity:.65">v0.17.0</div>
       </div>
     </div>
 
@@ -431,6 +450,8 @@
         <span class="title" id="paneTitle">概览</span>
         <span class="crumb">TVBox 点播源接入 Emby</span>
         <div class="spacer"></div>
+        <button class="tiny spon-btn" onclick="showSponsorModal()" title="赞助作者">💖 赞助</button>
+        <button class="tiny spon-btn" onclick="showContactModal()" title="联系作者">💬 联系</button>
         <button class="tiny" onclick="status()">刷新</button>
       </div>
     </header>
@@ -736,6 +757,37 @@
     </div><!-- /.wrap -->
   </div><!-- /.main -->
 </div><!-- /.app -->
+<div class="spon-mask" id="sponsorModal" onclick="if(event.target===this)this.classList.remove('show')">
+  <div class="spon-box" onclick="event.stopPropagation()">
+    <div class="spon-head">
+      <h3>💖 感谢您的支持</h3>
+      <button class="x" onclick="document.getElementById('sponsorModal').classList.remove('show')">✕</button>
+    </div>
+    <p class="spon-tip">您的赞助是我持续开发的最大动力</p>
+    <div class="spon-qr-row">
+      <div class="spon-qr"><p>支付宝</p><img src="images/sponsor_alipay.png" alt="支付宝" data-sponsor-img></div>
+      <div class="spon-qr"><p>微信</p><img src="images/sponsor_wechat.png" alt="微信" data-sponsor-img></div>
+    </div>
+    <p class="spon-tip" style="margin-top:12px;font-size:12px">点二维码可看大图</p>
+  </div>
+</div>
+<div class="spon-full" id="sponsorImgOverlay" onclick="if(event.target===this)this.classList.remove('show')">
+  <img id="sponsorImgFull" alt="赞助码" onclick="event.stopPropagation()">
+</div>
+
+<div class="spon-mask" id="contactModal" onclick="if(event.target===this)this.classList.remove('show')">
+  <div class="spon-box" style="max-width:360px" onclick="event.stopPropagation()">
+    <div class="spon-head">
+      <h3>💬 联系作者</h3>
+      <button class="x" onclick="document.getElementById('contactModal').classList.remove('show')">✕</button>
+    </div>
+    <p class="spon-tip">加 QQ 群：反馈问题 / 提需求 / 交流用法</p>
+    <div class="qq-num" id="qqNumber" onclick="copyQQ()">745565752</div>
+    <p class="spon-tip" style="margin-top:8px;font-size:12px">群号（点数字即可复制）</p>
+    <button class="tiny" onclick="copyQQ()" style="margin-top:6px">📋 复制群号</button>
+  </div>
+</div>
+
 <div class="mask" id="playerMask" onclick="if(event.target===this)closePlayer()">
   <div class="dlg" style="width:min(1000px,100%)">
     <div class="dlg-head">
@@ -1035,6 +1087,67 @@ function playDetail(idx, epVal) {
     toast('播放失败：' + e.message, 'err');
   });
 }
+
+// ══════════ 赞助 / 联系 ══════════
+function showSponsorModal() { document.getElementById('sponsorModal').classList.add('show'); }
+function showContactModal() { document.getElementById('contactModal').classList.add('show'); }
+
+function copyQQ() {
+  var qq = '745565752';
+  var el = document.getElementById('qqNumber');
+  function feedback(ok) {
+    if (!el) return;
+    var orig = '745565752';
+    el.textContent = ok ? '✓ 已复制' : '复制失败，请长按手动复制';
+    el.style.color = ok ? 'var(--ok,#22c55e)' : 'var(--bad,#ef4444)';
+    setTimeout(function () { el.textContent = orig; el.style.color = ''; }, 1800);
+  }
+  function manual() {
+    try {
+      var range = document.createRange();
+      range.selectNodeContents(el);
+      var sel = window.getSelection && window.getSelection();
+      if (sel) { sel.removeAllRanges(); sel.addRange(range); }
+    } catch (e) { }
+    feedback(false);
+  }
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(qq).then(function () { feedback(true); }).catch(manual);
+      return;
+    }
+  } catch (e) { }
+  // 老浏览器 / 非 https：execCommand 兜底
+  try {
+    var ta = document.createElement('textarea');
+    ta.value = qq; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    var ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (ok) { feedback(true); return; }
+  } catch (e) { }
+  manual();
+}
+
+function bindSponsorImgs() {
+  document.querySelectorAll('[data-sponsor-img]').forEach(function (img) {
+    img.onclick = function () {
+      var o = document.getElementById('sponsorImgOverlay');
+      var big = document.getElementById('sponsorImgFull');
+      if (!o || !big) return;
+      big.src = this.src;
+      o.classList.add('show');
+    };
+  });
+}
+
+document.addEventListener('keydown', function (e) {
+  if (e.key !== 'Escape') return;
+  ['sponsorImgOverlay', 'sponsorModal', 'contactModal'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.classList.remove('show');
+  });
+});
 
 var _dlgItem = null, _dlgIdx = -1;
 
@@ -2217,6 +2330,8 @@ try {
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initShell);
   else initShell();
 })();
+
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", bindSponsorImgs); else bindSponsorImgs();
 </script>
 </body>
 </html>
