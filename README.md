@@ -1,5 +1,28 @@
 # emby-tvbox
 
+## v0.2.1 — 实测 Emby 播放 + 补「转码临时目录」检测
+
+拿真实生成的 strm 在 Emby 里从头到尾验了一遍：
+
+| 检查 | 结果 |
+|---|---|
+| Emby 是否收录 | `Items/Counts` → 18,333 部电影，条目 Path 指向 `…/movies/骤雨/骤雨.strm` |
+| 元数据探测 | `PlaybackInfo`：`Protocol=Http`、`Container=hls`、`SupportsDirectPlay=True`、时长 23:57 |
+| 直连播放 | `/videos/8986/stream?static=true` → `206` + m3u8 内容 |
+| Emby 自带 ffmpeg 解码 | 电影与剧集各取 5 秒 → **exit=0，无任何报错** |
+| HLS 转码链路 | `master.m3u8`（Emby 生成，1080x606/30fps/h264+aac）→ variant → 分片 `200 video/mp2t 679,808 字节` |
+
+**过程中发现一个会让转码播放必挂的问题**：Emby 的 `var/transcoding-temp` 目录**不存在**，
+ffmpeg 报 `Unable to find a suitable output format for .../transcoding-temp/XXXX/XXXX` 后直接退出。
+已建目录并授权给 Emby 运行用户，重新验证分片拉取正常。
+
+因此「概览 → 配置检测」新增一项：
+
+- **转码临时目录**：显示路径 + 属主 + 可写性；不存在或不可写时给出 `mkdir -p` / `chown` 提示
+  （hub `/api/emby/status` 新增 `transcodingTemp` 字段：`{path, exists, writable, owner}`）
+
+现在概览一共 9 项检测，本机全部 ✓。
+
 ## v0.2.0 — 概览默认跑一遍配置检测
 
 进「概览」就自动把所有关键配置挨个查一遍并显示状态，不用再挨个页面点点看哪里没配。

@@ -1377,6 +1377,9 @@ public class Hub {
                 Map<String, Object> m = EmbyManager.status(pd);
                 m.put("ok", true);
                 m.put("programdata", pd);
+                // 转码临时目录：Emby 缺这个目录时，凡是需要转码的播放都会报
+                // 「Unable to find a suitable output format for .../transcoding-temp/xxx」
+                m.put("transcodingTemp", embyTranscodingTemp(pd));
                 sendJson(ex, 200, m);
                 return;
             }
@@ -2060,6 +2063,30 @@ public class Hub {
     }
 
     /** 读插件配置文件，判断 HubToken 是否已设置（只回布尔，不回值）。 */
+    /** Emby 转码临时目录是否存在/可写（缺了会导致所有转码播放失败）。 */
+    static Map<String, Object> embyTranscodingTemp(String programdata) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        java.util.List<String> cands = new java.util.ArrayList<>();
+        cands.add(programdata + "/var/transcoding-temp");
+        cands.add(programdata + "/transcoding-temp");
+        cands.add(programdata + "/cache/transcoding-temp");
+        for (String c : cands) {
+            try {
+                java.nio.file.Path p = java.nio.file.Path.of(c);
+                if (!java.nio.file.Files.isDirectory(p)) continue;
+                out.put("path", c);
+                out.put("exists", true);
+                out.put("writable", java.nio.file.Files.isWritable(p));
+                try { out.put("owner", java.nio.file.Files.getOwner(p).getName()); } catch (Exception ignore) { }
+                return out;
+            } catch (Exception ignore) { }
+        }
+        out.put("path", cands.get(0));
+        out.put("exists", false);
+        out.put("writable", false);
+        return out;
+    }
+
     static boolean pluginTokenConfigured(Map<String, Object> cfg) {
         Object p = cfg.get("ConfigFilePath");
         if (p == null) return false;

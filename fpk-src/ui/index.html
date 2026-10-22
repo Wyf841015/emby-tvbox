@@ -450,7 +450,7 @@
       <div class="brand-text">
         <div class="brand-line">
           <h1>TvBox For Emby</h1>
-          <span class="ver">v0.2.0</span>
+          <span class="ver">v0.2.1</span>
         </div>
         <div class="sub">点播源 → Emby</div>
       </div>
@@ -1230,6 +1230,18 @@ function runConfigCheck(manual) {
     } else {
       rows.push(cfgRow('✕', 'bad', 'Emby 插件', emb && emb.initialized === false ? '插件未加载' : '未安装到 Emby',
         '去「Emby 插件」页点安装'));
+    }
+
+    // 5.5) 转码临时目录：缺了的话，任何需要转码的播放都会 500
+    var tt = (emb && emb.transcodingTemp) || null;
+    if (tt && tt.exists && tt.writable) {
+      rows.push(cfgRow('✓', 'ok', '转码临时目录', tt.path + (tt.owner ? '（' + tt.owner + ' 可写）' : '')));
+    } else if (tt && tt.exists) {
+      rows.push(cfgRow('!', 'warn', '转码临时目录', tt.path + ' 存在但不可写',
+        'chown 给 Emby 运行用户，否则转码播放会失败'));
+    } else if (tt) {
+      rows.push(cfgRow('!', 'warn', '转码临时目录', '没找到 ' + (tt.path || ''),
+        'mkdir -p 该目录并 chown 给 Emby 用户；不建的话需要转码的片子一律播不了'));
     }
 
     // 6) Emby 地址（外网播放依赖它）
