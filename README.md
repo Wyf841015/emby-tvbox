@@ -1,5 +1,20 @@
 # emby-tvbox
 
+## v0.3.1 — 修「安装/升级插件提示 缺少令牌或请求不合法（CSRF 防护）」
+
+v0.3.0 的写操作闸门只认「本地令牌」和「网关注入的 `X-Trim-Userid`」，实测在真实访问路径下两项都拿不到：
+
+- 页面被浏览器缓存成旧版本 → 里面没有本次启动的 `<meta name="hub-token">` → 前端不带令牌
+- fnOS 网关转发到 socket 时**不注入** `X-Trim-Userid`，还会把 `Host` 改写成 `localhost`，所以「Origin == Host」在网关后面永远不成立
+
+修法（三道，缺一不可）：
+
+1. **同源证明改成看 Referer 页面路径**：只有本站页面会发 `Referer: …/app/tvboxhub/…`，跨站页面伪造不出来；直连 TCP 时仍用 `Origin == Host` 兜底
+2. **页面 `Cache-Control: no-store`**：页面里带着令牌，绝不能被缓存，否则升级一次就得手动强刷
+3. **拒绝时打一行原因**到 `info.log`：`[auth] 拒绝 POST /api/… token=无 gateway=false sameOrigin=false ct=… origin=… referer=… host=…`，下次不用再猜
+
+闸门实测六态：网关+同页 Referer 放行 / 仅 Referer 放行 / 跨站 Referer 拒绝 / 无来源拒绝 / 同源直连放行 / 跨站直连拒绝；只读 GET 不受影响。
+
 ## v0.3.0 — 全量安全审计与修复（P0×7 / P1×14 / P2×20）
 
 对一个自建接入口做完整审计后按级别全修。所有 P0 都做了**实际利用验证**再确认拦截。

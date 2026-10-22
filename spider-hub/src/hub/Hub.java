@@ -315,6 +315,9 @@ public class Hub {
                 }
             }
             if ("/".equals(path) || "/index.html".equals(path)) {
+                // 不能缓存：页面里带着本次启动的令牌，旧页面会让所有写操作被 CSRF 闸门拒掉
+                ex.getResponseHeaders().set("Cache-Control", "no-store, must-revalidate");
+                ex.getResponseHeaders().set("Pragma", "no-cache");
                 send(ex, 200, "text/html; charset=utf-8", ui());
                 return;
             }
@@ -400,6 +403,47 @@ public class Hub {
      * 浏览器必须先 preflight，而 ACAO 已删 → 真请求发不出去）；破坏性端点再要令牌。
      * 网关注入的 X-Trim-Userid 说明 fnOS 已经认证过这位用户，放行。
      */
+    /**
+     * 同源证明：浏览器自己发的同源请求可以通过，跨站伪造的过不来。
+     * <p>Sec-Fetch-Site 是「禁止修改的请求头」，脚本无法伪造；跨站表单 POST 会带
+     * 外部 Origin，对不上就拒。这样即使页面拿不到令牌（老页面被缓存、或走网关时
+     * 网关没透传 X-Trim-Userid），用户在界面上点按钮也不会被自己拦下来。
+     */
+    static boolean sameOriginProof(HttpExchange ex) {
+        try {
+            var hd = ex.getRequestHeaders();
+            String sfs = hd.getFirst("Sec-Fetch-Site");
+            if (sfs != null) {
+                String v = sfs.trim().toLowerCase();
+                if (v.equals("same-origin") || v.equals("none")) return true;
+                if (v.equals("cross-site")) return false;
+            }
+            // ① Referer 带我们自己的页面路径：只有本站页面会这么发。
+            //    跨站页面伪造不出来（它的 Referer 是它自己的地址）。
+            //    fnOS 网关会把 Host 改写成 localhost，所以「Origin == Host」在网关后面永远不成立，
+            //    这条路径检查才是网关场景真正可用的同源证明。
+            String ref = hd.getFirst("Referer");
+            if (ref != null) {
+                String r = ref.trim();
+                if (r.contains("/app/tvboxhub/") || r.endsWith("/app/tvboxhub")) return true;
+            }
+            // ② 直连 TCP（不经网关）时 Host 就是本站，Origin/Host 比对成立
+            String host = hd.getFirst("Host");
+            if (host == null || host.isBlank()) return false;
+            for (String hn : new String[]{"Origin", "X-Forwarded-Host"}) {
+                String raw = hd.getFirst(hn);
+                if (raw == null || raw.isBlank() || raw.equalsIgnoreCase("null")) continue;
+                try {
+                    String h = raw.contains("://") ? java.net.URI.create(raw.trim()).getAuthority() : raw.trim();
+                    if (h != null && h.equalsIgnoreCase(host.trim())) return true;
+                } catch (Exception ignore) { }
+            }
+            return false;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     static boolean apiWriteAllowed(HttpExchange ex, String path) {
         String method = ex.getRequestMethod() == null ? "GET" : ex.getRequestMethod().toUpperCase();
         if (method.equals("OPTIONS")) return false;
@@ -410,15 +454,33 @@ public class Hub {
         }
         boolean viaGateway = ex.getRequestHeaders().getFirst("X-Trim-Userid") != null;
         boolean tokenOk = tokenMatches(given);
+        boolean sameOrigin = sameOriginProof(ex);
+        boolean destructive = DESTRUCTIVE_APIS.contains(path);
 
+        boolean allowed;
         if (method.equals("GET") || method.equals("HEAD")) {
-            if (DESTRUCTIVE_APIS.contains(path)) return viaGateway || tokenOk;
-            return true;   // 只读 GET 不设门槛（数据本身不含凭据）
+            allowed = !destructive || viaGateway || tokenOk || sameOrigin;
+        } else if (destructive || viaGateway || tokenOk || sameOrigin) {
+            allowed = destructive ? (viaGateway || tokenOk || sameOrigin) : true;
+        } else {
+            // 既没有令牌、也没网关头、又拿不到同源证明：只接受 JSON POST
+            //（跨站表单只能发 urlencoded/multipart/纯文本，发不出 application/json）
+            String ct = ex.getRequestHeaders().getFirst("Content-Type");
+            allowed = ct != null && ct.toLowerCase().contains("application/json");
         }
-        if (DESTRUCTIVE_APIS.contains(path)) return viaGateway || tokenOk;
-        if (viaGateway || tokenOk) return true;
-        String ct = ex.getRequestHeaders().getFirst("Content-Type");
-        return ct != null && ct.toLowerCase().contains("application/json");
+        if (!allowed) {
+            // 打一行原因，下次「按钮点了报 CSRF」能直接看出是哪一项没过
+            System.out.println("[auth] 拒绝 " + method + " " + path
+                    + " token=" + (given == null ? "无" : (tokenOk ? "对" : "错"))
+                    + " gateway=" + viaGateway
+                    + " sameOrigin=" + sameOrigin
+                    + " ct=" + ex.getRequestHeaders().getFirst("Content-Type")
+                    + " sfs=" + ex.getRequestHeaders().getFirst("Sec-Fetch-Site")
+                    + " origin=" + ex.getRequestHeaders().getFirst("Origin")
+                    + " referer=" + ex.getRequestHeaders().getFirst("Referer")
+                    + " host=" + ex.getRequestHeaders().getFirst("Host"));
+        }
+        return allowed;
     }
 
     static void handleApi(HttpExchange ex, String path) throws Exception {
