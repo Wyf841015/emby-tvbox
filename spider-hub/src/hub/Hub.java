@@ -627,6 +627,13 @@ public class Hub {
                 m.put("pluginDll", pluginDll == null ? null
                         : (Files.isRegularFile(pluginDll) ? pluginDll.toString() : "缺失"));
                 m.put("historyCount", history.size());
+                // 依赖用户手工放置的文件：状态直接给前端，省得用户猜有没有生效
+                Map<String, Object> pending = new LinkedHashMap<>();
+                pending.put("biliCookie", Files.isRegularFile(dataDir.resolve("file").resolve("TVBox").resolve("bili_cookie.txt")));
+                pending.put("parseApis", Files.isRegularFile(dataDir.resolve("parse-apis.txt")));
+                pending.put("biliCookiePath", dataDir.resolve("file").resolve("TVBox").resolve("bili_cookie.txt").toString());
+                pending.put("parseApisPath", dataDir.resolve("parse-apis.txt").toString());
+                m.put("pending", pending);
                 sendJson(ex, 200, m);
                 return;
             }
@@ -2250,7 +2257,8 @@ public class Hub {
             "MaxPagesPerCategory", "MaxItemsPerRun", "Concurrency", "TimeoutSeconds",
             "RequestDelayMs", "ExcludeCloudDrive", "OutputRoot", "EmbyBaseUrl",
             "Referer", "UserAgent", "UseProxy", "AllowPrivateHosts", "CleanupOrphans",
-            "EnableScheduledSync", "SyncIntervalHours", "SpiderHubUrl", "ConfigFilePath",
+                        // ConfigFilePath 是插件侧只读回显字段，不该允许写，已从白名单移除
+            "EnableScheduledSync", "SyncIntervalHours", "SpiderHubUrl",
             // 下面 12 项以前漏在白名单外：Emby 插件页能改，hub 界面改了会被静默忽略
             "VerifyPlayUrl", "VerifyMaxEpisodes", "DetailBatchSize", "ResolveIndirectUrl",
             "WriteNfo", "DownloadPoster", "PosterMaxMb", "IncrementalSync", "IncrementalHours",

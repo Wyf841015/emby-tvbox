@@ -491,7 +491,7 @@
       <div class="brand-text">
         <div class="brand-line">
           <h1>TvBox For Emby</h1>
-          <span class="ver">v0.5.1</span>
+          <span class="ver">v0.5.2</span>
         </div>
         <div class="sub">点播源 → Emby</div>
       </div>
@@ -587,6 +587,7 @@
         <button class="primary" onclick="guideOpen()">重新打开使用向导</button>
         <button onclick="goto('config')">填配置</button>
         <button onclick="goto('emby')">装插件</button>
+        <button onclick="guideOpenEmby()">打开 Emby</button>
       </div>
     </div>
 
@@ -604,6 +605,12 @@
         <div class="k">④ 播放</div><div class="v">Emby 播放时，插件按需补 Referer/UA、重写 HLS 分片地址，跳过防盗链。</div>
         <div class="k">不影响原库</div><div class="v">只在输出目录里写文件，不会改你已有的影视文件。</div>
       </div>
+    </div>
+
+    <div class="panel">
+      <h2>还需要你自己准备的东西（可选）</h2>
+      <div class="hint">下面这些 hub 没法替你生成：缺了不影响基本使用，只是对应站点用不了。</div>
+      <div id="guidePending" style="margin-top:8px"><div class="empty" style="padding:10px 0">正在检测…</div></div>
     </div>
 
     <div class="panel">
@@ -1379,6 +1386,18 @@ function runConfigCheck(manual) {
         '去「配置」页填 ConfigUrl'));
     }
 
+    // 播放流模式：redirect 会绕开 NAS 中转，防盗链源直接播不了 —— 这个坑值得单独列一行
+    var sm = String(cfg.StreamMode || 'proxy').toLowerCase();
+    if (sm === 'redirect') {
+      rows.push(cfgRow('!', 'bad', '播放流模式',
+        'redirect：播放时直接 302 到源站，不经过 NAS', '防盗链的站会播不了，建议改 proxy 或 auto'));
+    } else if (sm === 'auto') {
+      rows.push(cfgRow('✓', 'ok', '播放流模式',
+        'auto：' + (String(cfg.RedirectHosts || '').trim() ? '允许 302：' + cfg.RedirectHosts : '没填允许 302 的域名 → 等同于全走代理')));
+    } else {
+      rows.push(cfgRow('✓', 'ok', '播放流模式', 'proxy：全部经 NAS 中转（可补 Referer/UA、重写 HLS 分片）'));
+    }
+
     // 2) spider 引擎
     var loaded = (st && st.pool && st.pool.cached) || 0;
     if (stats.total > 0) {
@@ -1746,7 +1765,7 @@ var WZ_STEPS = [
         '插件负责补 Referer/UA、重写 HLS 分片，解决防盗链播放问题。'],
     go: 'emby' },
   { t: '第 5 步 · 跑一次同步',
-    l: ['到「同步」点开始，等它跑完（第一次比较慢）。',
+    l: ['到「同步」点开始，等它跑完（第一次比较慢）。同步记录保存在 Emby 插件里，所以<b>插件没装/连不上时这里读不到记录</b>，不影响实际同步。',
         '跑完后在 Emby 里把输出目录的 <code>movies/</code> 和 <code>tv/</code> 分别添加为媒体库，再「扫描媒体库」就能看到片子。'],
     go: 'sync' },
   { t: '完成',
@@ -1771,7 +1790,8 @@ function guideCheck(manual) {
   var jobs = [
     api('api/config').catch(function () { return null; }),
     api('api/sync-sites').catch(function () { return null; }),
-    api('api/emby/status').catch(function () { return null; })
+    api('api/emby/status').catch(function () { return null; }),
+    api('api/status').catch(function () { return null; })
   ];
   Promise.all(jobs).then(function (r) {
     var wrap = r[0] || {};
@@ -1781,7 +1801,9 @@ function guideCheck(manual) {
     var sites = ss.sites || [];
     _gs.syncCount = (typeof ss.count === 'number') ? ss.count : (Array.isArray(sites) ? sites.length : 0);
     _gs.pluginInstalled = !!(r[2] && r[2].installed);
+    _gs.pending = (r[3] && r[3].pending) || null;
     guideRender();
+    guideRenderPending();
     var ts = document.getElementById('guideTs');
     if (ts) ts.textContent = '检测于 ' + new Date().toLocaleTimeString();
   }).catch(function (e) {
@@ -1805,7 +1827,10 @@ function guideRender() {
     { ok: done.sites, name: '选择要同步的站点', desc: done.sites ? ('已选 ' + _gs.syncCount + ' 个站点') : '一个站点都没勾 —— 同步不会产出任何内容', go: 'sites' },
     { ok: done.output, name: '设置输出目录', desc: done.output ? ('输出到：' + cfg.OutputRoot) : '还没设输出目录（留空会用 Emby 数据目录下的 tvbox/）', go: 'config' },
     { ok: done.plugin, name: '安装 Emby 插件', desc: done.plugin ? '插件已安装' : '没装插件：播放会被防盗链挡住', go: 'emby' },
-    { ok: done.sync, name: '跑一次同步', desc: done.sync ? ('上次同步：' + String(cfg.LastSyncSummary || cfg.LastSyncUtc).slice(0, 60)) : '还没同步过', go: 'sync' },
+    { ok: done.sync, name: '跑一次同步',
+      desc: done.sync ? ('上次同步：' + String(cfg.LastSyncSummary || cfg.LastSyncUtc).slice(0, 60))
+        : (_gs.pluginInstalled ? '还没同步过' : '读不到同步记录：插件未装或未连接（同步本身可能已跑过）'),
+      go: 'sync' },
     { ok: false, name: '在 Emby 里添加媒体库并播放', desc: '把输出目录的 movies/ 和 tv/ 加成媒体库 → 扫描媒体库 → 在首页就能看到片子（这步只能在 Emby 里做）', go: 'emby' }
   ];
   var alarm = [];
@@ -1821,6 +1846,55 @@ function guideRender() {
       + (it.go ? '<div class="ga"><button class="tiny" onclick="guideGo(\'' + it.go + '\')">去处理</button></div>' : '')
       + '</div>';
   }).join('');
+}
+
+// 需要用户自己放的文件（hub 只报状态）
+function guideRenderPending() {
+  var box = document.getElementById('guidePending');
+  if (!box) return;
+  var p = _gs.pending || {};
+  var rows = [
+    { ok: !!p.biliCookie, name: 'B 站 Cookie',
+      desc: p.biliCookie ? ('已放置：' + (p.biliCookiePath || ''))
+        : ('B 站系约 12 个源需要它；把 cookie 写进 ' + (p.biliCookiePath || 'data/file/TVBox/bili_cookie.txt')) },
+    { ok: !!p.parseApis, name: '外部解析接口',
+      desc: p.parseApis ? ('已放置：' + (p.parseApisPath || ''))
+        : ('「Sao火」「布布」这类 parse=1 的站需要；一行一个模板写到 ' + (p.parseApisPath || 'data/parse-apis.txt')) }
+  ];
+  box.innerHTML = rows.map(function (it) {
+    return '<div class="guide-step ' + (it.ok ? 'ok' : 'no') + '">'
+      + '<div class="gi">' + (it.ok ? '✓' : '○') + '</div>'
+      + '<div class="gt"><b>' + esc(it.name) + '</b><div class="hint">' + esc(it.desc) + '</div></div>'
+      + '</div>';
+  }).join('')
+    + '<div class="hint" style="margin-top:10px">还有 97 个站的 spider 类打包在 dex 里，本机跑不起来（缺 dex2jar），这些站在「站点」页会显示不可用 —— 不是你的配置问题。</div>';
+}
+
+// 打开 Emby：优先用配置里的地址；但配置里常见 127.0.0.1/localhost，
+// 那种地址在手机/别的电脑上点开是「本机」→ 必然打不开，所以要换回当前访问用的主机名
+function guideOpenEmby() {
+  var cfg = _gs.cfg || {};
+  var base = String(cfg.EmbyBaseUrl || '').trim();
+  var pageHost = location.hostname;
+  var pageIsLocal = /^(localhost|127\.0\.0\.1|::1)$/i.test(pageHost);
+  var m = base.match(/^(https?):\/\/([^\/:]+)(:\d+)?/i);
+  if (m) {
+    var h = m[2];
+    if (!pageIsLocal && /^(localhost|127\.0\.0\.1|::1)$/i.test(h)) {
+      base = m[1] + '://' + pageHost + (m[3] || ':8096');
+    }
+  } else {
+    base = location.protocol + '//' + pageHost + ':8096';
+  }
+  base = base.replace(/\/+$/, '');
+  // 先探一下通不通：不通就别开一个白屏标签页，直接把试过的地址写出来让人去配
+  var probe = base + '/System/Info/Public';
+  fetch(probe, { cache: 'no-store' }).then(function (r) {
+    if (r && r.ok) { window.open(base + '/web/index.html', '_blank'); return; }
+    toast('打不开 Emby：' + probe + ' 返回 ' + (r ? r.status : '?') + '；请到「配置」里填正确的 Emby 访问地址', 'bad');
+  }).catch(function () {
+    toast('连不上 Emby（' + probe + '）；请到「配置」里填 Emby 访问地址', 'bad');
+  });
 }
 
 // 从清单直接跳到对应页
@@ -2917,6 +2991,7 @@ try {
   window.guideNext = guideNext;
   window.guideCheck = guideCheck;
   window.guideGo = guideGo;
+  window.guideOpenEmby = guideOpenEmby;
 
   // ── 主题 ──
   function applyTheme(theme) {
