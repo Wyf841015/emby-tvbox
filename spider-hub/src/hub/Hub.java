@@ -1395,7 +1395,9 @@ public class Hub {
                             final String pdR = str(settings.get("embyPath"));
                             final String baseR = embyBase();
                             Thread th = new Thread(() -> {
+                                restartBegin();
                                 Map<String, Object> rr = EmbyManager.restartEmby(pdR, baseR);
+                                restartFinish(rr);
                                 record("重启 Emby", pdR, Boolean.TRUE.equals(rr.get("ok")), String.valueOf(rr.get("msg")), 0);
                                 System.out.println("[restart] " + rr);
                                 settings.remove("embyBaseUrl");
@@ -1547,6 +1549,7 @@ public class Hub {
                 m.put("transcodingTemp", embyTranscodingTemp(pd));
                 // 实时探测（不走 embyBase() 的缓存），前端靠它判断「重启好了没」
                 m.put("serverUp", EmbyManager.serverUpNow(null));
+                m.put("restart", restartState());   // 前端弹窗靠这个判断「重启完成」
                 sendJson(ex, 200, m);
                 return;
             }
@@ -1622,7 +1625,9 @@ public class Hub {
                         final String pdR = pd;
                         final String baseR = embyBase();
                         Thread th = new Thread(() -> {
+                            restartBegin();
                             Map<String, Object> rr = EmbyManager.restartEmby(pdR, baseR);
+                            restartFinish(rr);
                             record("重启 Emby", pdR, Boolean.TRUE.equals(rr.get("ok")), String.valueOf(rr.get("msg")), 0);
                             System.out.println("[restart] " + rr);
                             settings.remove("embyBaseUrl");
@@ -2264,6 +2269,51 @@ public class Hub {
             "WriteNfo", "DownloadPoster", "PosterMaxMb", "IncrementalSync", "IncrementalHours",
             "StreamMode", "RedirectHosts", "MaxDeletePerRun"
     };
+
+    /**
+     * 重启 Emby 的进度。前端弹窗「正在重启 Emby 服务器」靠它决定何时关闭 ——
+     * 用 serverUp 猜会出现「刚点完就显示已恢复」的假成功（旧进程还没死）。
+     */
+    static volatile long restartStartedAt = 0L;
+    static volatile long restartFinishedAt = 0L;
+    static volatile boolean restartDone = false;
+    static volatile boolean restartOk = false;
+    static volatile String restartMsg = "";
+    static volatile String restartManager = "";
+
+    static void restartBegin() {
+        restartStartedAt = System.currentTimeMillis();
+        restartFinishedAt = 0L;
+        restartDone = false;
+        restartOk = false;
+        restartMsg = "";
+        restartManager = "";
+    }
+
+    static synchronized void restartFinish(Map<String, Object> rr) {
+        if (rr != null) {
+            restartOk = Boolean.TRUE.equals(rr.get("ok"));
+            restartMsg = str(rr.get("msg"));
+            restartManager = str(rr.get("manager"));
+        }
+        restartFinishedAt = System.currentTimeMillis();
+        restartDone = true;
+    }
+
+    static Map<String, Object> restartState() {
+        Map<String, Object> m = new LinkedHashMap<>();
+        boolean started = restartStartedAt > 0;
+        m.put("active", started && !restartDone);
+        m.put("done", restartDone);
+        m.put("ok", restartOk);
+        m.put("msg", restartMsg);
+        m.put("manager", restartManager);
+        m.put("startedAt", restartStartedAt);
+        m.put("finishedAt", restartFinishedAt);
+        m.put("seconds", !started ? 0
+                : (int) (((restartDone ? restartFinishedAt : System.currentTimeMillis()) - restartStartedAt) / 1000));
+        return m;
+    }
 
     /** 读插件配置。插件不可达/未安装 → 返回 null。 */
     static Map<String, Object> pluginConfig() {

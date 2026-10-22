@@ -371,6 +371,18 @@
   .guide-step .gt b{font-size:13.5px;font-weight:650}
   .guide-step .gt .hint{margin-top:3px}
   .guide-step .ga{flex:0 0 auto}
+  /* 重启 Emby 弹窗：三个点跳动 + 完成对勾 */
+  .restart-spin{display:flex;align-items:center;justify-content:center;gap:7px;height:34px}
+  .restart-spin span{width:10px;height:10px;border-radius:50%;background:var(--brand);opacity:.35;
+    animation:rsBounce 1.05s infinite ease-in-out}
+  .restart-spin span:nth-child(2){animation-delay:.16s}
+  .restart-spin span:nth-child(3){animation-delay:.32s}
+  @keyframes rsBounce{0%,80%,100%{transform:translateY(0);opacity:.3}40%{transform:translateY(-7px);opacity:1}}
+  .restart-icon{width:44px;height:44px;margin:0 auto;border-radius:50%;display:grid;place-items:center;
+    font-size:22px;font-weight:800;color:#fff;background:var(--ok-text)}
+  .restart-icon.bad{background:var(--bad-text)}
+  #restartMask.ready #restartTitle{color:var(--ok-text)}
+  #restartMask.ready.bad #restartTitle{color:var(--bad-text)}
   .wz-list{margin:8px 0 0;padding-left:18px}
   .wz-list li{margin:6px 0}
   /* 长 URL / 站点名不能把清单撑出横向滚动条 */
@@ -556,7 +568,7 @@
         <div class="brand-text">
           <div class="brand-line">
             <h1>TvBox For Emby</h1>
-            <span class="ver">v0.5.6</span>
+            <span class="ver">v0.5.7</span>
           </div>
           <div class="sub"><span id="paneTitle">概览</span></div>
         </div>
@@ -2493,6 +2505,11 @@ function embyStatus() {
   var hint = document.getElementById('pluginHint');
   if (!pd) { toast('先选或填 Emby 数据目录', 'bad'); return; }
   api('api/emby/status?programdata=' + encodeURIComponent(pd)).then(function (d) {
+    // 刷新页面 / 重新进 Emby 页时如果后台正在重启，直接把弹窗接上，别让用户以为卡住了
+    if (d && d.restart && d.restart.active) {
+      var rm = document.getElementById('restartMask');
+      if (rm && !rm.classList.contains('show')) waitEmbyBack();
+    }
     if (d.installed) {
       hint.textContent = '已安装 · ' + d.size + ' 字节 · ' + d.mtime;
       hint.style.color = 'var(--ok-text)';
@@ -2509,34 +2526,112 @@ function embyStatus() {
   }).catch(function (e) { toast('查询失败: ' + e, 'bad'); });
 }
 
-// 装完/更新完插件后轮询 Emby 是否已经起来（hub 会自己重启它）
-function waitEmbyBack(limitMs) {
+// 装完/更新完插件后：弹窗提示「正在重启 Emby 服务器」，
+// 直到后台真的检测到恢复才关闭（后端 /api/emby/status 的 restart 字段说了算，
+// 不用 serverUp 猜 —— 刚点完时旧进程还活着，会假成功）。
+var _rsTimer = null, _rsPoll = null, _rsT0 = 0, _rsAuto = null;
+
+function restartModalShow() {
+  var m = document.getElementById('restartMask');
+  if (!m) return;
+  m.classList.add('show');
+  m.classList.remove('ready', 'bad');
+  var sp = document.getElementById('restartSpin');
+  var ic = document.getElementById('restartIcon');
+  if (sp) sp.style.display = 'flex';
+  if (ic) ic.style.display = 'none';
+  var foot = document.getElementById('restartFoot');
+  if (foot) foot.style.display = 'none';
+  var t = document.getElementById('restartTitle');
+  if (t) t.textContent = '正在重启 Emby 服务器';
+  var note = document.getElementById('restartNote');
+  if (note) note.textContent = '重启期间 Emby 会短暂无法访问；检测到恢复后这个窗口会自动关闭。';
+  var msg = document.getElementById('restartMsg');
+  if (msg) msg.textContent = '插件已写入，正在重启 Emby 进程…';
+}
+
+function restartModalHide() {
+  var m = document.getElementById('restartMask');
+  if (m) m.classList.remove('show', 'ready', 'bad');
+  if (_rsTimer) { clearInterval(_rsTimer); _rsTimer = null; }
+  if (_rsPoll) { clearInterval(_rsPoll); _rsPoll = null; }
+  if (_rsAuto) { clearTimeout(_rsAuto); _rsAuto = null; }
+}
+
+function restartDone(ok, seconds, msg, manager) {
+  if (_rsTimer) { clearInterval(_rsTimer); _rsTimer = null; }
+  if (_rsPoll) { clearInterval(_rsPoll); _rsPoll = null; }
+  var m = document.getElementById('restartMask');
+  var sp = document.getElementById('restartSpin');
+  var ic = document.getElementById('restartIcon');
+  var t = document.getElementById('restartTitle');
+  var e = document.getElementById('restartElapsed');
+  var n = document.getElementById('restartNote');
+  var foot = document.getElementById('restartFoot');
   var hint = document.getElementById('pluginHint');
+  var sec = (typeof seconds === 'number' && seconds > 0) ? seconds : Math.round((Date.now() - _rsT0) / 1000);
+  if (sp) sp.style.display = 'none';
+  if (ic) { ic.style.display = 'grid'; ic.textContent = ok ? '✓' : '✕'; ic.className = 'restart-icon' + (ok ? '' : ' bad'); }
+  if (m) { m.classList.add('ready'); if (!ok) m.classList.add('bad'); }
+  if (t) t.textContent = ok ? 'Emby 已重启完成' : '重启未成功';
+  if (e) e.textContent = '用时 ' + sec + ' 秒';
+  if (n) n.textContent = ok
+    ? (manager ? ('重启方式：' + manager + (msg ? ' ｜ ' + msg : '')) : '插件已生效，可以直接同步了。')
+    : ('请看 hub 日志 / fnOS 应用中心：' + (msg || '未能确认 Emby 已恢复'));
+  if (foot) foot.style.display = ok ? 'none' : 'flex';
+  if (hint) {
+    hint.textContent = (ok ? '✅ 插件已生效 · Emby 已重启（' + sec + ' 秒）' : '⚠️ ' + (msg || '重启未成功，请手动检查'));
+    hint.style.color = ok ? 'var(--ok-text)' : 'var(--warn-text)';
+  }
+  try { embyStatus(); } catch (err) { }
+  toast(ok ? ('Emby 已重启完成（' + sec + ' 秒）') : 'Emby 重启未成功，请检查', ok ? 'ok' : 'bad');
+  if (ok) _rsAuto = setTimeout(restartModalHide, 1600);   // 成功：停 1.6 秒让人看清再关
+}
+
+function waitEmbyBack(limitMs) {
   var pdEl = document.getElementById('embyPath');
-  var t0 = Date.now(), deadline = t0 + (limitMs || 150000);
-  function tick() {
-    var sec = Math.round((Date.now() - t0) / 1000);
-    api('api/emby/status?programdata=' + encodeURIComponent(pdEl.value.trim() || ''))
+  var limit = limitMs || 240000;
+  if (_rsTimer) { clearInterval(_rsTimer); _rsTimer = null; }
+  if (_rsPoll) { clearInterval(_rsPoll); _rsPoll = null; }
+  _rsT0 = Date.now();
+  restartModalShow();
+  _rsTimer = setInterval(function () {
+    var el = document.getElementById('restartElapsed');
+    if (el) el.textContent = '已等待 ' + Math.round((Date.now() - _rsT0) / 1000) + ' 秒';
+  }, 1000);
+
+  var sawRestartFlag = false;
+  _rsPoll = setInterval(function () {
+    var elapsed = Date.now() - _rsT0;
+    if (elapsed > limit) {
+      restartDone(false, Math.round(elapsed / 1000), '超过 ' + Math.round(limit / 1000) + ' 秒仍未检测到恢复，请到 fnOS 应用中心看 Emby 状态');
+      return;
+    }
+    api('api/emby/status?programdata=' + encodeURIComponent(pdEl ? pdEl.value.trim() : ''))
       .then(function (d) {
-        if (d && d.serverUp) {
-          toast('Emby 已重启完成（' + sec + ' 秒）', 'ok');
-          hint.textContent = '✅ 插件已生效 · Emby 已重启（' + sec + ' 秒）';
-          hint.style.color = 'var(--ok-text)';
-          embyStatus();
+        var r = d && d.restart;
+        if (r) {
+          if (r.active) {
+            sawRestartFlag = true;
+            var msgEl = document.getElementById('restartMsg');
+            if (msgEl) msgEl.textContent = r.manager
+              ? ('正在通过「' + r.manager + '」重启 Emby…')
+              : '正在重启 Emby 进程…';
+            return;
+          }
+          if (r.done) { restartDone(!!r.ok, r.seconds, r.msg, r.manager); return; }
+        }
+        // 兜底：老版本 hub 没有 restart 字段 → 退回 serverUp 判断（至少等 8 秒，避开旧进程还没死）
+        if (!r && d && d.serverUp && elapsed > 8000) {
+          restartDone(true, Math.round(elapsed / 1000), '（按 Emby 端口恢复判断）', '');
           return;
         }
-        if (Date.now() < deadline) {
-          hint.textContent = '⏳ 正在重启 Emby…（' + sec + ' 秒）';
-          hint.style.color = 'var(--warn-text)';
-          setTimeout(tick, 2500);
-        } else {
-          hint.textContent = '⚠️ 重启超过 150 秒仍未恢复，请到 fnOS 应用中心看一下 Emby';
-          hint.style.color = 'var(--warn-text)';
+        if (!r && sawRestartFlag && d && d.serverUp) {
+          restartDone(true, Math.round(elapsed / 1000), '', '');
         }
       })
-      .catch(function () { if (Date.now() < deadline) setTimeout(tick, 3000); });
-  }
-  setTimeout(tick, 2500);
+      .catch(function () { /* hub 自己在重启时不会被影响，忽略单次失败 */ });
+  }, 1500);
 }
 
 function selfUpdatePlugin() {
@@ -3183,6 +3278,24 @@ if (document.readyState === "loading") document.addEventListener("DOMContentLoad
       <button type="button" id="wzPrev" onclick="guidePrev()">上一步</button>
       <button type="button" class="primary" id="wzNext" onclick="guideNext()">下一步</button>
       <button type="button" onclick="guideClose(true)">跳过</button>
+    </div>
+  </div>
+</div>
+<!-- ══════════ 重启 Emby 提示（后台检测到恢复后自动关闭） ══════════ -->
+<div class="mask" id="restartMask" style="z-index:1280">
+  <div class="dlg" style="width:min(440px,100%)" role="alertdialog" aria-live="polite">
+    <div class="dlg-head">
+      <h3 id="restartTitle">正在重启 Emby 服务器</h3>
+    </div>
+    <div class="dlg-body" style="display:block;text-align:center;padding:20px 18px">
+      <div class="restart-spin" id="restartSpin"><span></span><span></span><span></span></div>
+      <div class="restart-icon" id="restartIcon" style="display:none">✓</div>
+      <div id="restartMsg" style="font-size:13.5px;line-height:1.7;margin-top:10px">正等待 Emby 恢复…</div>
+      <div class="hint" id="restartElapsed" style="margin-top:8px">已等待 0 秒</div>
+      <div class="hint" id="restartNote" style="margin-top:10px">重启期间 Emby 会短暂无法访问；检测到恢复后这个窗口会自动关闭。</div>
+    </div>
+    <div class="dlg-foot" id="restartFoot" style="display:none">
+      <button type="button" class="primary" onclick="restartModalHide()">关闭</button>
     </div>
   </div>
 </div>

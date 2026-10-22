@@ -1,5 +1,38 @@
 # emby-tvbox
 
+## v0.5.7 — 重启 Emby 时弹窗提示，后台检测到恢复才自动关闭
+
+以前只有 `pluginHint` 一行小字在跳秒数，容易以为界面卡住了。现在改成弹窗。
+
+**后端（hub）**
+
+新增重启状态跟踪（`restartStartedAt / restartDone / restartOk / restartMsg / restartManager`），
+安装插件、插件自更新两条重启路径都会 `restartBegin()` → `restartEmby()` → `restartFinish()`，
+`/api/emby/status` 多返回一个字段：
+
+```json
+"restart": {"active":true,"done":false,"ok":false,"msg":"","manager":"",
+            "startedAt":...,"finishedAt":0,"seconds":19}
+```
+
+**前端**
+
+- 点击安装 / 自更新后立刻弹出「正在重启 Emby 服务器」：三个点跳动 + `已等待 N 秒`
+- 每 1.5 秒查一次 `/api/emby/status`，**以 `restart.done` 为准**（不再用 `serverUp` 猜 ——
+  刚点完那一刻旧进程还活着，会立刻"成功"）
+- 成功 → 标题变绿「Emby 已重启完成」+ ✓ + `用时 N 秒` + 重启方式（如「fnOS 应用中心（EmbyServer4-9）」），**1.6 秒后自动关闭**
+- 失败/超时（240 秒）→ 标题变红「重启未成功」+ ✕ + 原因，**不自动关**，给「关闭」按钮
+- **中途刷新页面也能接上**：`embyStatus()` 发现 `restart.active` 就直接弹出，秒数接着算
+
+**实测**
+
+| 场景 | 结果 |
+|---|---|
+| 点安装触发真实重启 | t+3s 弹窗出现 → 等待 19 秒 → 「Emby 已重启完成 用时 19 秒」→ 自动关闭 |
+| 成功态样式 | 标题 `rgb(18,134,74)`、✓、说明「重启方式：fnOS 应用中心（EmbyServer4-9） ｜ 插件已生效」、无关闭按钮 |
+| 失败态样式 | 标题 `rgb(198,43,49)`、✕、bad 类、原因文本、关闭按钮出现、2 秒后不自动关 |
+| 中途刷新页面 | 刷新后弹窗自动接上，`已等待 5 秒` 接着算 → 23 秒完成 → 自动关闭 |
+
 ## v0.5.6 — 侧边栏可收起，移动端默认收起
 
 标题卡片最左边加了一个 ☰ 按钮（展开时显示 ✕），随时收放侧边栏。
