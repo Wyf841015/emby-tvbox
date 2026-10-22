@@ -491,7 +491,7 @@
       <div class="brand-text">
         <div class="brand-line">
           <h1>TvBox For Emby</h1>
-          <span class="ver">v0.5.3</span>
+          <span class="ver">v0.5.4</span>
         </div>
         <div class="sub">点播源 → Emby</div>
       </div>
@@ -644,7 +644,7 @@
         <span class="hint" style="margin:0">网盘类源（继承 catvod 的 Pan 基类）没账号拿不到直链，默认解析阶段就排除</span>
       </div>
       <div class="row" style="margin-bottom:8px;gap:8px;flex-wrap:wrap">
-        <button class="primary" onclick="bulkSync(true)">把可用站点全部加入同步</button>
+        <button class="primary" onclick="bulkSync(true)">把可播站点全部加入同步</button>
         <button class="danger" onclick="bulkSync(false)">全部移出同步</button>
         <span class="hint" style="margin:0" id="syncSummaryHint">—</span>
       </div>
@@ -2043,8 +2043,12 @@ function renderSites() {
   if (p2) p2.textContent = nosync.length;
   var hint = document.getElementById('syncSummaryHint');
   if (hint) {
+    var playableN = sites.filter(function (s) { return s.playable === true; }).length;
+    var untestedN = sites.filter(function (s) { return !s.netdisk && (s.playable === null || s.playable === undefined); }).length;
     hint.textContent = sites.length
-      ? ('共 ' + sites.length + ' 个站点 · 已加入同步 ' + sites.filter(function (s) { return s.sync; }).length + ' 个（点行末按钮切换）')
+      ? ('共 ' + sites.length + ' 个站点 · 可播 ' + playableN + ' 个'
+         + (untestedN ? ' · 未验证 ' + untestedN + ' 个（点「批量探测当前」）' : '')
+         + ' · 已加入同步 ' + sites.filter(function (s) { return s.sync; }).length + ' 个')
       : '';
   }
 
@@ -2104,19 +2108,32 @@ function setSiteSync(key, on) {
   }).catch(function (e) { toast('失败: ' + (e && e.message ? e.message : e), 'bad'); });
 }
 
-// 批量：把所有「可用」站点加入同步，或全部移出
+// 批量：只把「已确认可播」的站点加入同步，或全部移出
+// 曾经的做法是：没有可播数据时退回到「有数据」的站点（可用 ≠ 可播），
+// 结果把「有列表但播放全是解析接口 JSON」的源也拉进同步，同步出一堆放不了的条目。
+// 现在严格只认 playable === true，没有就明确提示先去探测。
 function bulkSync(on) {
-  var cand = sites.filter(function (s) { return !s.sync && !s.netdisk && siteHasData(s); });
-  // 「可播」是更强的信号：探测时已经取一条详情实际拉过分片。
-  // 有可播数据就只用可播的，避免把「有列表但全是解析接口 JSON」的源也拉进同步。
+  var cand = sites.filter(function (s) { return !s.sync && !s.netdisk; });
   var playableOnes = cand.filter(function (s) { return s.playable === true; });
-  var targets = on
-    ? (playableOnes.length ? playableOnes : cand).map(function (s) { return s.key; })
-    : sites.filter(function (s) { return s.sync; }).map(function (s) { return s.key; });
-  var usePlayable = on && playableOnes.length > 0;
-  if (!targets.length) { toast(on ? '没有「探测有数据且尚未加入」的站点（先跑一遍批量探测）' : '当前没有加入同步的站点', 'bad'); return; }
+  var untested = cand.filter(function (s) { return s.playable === null || s.playable === undefined; });
+  var notPlayable = cand.length - playableOnes.length - untested.length;
+  var targets;
+  if (on) {
+    if (!playableOnes.length) {
+      toast(untested.length
+        ? ('没有已确认「可播」的站点：还有 ' + untested.length + ' 个未验证'
+           + (notPlayable > 0 ? '、' + notPlayable + ' 个已确认不可播' : '')
+           + '。先点「批量探测当前」跑一遍，再回来点这里')
+        : ('没有可播的站点可以加入（当前候选 ' + cand.length + ' 个，已确认可播 0 个）'), 'bad');
+      return;
+    }
+    targets = playableOnes.map(function (s) { return s.key; });
+  } else {
+    targets = sites.filter(function (s) { return s.sync; }).map(function (s) { return s.key; });
+  }
+  if (!targets.length) { toast(on ? '没有可播的站点可以加入' : '当前没有加入同步的站点', 'bad'); return; }
   if (!confirm((on ? '加入 ' : '移出 ') + targets.length + ' 个站点到同步名单？'
-      + (usePlayable ? '\n（只加入「可播」的 ' + playableOnes.length + ' 个）' : ''))) return;
+      + (on ? '\n（只加入已确认「可播」的站点；未验证的 ' + untested.length + ' 个不会加入）' : ''))) return;
   api('api/sites/sync', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ keys: targets, sync: on, action: (on ? '批量加入' : '批量移出') + ' ' + targets.length + ' 个' })
