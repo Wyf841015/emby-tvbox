@@ -1,5 +1,32 @@
 # emby-tvbox
 
+## v0.1.1 — 双架构 JRE、主题真正记住、顶栏整理
+
+**1. 双架构（x86_64 / ARM 通吃）**
+以前 `ui/jre` 只有打包这台机器的架构，装到 ARM 飞牛上会直接报 `cannot execute binary file`。
+现在包里同时带两套 jlink 裁剪过的 JRE：
+
+- `ui/jre-x64`（47 MB，OpenJDK 21.0.12.1，amd64）
+- `ui/jre-arm64`（46 MB，同版本，aarch64）
+
+`cmd/main` 启动时按 `uname -m` 选（`x86_64|amd64` → jre-x64，`aarch64|arm64` → jre-arm64），
+老安装目录里的 `ui/jre` 仍然兜底，最后才退到系统 java。启动日志会写一行 `arch=… jre=…` 便于排查。
+
+**2. 主题不会保存 → 改成服务端记住**
+原来只写 `localStorage`，而 fnOS 的 WebView / 隐私模式下 localStorage 经常被禁，写不进去也不报错，
+表现就是「切了浅色，一刷新又回深色」。现在双写：
+
+- 新增 `GET /api/prefs` / `POST /api/prefs`，主题存进 `hub.json` 的 `prefs`
+- 切换主题时同时写 localStorage + 服务端；加载时先按 localStorage 立刻出图，
+  再问服务端，值不同就纠正（本次会话手动改过则不覆盖）
+- 实测：切到浅色 → 清掉 localStorage → 刷新，仍然是浅色
+
+**3. 顶栏整理**
+- 版本号从侧边栏移到顶栏标题旁（`概览 | TVBox 点播源接入 Emby | v0.1.0`）
+- 赞助 / 联系 / 刷新三个按钮统一 `.tiny` 样式、放进 `.topbar-actions` 一行不折行
+  （之前赞助是粉色渐变，跟前两个不一致）
+- 窄屏（≤640px）隐藏中间那行说明文字，给按钮腾地方
+
 ## v0.1.0 — 更名为 TvBox For Emby
 
 项目名统一改成 **TvBox For Emby**（应用名 `tvboxhub` 保持不变，装好的路径/网关前缀都不动）：

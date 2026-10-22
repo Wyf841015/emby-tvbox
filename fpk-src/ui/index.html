@@ -266,9 +266,11 @@
   .syn{font-size:13px;line-height:1.7;color:var(--muted);white-space:pre-wrap;max-height:190px;overflow:auto;padding:0 18px 6px}
   .dlg-foot{display:flex;gap:8px;padding:0 18px 18px;flex-wrap:wrap}
   /* ── 赞助 / 联系 ── */
-  .spon-btn{background:linear-gradient(135deg,#ffe4ef,#ffd0e2);color:#a3164f;border-color:transparent}
-  .spon-btn:hover{filter:brightness(1.04)}
-  html[data-theme="light"] .spon-btn{background:linear-gradient(135deg,#ffe4ef,#ffd0e2);color:#a3164f}
+  .topbar-actions{display:flex;align-items:center;gap:8px;flex-wrap:nowrap;flex:0 0 auto}
+  .topbar-actions button.tiny{white-space:nowrap}
+  .ver{font-size:11.5px;color:var(--dim);background:var(--surface-2);border:1px solid var(--line);
+       border-radius:var(--r-full);padding:1px 8px;letter-spacing:.3px;white-space:nowrap}
+  @media(max-width:640px){ .topbar .crumb{display:none} }
   .spon-mask{position:fixed;inset:0;background:rgba(3,7,18,.62);z-index:1200;display:none;align-items:center;justify-content:center;padding:20px}
   .spon-mask.show{display:flex}
   .spon-box{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:0 24px 60px rgba(0,0,0,.45);padding:20px 22px;max-width:420px;width:100%;text-align:center}
@@ -424,7 +426,6 @@
       <div>
         <h1>TvBox For Emby</h1>
         <div class="sub">点播源 → Emby</div>
-        <div class="sub" style="opacity:.65">v0.1.0</div>
       </div>
     </div>
 
@@ -450,10 +451,13 @@
       <div class="topbar-inner">
         <span class="title" id="paneTitle">概览</span>
         <span class="crumb">TVBox 点播源接入 Emby</span>
+        <span class="ver">v0.1.1</span>
         <div class="spacer"></div>
-        <button class="tiny spon-btn" onclick="showSponsorModal()" title="赞助作者">💖 赞助</button>
-        <button class="tiny spon-btn" onclick="showContactModal()" title="联系作者">💬 联系</button>
-        <button class="tiny" onclick="status()">刷新</button>
+        <div class="topbar-actions">
+          <button class="tiny" onclick="showSponsorModal()" title="赞助作者">💖 赞助</button>
+          <button class="tiny" onclick="showContactModal()" title="联系作者">💬 联系</button>
+          <button class="tiny" onclick="status()" title="刷新状态">⟳ 刷新</button>
+        </div>
       </div>
     </header>
     <div class="wrap">
@@ -2295,16 +2299,28 @@ try {
   // ── 主题 ──
   function applyTheme(theme) {
     document.documentElement.setAttribute('data-theme', theme);
-    try { localStorage.setItem('tvboxhub.theme', theme); } catch (e) {}
+    try { localStorage.setItem('tvboxhub.theme', theme); } catch (e) {}   // 可能被 WebView 禁掉，别当唯一来源
     var btn = document.getElementById('themeBtn');
     if (btn) {
       btn.textContent = theme === 'light' ? '☾' : '☀';
       btn.title = theme === 'light' ? '切换到深色' : '切换到浅色';
     }
   }
+  var _themeTouched = false;      // 用户本次会话手动改过，就别再被服务端值盖回去
+  function saveThemePref(theme) {
+    try {
+      api('/api/prefs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ theme: theme })
+      }).catch(function () { });
+    } catch (e) { }
+  }
   function toggleTheme() {
     var cur = document.documentElement.getAttribute('data-theme') || 'dark';
+    _themeTouched = true;
     applyTheme(cur === 'light' ? 'dark' : 'light');
+    saveThemePref(cur === 'light' ? 'dark' : 'light');
   }
   window.applyTheme = applyTheme;
   window.toggleTheme = toggleTheme;
@@ -2316,6 +2332,14 @@ try {
 
     var btn = document.getElementById('themeBtn');
     if (btn) btn.onclick = toggleTheme;          // CEF 下 inline onclick 不稳，改 DOM 绑定
+
+    // 服务端偏好兜底：fnOS WebView / 隐私模式下 localStorage 常常写不进去，
+    // 只靠它会出现「切了主题一刷新就回去」。
+    api('/api/prefs').then(function (r) {
+      var t = r && r.prefs && r.prefs.theme;
+      if (!t || _themeTouched) return;
+      if (t !== (document.documentElement.getAttribute('data-theme') || 'dark')) applyTheme(t);
+    }).catch(function () { });
 
     var act = document.querySelector('.tab.active');
     setPaneTitle(act ? act.getAttribute('data-pane') : 'overview');

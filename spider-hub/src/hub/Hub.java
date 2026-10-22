@@ -401,6 +401,25 @@ public class Hub {
                 sendJson(ex, 200, m);
                 return;
             }
+            case "/api/prefs": {   // 界面偏好（主题等）：存服务端，localStorage 不可用时也能记住
+                String body = readBody(ex);
+                if (body != null && !body.isBlank() && !"null".equals(body.trim())) {
+                    Object ob = SpiderPool.Json.parse(body);
+                    if (ob instanceof Map) {
+                        Object cur = settings.get("prefs");
+                        Map<String, Object> prefs = (cur instanceof Map)
+                                ? new LinkedHashMap<>((Map<String, Object>) cur) : new LinkedHashMap<>();
+                        prefs.putAll((Map<String, Object>) ob);
+                        settings.put("prefs", prefs);
+                        saveSettings();
+                    }
+                }
+                Object cur2 = settings.get("prefs");
+                Map<String, Object> out = ok("");
+                out.put("prefs", (cur2 instanceof Map) ? cur2 : new LinkedHashMap<String, Object>());
+                sendJson(ex, 200, out);
+                return;
+            }
             case "/api/sync-sites": {       // 插件用：拿用户勾选的站点
                 java.util.Set<String> set = syncSiteKeys();
                 Map<String, Object> m = ok("");

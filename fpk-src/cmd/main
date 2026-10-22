@@ -22,8 +22,21 @@ export TRM_PKGVAR="${TRIM_PKGVAR}"
 
 log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"; }
 
-JAVA="${APP}/ui/jre/bin/java"
-[ -x "$JAVA" ] || JAVA="$(command -v java 2>/dev/null)"
+# ── JRE 选择：包里同时带 x64 / arm64 两套（jlink 裁剪过，各 46~47MB）──
+# ui/jre 是早期单架构包的名字，保留兜底，方便老安装目录直接覆盖升级。
+ARCH="$(uname -m)"
+case "$ARCH" in
+    x86_64|amd64)   JRE_DIR="jre-x64" ;;
+    aarch64|arm64)  JRE_DIR="jre-arm64" ;;
+    *)              JRE_DIR="" ;;
+esac
+JAVA=""
+if [ -n "$JRE_DIR" ] && [ -x "${APP}/ui/${JRE_DIR}/bin/java" ]; then
+    JAVA="${APP}/ui/${JRE_DIR}/bin/java"
+fi
+[ -n "$JAVA" ] || [ ! -x "${APP}/ui/jre/bin/java" ] || JAVA="${APP}/ui/jre/bin/java"
+[ -n "$JAVA" ] || JAVA="$(command -v java 2>/dev/null)"
+log_msg "arch=${ARCH} jre=${JAVA:-none}"
 
 status() {
     if [ -f "${PID_FILE}" ]; then

@@ -26,3 +26,7 @@ fpk-src/ui/lib/
 fpk-src/ui/spiders/
 fpk-src/ui/plugin/
 fpk-src/bin/
+# 包内 JRE（双架构，各 ~46MB，不进 git）
+fpk-src/ui/jre/
+fpk-src/ui/jre-x64/
+fpk-src/ui/jre-arm64/
