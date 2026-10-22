@@ -471,7 +471,7 @@
       <div class="brand-text">
         <div class="brand-line">
           <h1>TvBox For Emby</h1>
-          <span class="ver">v0.3.2</span>
+          <span class="ver">v0.4.0</span>
         </div>
         <div class="sub">点播源 → Emby</div>
       </div>
@@ -2156,6 +2156,36 @@ function embyStatus() {
   }).catch(function (e) { toast('查询失败: ' + e, 'bad'); });
 }
 
+// 装完/更新完插件后轮询 Emby 是否已经起来（hub 会自己重启它）
+function waitEmbyBack(limitMs) {
+  var hint = document.getElementById('pluginHint');
+  var pdEl = document.getElementById('embyPath');
+  var t0 = Date.now(), deadline = t0 + (limitMs || 150000);
+  function tick() {
+    var sec = Math.round((Date.now() - t0) / 1000);
+    api('api/emby/status?programdata=' + encodeURIComponent(pdEl.value.trim() || ''))
+      .then(function (d) {
+        if (d && d.serverUp) {
+          toast('Emby 已重启完成（' + sec + ' 秒）', 'ok');
+          hint.textContent = '✅ 插件已生效 · Emby 已重启（' + sec + ' 秒）';
+          hint.style.color = 'var(--ok-text)';
+          embyStatus();
+          return;
+        }
+        if (Date.now() < deadline) {
+          hint.textContent = '⏳ 正在重启 Emby…（' + sec + ' 秒）';
+          hint.style.color = 'var(--warn-text)';
+          setTimeout(tick, 2500);
+        } else {
+          hint.textContent = '⚠️ 重启超过 150 秒仍未恢复，请到 fnOS 应用中心看一下 Emby';
+          hint.style.color = 'var(--warn-text)';
+        }
+      })
+      .catch(function () { if (Date.now() < deadline) setTimeout(tick, 3000); });
+  }
+  setTimeout(tick, 2500);
+}
+
 function selfUpdatePlugin() {
   var btn = document.getElementById('btnSelfUpdate');
   var hint = document.getElementById('pluginHint');
@@ -2170,8 +2200,8 @@ function selfUpdatePlugin() {
         hint.textContent = '✅ ' + (d.msg || '');
         hint.style.color = 'var(--ok-text)';
         if (d.restarting) {
-          hint.textContent += ' ｜ Emby 正在重启，稍等 30 秒后刷新本页';
-          setTimeout(function () { embyStatus(); }, 30000);
+          hint.textContent += ' ｜ 正在重启 Emby…';
+          waitEmbyBack();
         }
       } else {
         toast(d.msg || '自更新失败', 'bad');
@@ -2226,9 +2256,10 @@ function installPlugin() {
   }).then(function (d) {
     var via = d.method === 'docker' ? '（Docker 方式）' : (d.method === 'local' ? '（本地写入）' : '');
     if (d.ok) {
-      toast('安装成功' + via + (d.needsRestart === false ? '' : '，重启 Emby 生效'), 'ok');
+      toast(d.restarting ? '安装成功，正在重启 Emby' : '安装成功' + via, 'ok');
       hint.textContent = '✅ ' + via + ' ' + (d.msg || '');
       hint.style.color = 'var(--ok-text)';
+      if (d.restarting) waitEmbyBack();
       if (d.warning) { hint.textContent += ' ⚠️ ' + d.warning; hint.style.color = 'var(--warn-text)'; }
       if (d.tried && d.tried.length) hint.textContent += ' ｜ 尝试过程: ' + d.tried.join(' → ');
     } else {

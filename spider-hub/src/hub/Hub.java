@@ -1378,6 +1378,26 @@ public class Hub {
                         // 否则 putIfAbsent 会因为键名不同而塞进 ok=false（看起来像失败）
                         Object okv = m.get("Ok") != null ? m.get("Ok") : m.get("ok");
                         m.put("ok", Boolean.TRUE.equals(okv) || "true".equalsIgnoreCase(String.valueOf(okv)));
+                        // 插件自更新后本该自己重启，但 C# 侧不一定有权限（CanSelfRestart=false）。
+                        // 没成功重启就由 hub 兜底重启，免得用户以为更新生效了其实没加载。
+                        boolean pluginRestarted = "true".equalsIgnoreCase(String.valueOf(m.get("Restarting")))
+                                && "true".equalsIgnoreCase(String.valueOf(m.get("CanSelfRestart")));
+                        boolean updatedFlag = "true".equalsIgnoreCase(String.valueOf(m.get("Updated")));
+                        // 「已是最新」不算更新：不该无谓地重启 Emby
+                        if (Boolean.TRUE.equals(m.get("ok")) && updatedFlag && !pluginRestarted) {
+                            final String pdR = str(settings.get("embyPath"));
+                            final String baseR = embyBase();
+                            Thread th = new Thread(() -> {
+                                Map<String, Object> rr = EmbyManager.restartEmby(pdR, baseR);
+                                record("重启 Emby", pdR, Boolean.TRUE.equals(rr.get("ok")), String.valueOf(rr.get("msg")), 0);
+                                System.out.println("[restart] " + rr);
+                                settings.remove("embyBaseUrl");
+                                saveSettings();
+                            }, "emby-restart-selfupdate");
+                            th.setDaemon(true);
+                            th.start();
+                            m.put("restarting", true);
+                        }
                         record("插件自更新", "via plugin", Boolean.TRUE.equals(m.get("ok")),
                                 String.valueOf(m.get("msg")), System.currentTimeMillis() - t0);
                         sendJson(ex, 200, m);
@@ -1518,6 +1538,8 @@ public class Hub {
                 // 转码临时目录：Emby 缺这个目录时，凡是需要转码的播放都会报
                 // 「Unable to find a suitable output format for .../transcoding-temp/xxx」
                 m.put("transcodingTemp", embyTranscodingTemp(pd));
+                // 实时探测（不走 embyBase() 的缓存），前端靠它判断「重启好了没」
+                m.put("serverUp", EmbyManager.serverUpNow(null));
                 sendJson(ex, 200, m);
                 return;
             }
@@ -1587,6 +1609,23 @@ public class Hub {
                     settings.remove("embyBaseUrl");   // 让下次 embyBase() 重新探测
                     saveSettings();
                     embyBase();                        // 装完立刻探一次，后面的同步按钮就能用
+                    // 本地安装：DLL 只有 Emby 重启后才加载，这里直接帮用户重启掉。
+                    // 容器安装由 DockerInstaller 自己 docker restart，不用重复。
+                    if (!"docker".equals(String.valueOf(r.get("method")))) {
+                        final String pdR = pd;
+                        final String baseR = embyBase();
+                        Thread th = new Thread(() -> {
+                            Map<String, Object> rr = EmbyManager.restartEmby(pdR, baseR);
+                            record("重启 Emby", pdR, Boolean.TRUE.equals(rr.get("ok")), String.valueOf(rr.get("msg")), 0);
+                            System.out.println("[restart] " + rr);
+                            settings.remove("embyBaseUrl");
+                            saveSettings();
+                        }, "emby-restart");
+                        th.setDaemon(true);
+                        th.start();
+                        r.put("restarting", true);
+                        r.put("msg", String.valueOf(r.get("msg")) + "，正在自动重启 Emby（约 20~40 秒）");
+                    }
                 }
                 record("安装插件", pd, Boolean.TRUE.equals(r.get("ok")), String.valueOf(r.get("msg")), ms);
                 sendJson(ex, 200, r);
@@ -3095,7 +3134,10 @@ public class Hub {
         String outputRoot = firstNonEmpty(req.get("outputRoot"), "");
         if (outputRoot.isEmpty()) return null;
         String configUrl = firstNonEmpty(req.get("configUrl"), str(settings.get("configUrl")), "");
-        String hubUrl = firstNonEmpty(req.get("hubUrl"), str(settings.get("publicUrl")), "");
+        // 兜底用 hub 自己的 TCP 地址：安装请求没带 hubUrl 时不能把插件里的
+        // SpiderHubUrl 写成空串，否则插件从此连不上 hub（自更新/推送全失效）
+        String hubUrl = firstNonEmpty(req.get("hubUrl"), str(settings.get("publicUrl")),
+                "http://127.0.0.1:" + tcpPort);
 
         StringBuilder sb = new StringBuilder();
         sb.append("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");

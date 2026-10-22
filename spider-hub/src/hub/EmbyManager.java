@@ -954,6 +954,140 @@ public class EmbyManager {
 
     /** 以指定用户执行一段 sh，返回 stdout+stderr。 */
     /** 参数化版 runAs：argv 直传，不经过 shell（路径里的引号/分号不再有特殊含义）。 */
+    /* ═════════════ 重启 Emby（装完/更新完插件自动生效） ═════════════ */
+
+    static final String[] APPCENTER_CLI = {
+            "/usr/local/bin/appcenter-cli", "/usr/bin/appcenter-cli", "/usr/sbin/appcenter-cli"};
+
+    /** 跑一条命令，返回合并后的输出（失败/超时返回 null 或 "__timeout__"）。不经过 shell。 */
+    static String runCmd(int timeoutSec, String... argv) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(argv);
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            byte[] out = p.getInputStream().readAllBytes();
+            if (!p.waitFor(timeoutSec, java.util.concurrent.TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                return "__timeout__";
+            }
+            return new String(out, StandardCharsets.UTF_8).trim();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Emby 是不是跑在 fnOS 应用中心里：/var/apps/&lt;app&gt;/target/system/EmbyServer 存在，
+     * 且 programdata 落在该应用目录下（/var/apps/&lt;app&gt;/var）。
+     */
+    public static String appcenterApp(String programdata) {
+        try (DirectoryStream<Path> ds = Files.newDirectoryStream(Path.of("/var/apps"))) {
+            String pd = programdata == null ? "" : programdata.replaceAll("/+$", "");
+            for (Path d : ds) {
+                if (!Files.isRegularFile(d.resolve("target/system/EmbyServer"))) continue;
+                String name = d.getFileName().toString();
+                if (pd.isEmpty()) return name;
+                String dir = d.toString();
+                String real = dir;
+                try { real = d.toRealPath().toString(); } catch (Exception ignore) { }
+                if (pd.startsWith(dir) || pd.startsWith(real)
+                        || samePath(dir + "/var", pd) || samePath(real + "/var", pd)) return name;
+            }
+        } catch (Exception ignore) { }
+        return null;
+    }
+
+    /** 退一步看 systemd：emby-server / emby */
+    public static String systemdUnit() {
+        for (String u : new String[]{"emby-server", "emby"}) {
+            String act = runCmd(10, "systemctl", "is-active", u);
+            if (act != null && "active".equals(act.trim())) return u;
+        }
+        return null;
+    }
+
+    static boolean httpOk(String url) {
+        try {
+            java.net.HttpURLConnection c = (java.net.HttpURLConnection) java.net.URI.create(url).toURL().openConnection();
+            c.setConnectTimeout(2000);
+            c.setReadTimeout(4000);
+            if (c.getResponseCode() != 200) return false;
+            String s = new String(c.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            return s.contains("ServerName");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Emby 的公开信息接口此刻是否可用（前端重启后轮询用） */
+    public static boolean serverUpNow(String base) {
+        if (base != null && !base.isBlank()) return httpOk(base.replaceAll("/+$", "") + "/System/Info/Public");
+        for (int port : new int[]{8096, 8097, 8920})
+            if (httpOk("http://127.0.0.1:" + port + "/System/Info/Public")) return true;
+        return false;
+    }
+
+    /** 等到 Emby 的 /System/Info/Public 重新可用（base 为 null 时按 8096/8097/8920 轮询） */
+    static boolean waitEmby(String base, int seconds) {
+        long end = System.currentTimeMillis() + seconds * 1000L;
+        do {
+            if (base != null && !base.isBlank()) {
+                if (httpOk(base.replaceAll("/+$", "") + "/System/Info/Public")) return true;
+            } else {
+                for (int port : new int[]{8096, 8097, 8920})
+                    if (httpOk("http://127.0.0.1:" + port + "/System/Info/Public")) return true;
+            }
+            try { Thread.sleep(2000); } catch (InterruptedException e) { return false; }
+        } while (System.currentTimeMillis() < end);
+        return false;
+    }
+
+    /**
+     * 重启 Emby 并等服务恢复。
+     * <p>插件 DLL 只有 Emby 重启后才加载，所以装完/更新完必须重启一次；
+     * 由 hub 来做（而不是让用户去应用中心点），失败也给出明确原因。
+     */
+    public static Map<String, Object> restartEmby(String programdata, String base) {
+        Map<String, Object> r = new LinkedHashMap<>();
+        long t0 = System.currentTimeMillis();
+        String app = appcenterApp(programdata);
+        String unit = null;
+        String how;
+        if (app != null) {
+            String cli = null;
+            for (String c : APPCENTER_CLI) if (Files.isExecutable(Path.of(c))) { cli = c; break; }
+            if (cli == null) {
+                r.put("ok", false);
+                r.put("msg", "找不到 appcenter-cli，无法自动重启（Emby 应用是 " + app + "）");
+                return r;
+            }
+            runCmd(90, cli, "stop", app);          // 没有 restart 子命令，只能 stop + start
+            try { Thread.sleep(3000); } catch (InterruptedException ignore) { }
+            runCmd(240, cli, "start", app);
+            how = "fnOS 应用中心（" + app + "）";
+        } else if ((unit = systemdUnit()) != null) {
+            runCmd(240, "systemctl", "restart", unit);
+            how = "systemd（" + unit + "）";
+        } else if (DockerInstaller.available()) {
+            r.put("ok", false);
+            r.put("msg", "没认出 Emby 的进程托管方式；如果是容器部署，请用「安装到容器」那条路径（它会 docker restart）");
+            return r;
+        } else {
+            r.put("ok", false);
+            r.put("msg", "没认出 Emby 的进程托管方式（既不是 fnOS 应用，也不是 systemd），请手动重启 Emby");
+            return r;
+        }
+        boolean up = waitEmby(base, 150);
+        long sec = (System.currentTimeMillis() - t0) / 1000;
+        r.put("ok", up);
+        r.put("manager", how);
+        r.put("seconds", sec);
+        r.put("msg", up
+                ? "已自动重启 Emby（" + how + "），服务已恢复，用时 " + sec + " 秒"
+                : "已自动重启 Emby（" + how + "），但 150 秒内没等到服务恢复，请检查 Emby 日志");
+        return r;
+    }
+
     static String runAsArgv(String user, String... argv) {
         try {
             java.util.List<String> cmd = new java.util.ArrayList<>();

@@ -1,5 +1,22 @@
 # emby-tvbox
 
+## v0.4.0 — 装完 / 更新完插件自动重启 Emby
+
+以前装完插件只提示「重启 Emby 生效」，得用户自己去 fnOS 应用中心点一次 —— 插件 DLL 不重启根本不加载，很容易以为装失败。
+
+现在由 hub 直接重启，并且**等 Emby 真的起来**才报完成：
+
+- **识别托管方式**：`/var/apps/<app>/target/system/EmbyServer` 存在 → fnOS 应用中心（`appcenter-cli stop` + `start`，它没有 restart 子命令）；否则退到 systemd（`emby-server` / `emby`）；都没认出来就明确报「请手动重启」，不假装成功
+- **容器部署**：走原来的 `docker restart`，不重复重启
+- **异步执行**：接口 2~3 秒就返回 `restarting:true`，重启在后台线程做，不会被前端 20 秒超时打断
+- **等恢复再报**：轮询 `/System/Info/Public`，最多等 150 秒，日志留下 `[restart] ok=true manager=… seconds=…`
+- **前端改轮询**：`⏳ 正在重启 Emby…（N 秒）` → 起来后 `✅ 插件已生效 · Emby 已重启（N 秒）`，不再靠「固定等 30 秒后刷新」
+- `/api/emby/status` 新增 `serverUp`（实时探测，不走缓存）
+- **自更新兜底**：插件 `CanSelfRestart=false` 时由 hub 补一次重启；但「已是最新版本」不重启（避免无意义的 20 秒断服）
+- 顺带修：安装请求没带 `hubUrl` 时不再把插件里的 `SpiderHubUrl` 写成空串（会直接导致插件连不上 hub、自更新和推送全失效），兜底用 `http://127.0.0.1:<hub端口>`
+
+实测：重装 → `ok=true restarting=true method=local`，Emby PID `3072194 → 3072625`，**26 秒恢复**；日志 `[restart] ok=true manager=fnOS 应用中心（EmbyServer4-9） seconds=24`；「已是最新」路径确认不再多余重启。
+
 ## v0.3.2 — 详情 / 播放等弹窗不跟主题，全量主题适配复查
 
 **根因**：`.dlg`（详情、播放共用的弹窗容器）写的是 `background: var(--panel, #161b26)`，而 **`--panel` 这个令牌从来没定义过** —— 于是永远回退成写死的深色。浅色主题下背景是深色、字也是深色，等于看不清。同类问题还有遮罩、赞助弹窗、视频底。
