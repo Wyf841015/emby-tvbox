@@ -1,5 +1,17 @@
 # emby-tvbox
 
+## v0.1.4 — 修「搜索」页顶栏显示成 search
+
+顶栏标题靠一张映射表把 tab 的 `data-pane` 翻成中文，表里漏了 `search`，
+于是切到搜索页时顶栏直接显示了内部名 `search`。补上 `search:'搜索'`。
+
+顺手把 7 个 tab 全过了一遍，现在都对：
+
+```
+overview → 概览    sites → 站点    search → 搜索    sync → 同步
+config  → 配置    emby  → Emby 插件    logs → 操作记录
+```
+
 ## v0.1.3 — 版本号回归品牌行，四个按钮合并成一行
 
 按你的要求调整：
