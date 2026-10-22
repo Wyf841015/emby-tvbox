@@ -1,5 +1,38 @@
 # emby-tvbox
 
+## v0.13.1 — 修「同步停不下来」
+
+用户报「同步无法停止」。查下来是三个问题叠在一起，最后一个是我自己上一版引入的：
+
+**1. Stack Overflow 把 Emby 打崩（致命，我引入的）**
+v0.13.0 加停止标志时批量替换检查点，把 `ThrowIfStopped()` 方法**体内**的
+`ct.ThrowIfCancellationRequested()` 也换成了它自己 → 无限递归。
+日志里就是 `Repeat 174468 times: at SyncService.ThrowIfStopped` + `Stack overflow.`，
+进程直接崩，之后反复重启还撞上 `Address already in use` —— 表现就是
+「点同步没反应、点停止没反应、Emby 打不开」。
+
+**2. 停止请求不幂等**
+原来 `RequestStop()` 在令牌已取消时直接返回 false（"停止请求未生效"），
+重复点也没用。现在改成独立停止标志：可重复点，站点循环 / 条目循环 / 逐集校验 /
+拆批重试 / 线路兜底 **五类检查点**都会立刻退出。
+
+**3. 同步把 Emby 的线程池抽干**
+`/TvBox/Stream`、`/TvBox/Play`、`/TvBox/Live` 里都是
+`SendAsync(...).GetAwaiter().GetResult()`（"同步等异步"），同步校验会发出几百次
+这样的请求，每次都占住一个 Emby 线程等续体 → 线程池抽干 → Emby 整个 Web 服务
+失去响应，连「停止」的请求都排不进去。全部改成 HttpClient 的**同步** Send/ReadAsStream
+（纯阻塞 IO，不依赖续体线程）；海报下载同样改法；逐集校验并发 6 → 4；
+插件加载时把线程池下限抬到 64。
+
+**4. hub 预热不再堵请求**
+`/api/emby/sync` 原来在请求线程里串行预热 6 个 spider（每个 30~60 秒），
+2 核机 CPU 打满，Emby 十几秒答不上话。改成后台单线程、最低优先级预热。
+
+实测（6 站点同步）：
+- 同步全程 Emby `/System/Info/Public` 稳定 **200 / 2~6ms**
+- 中途点停止 → `{"Success":true}` → **14 秒后 Running=False**，日志 `同步已停止`
+- DoH 改为可选（默认系统 DNS，需 `-Dtvbox.doh=true` 才启用），避免高并发下拖慢解析
+
 ## v0.13.0 — 把 TVBox 源码里剩下的接口补齐（proxy / 直播 / 解析接口 / DoH）
 
 对着 catvod 的 `Spider` 基类逐项核对，这次把之前没接的补上：

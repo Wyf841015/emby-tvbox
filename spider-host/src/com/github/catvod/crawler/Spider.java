@@ -74,7 +74,9 @@ public class Spider {
      * 这里返回系统 DNS；如需防污染可以换成自定义实现。
      */
     public static okhttp3.Dns safeDns() {
-        return DOH;
+        // 默认走系统 DNS；DoH 只在 -Dtvbox.doh=true 时启用。
+        // 每个域名都要打一次 HTTPS 解析在高并发同步下会明显拖慢，默认不开。
+        return "true".equalsIgnoreCase(System.getProperty("tvbox.doh")) ? DOH : okhttp3.Dns.SYSTEM;
     }
 
     /**

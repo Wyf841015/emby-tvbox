@@ -770,12 +770,26 @@ public class Hub {
                 // 先把同步名单里的 spider 全部实例化好再让插件开始。
                 // 之前是后台线程预热，同步可能抢在预热完成前跑，
                 // 插件拿到的是"初始化中"的实例，表现为整站「0 个条目」。
-                int warmed = 0;
-                for (String k : syncSiteKeys()) {
-                    try { pool.warm(k); warmed++; } catch (Exception ignore) {}
+                // 注意：不能在这个请求线程里同步预热。
+                // 6 个 spider 逐个初始化（每个 30~60 秒）会把 2 核机器打满，
+                // Emby 那边连 /System/Info/Public 都答不上（实测黑 40 秒），
+                // 用户看到的就是「同步点了没反应、停止也停不下来」。
+                // 改成后台单线程低优先级预热，并把名单 pin 住不让 LRU 淘汰。
+                final java.util.ArrayList<String> keysToWarm = new java.util.ArrayList<>(syncSiteKeys());
+                if (!keysToWarm.isEmpty()) {
+                    pool.pin(keysToWarm);
+                    Thread t = new Thread(() -> {
+                        for (String k : keysToWarm) {
+                            try {
+                                pool.warm(k);
+                            } catch (Exception ignore) { }
+                        }
+                    }, "spider-warm");
+                    t.setDaemon(true);
+                    t.setPriority(Thread.MIN_PRIORITY);
+                    t.start();
                 }
-                if (warmed > 0) pool.pin(syncSiteKeys());
-                m.put("warmed", warmed);
+                m.put("warming", keysToWarm.size());
                 try {
                     String body = embyHttp("POST", base + "/TvBox/Sync?token=" + embyToken());
                     Object parsed = SpiderPool.Json.parse(body);

@@ -74,14 +74,38 @@ namespace TvBox.Plugin.Core
             get { lock (_stateLock) return Progress.Running; }
         }
 
-        /// <summary>请求停止当前同步。正在进行的条目会跑完，下一个检查点退出。</summary>
+        /// <summary>
+        /// 停止请求标志。
+        ///
+        /// 为什么不用 CancellationToken 就够了：spider 调用是同步阻塞的（单次最长 45 秒），
+        /// 而且取消令牌一旦取消过就再也不会"重新生效"，配合「只有零星几处检查」的循环，
+        /// 表现就是「点了停止、进度还在涨」。这里改成独立标志，所有循环（站点 / 条目 /
+        /// 逐集校验 / 拆批重试 / 线路兜底）都检查它，且可以重复点。
+        /// </summary>
+        private static volatile bool _stopRequested;
+
+        public bool StopRequested { get { return _stopRequested; } }
+
+        /// <summary>请求停止当前同步。幂等：重复点也生效，不会因为"令牌早就取消过"而返回失败。</summary>
         public bool RequestStop()
         {
+            _stopRequested = true;
             var cts = _cts;
-            if (cts == null || cts.IsCancellationRequested) return false;
-            try { cts.Cancel(); } catch { return false; }
-            _log("收到停止请求，将在当前条目结束后退出");
+            if (cts != null)
+            {
+                try { if (!cts.IsCancellationRequested) cts.Cancel(); } catch { }
+            }
+            _log(cts == null
+                ? "收到停止请求（当前没有活动同步，已记录标志）"
+                : "收到停止请求，正在中止（每个检查点都会立即退出）");
             return true;
+        }
+
+        /// <summary>所有循环统一用这个：先看停止标志，再看取消令牌。</summary>
+        private static void ThrowIfStopped(CancellationToken ct)
+        {
+            if (_stopRequested) throw new OperationCanceledException("用户请求停止同步");
+            ct.ThrowIfCancellationRequested();
         }
 
         private void Update(Action<SyncProgress> mutate)
@@ -210,7 +234,7 @@ namespace TvBox.Plugin.Core
             var live = new bool[episodes.Count];
             foreach (var i in verifyIdx) live[i] = true;   // 抽样模式下未抽到的默认可播
 
-            var sem = new SemaphoreSlim(6);
+            var sem = new SemaphoreSlim(4);   // 2 核机：6 路并发会把线程池和带宽都打满
             var tasks = new List<Task>();
             int resolved = 0, attempted = 0;
             foreach (var i in verifyIdx)
@@ -221,6 +245,7 @@ namespace TvBox.Plugin.Core
                     await sem.WaitAsync(ct).ConfigureAwait(false);
                     try
                     {
+                        ThrowIfStopped(ct);
                         var url = episodes[idx]?.Url;
                         bool alreadyResolved = episodes[idx]?.Resolved == true;
                         if (!alreadyResolved && cfg.ResolveIndirectUrl && !PlayUrlResolver.LooksLikeDirectMedia(url))
@@ -241,8 +266,8 @@ namespace TvBox.Plugin.Core
                     }
                     catch (OperationCanceledException)
                     {
-                        if (ct.IsCancellationRequested) throw;   // 真·用户取消
-                        live[idx] = false;                      // 只是这一集超时
+                        if (ct.IsCancellationRequested || _stopRequested) throw;   // 真·用户取消
+                        live[idx] = false;                                        // 只是这一集超时
                     }
                     catch { live[idx] = false; }
                     finally { sem.Release(); }
@@ -274,6 +299,7 @@ namespace TvBox.Plugin.Core
                 return false;
             }
 
+            _stopRequested = false;                      // 新一轮开始，清掉上一轮的停止标志
             _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             var token = _cts.Token;
             var summary = new SyncSummary();
@@ -409,7 +435,8 @@ namespace TvBox.Plugin.Core
                     int siteIdx = 0;
                     foreach (var site in sites)
                     {
-                        ct.ThrowIfCancellationRequested();
+                        ThrowIfStopped(token);
+                        ThrowIfStopped(ct);
                         siteIdx++;
                         Update(p => { p.SiteIndex = siteIdx; p.CurrentSite = site.DisplayName; });
                         siteReferer = site.Referer;
@@ -602,7 +629,7 @@ namespace TvBox.Plugin.Core
 
             for (int page = 1; page <= maxPages; page++)
             {
-                ct.ThrowIfCancellationRequested();
+                ThrowIfStopped(ct);
                 PagedResult res;
                 try
                 {
@@ -619,7 +646,7 @@ namespace TvBox.Plugin.Core
 
                 foreach (var item in res.Items)
                 {
-                    ct.ThrowIfCancellationRequested();
+                    ThrowIfStopped(ct);
                     if (cfg.MaxItemsPerRun > 0 && summary.Items >= cfg.MaxItemsPerRun) break;
                     if (string.IsNullOrWhiteSpace(item.Id)) continue;
                     seen++;
@@ -662,6 +689,7 @@ namespace TvBox.Plugin.Core
                                 {
                                     foreach (var cand in detail.Lines.Skip(1).Take(3))
                                     {
+                                        ThrowIfStopped(ct);
                                         if (cand?.Episodes == null || cand.Episodes.Count == 0) continue;
                                         var candLine = ResolvePrivateIds(new VodLine { Name = cand.Name, Episodes = cand.Episodes }, site, cfg);
                                         int dead2 = 0;
@@ -806,7 +834,7 @@ namespace TvBox.Plugin.Core
             int size = Math.Max(1, cfg.DetailBatchSize);
             foreach (var batch in Chunk(ids, size))
             {
-                ct.ThrowIfCancellationRequested();
+                ThrowIfStopped(ct);
                 all.AddRange(await GetDetailBatchAsync(client, site, batch.ToList(), cfg, ct, 0).ConfigureAwait(false));
             }
             return all;
@@ -816,12 +844,13 @@ namespace TvBox.Plugin.Core
             CmsClient client, TvBoxSite site, List<string> batch, PluginConfiguration cfg,
             CancellationToken ct, int depth)
         {
+            ThrowIfStopped(ct);      // 拆批重试会递归很多层，每层都要能立刻退出
             try
             {
                 var r = await client.GetDetailAsync(site, batch, ct).ConfigureAwait(false);
                 return r ?? new List<VodItem>();
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested || _stopRequested) { throw; }
             catch (Exception ex)
             {
                 if (batch.Count <= 1 || depth >= 5)
@@ -914,19 +943,28 @@ namespace TvBox.Plugin.Core
             _state.Record(site.Key, baseItem.Id, SyncState.Signature(baseItem), paths);
         }
 
-        /// <summary>海报下载（同步调用，带大小上限，失败返回 null）。</summary>
+        /// <summary>
+        /// 海报下载（同步调用，带大小上限，失败返回 null）。
+        ///
+        /// 这里必须用 HttpClient 的**同步** Send/ReadAsStream，不能用
+        /// GetAsync(...).GetAwaiter().GetResult()：那是"同步等异步"，
+        /// 每张海报都要占住一个线程去等续体，而这个回调是在写文件的同步流程里被调用的。
+        /// 一台 2 核机器同步几百个条目时，线程池被抽干 → Emby 整个 Web 服务失去响应，
+        /// 表现就是「点了停止没反应」（连 /System/Info/Public 都超时）。
+        /// 同步 API 走的是纯阻塞 IO，不占用线程池续体，不会再拖死服务。
+        /// </summary>
         private static byte[] FetchImageBytes(HttpClient http, string url, int maxBytes)
         {
             try
             {
                 if (string.IsNullOrWhiteSpace(url)) return null;
-                using (var resp = http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead)
-                                    .GetAwaiter().GetResult())
+                using (var req = new HttpRequestMessage(HttpMethod.Get, url))
+                using (var resp = http.Send(req, HttpCompletionOption.ResponseHeadersRead))
                 {
                     if (!resp.IsSuccessStatusCode) return null;
                     var len = resp.Content.Headers.ContentLength;
                     if (maxBytes > 0 && len.HasValue && len.Value > maxBytes) return null;
-                    using (var st = resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult())
+                    using (var st = resp.Content.ReadAsStream())
                     using (var ms = new MemoryStream())
                     {
                         var buf = new byte[64 * 1024];
@@ -991,7 +1029,7 @@ namespace TvBox.Plugin.Core
 
                 foreach (var cat in cats)
                 {
-                    ct.ThrowIfCancellationRequested();
+                    ThrowIfStopped(ct);
 
                     var ids = new List<string>();
                     var listedById = new Dictionary<string, VodItem>(StringComparer.Ordinal);
@@ -1032,7 +1070,7 @@ namespace TvBox.Plugin.Core
                     if (distinct.Count == 0) continue;
                     foreach (var batch in Chunk(distinct, Math.Max(1, cfg.DetailBatchSize)))
                     {
-                        ct.ThrowIfCancellationRequested();
+                        ThrowIfStopped(ct);
                         List<VodItem> details;
                         try
                         {
@@ -1078,6 +1116,7 @@ namespace TvBox.Plugin.Core
                                     {
                                         foreach (var cand in item.Lines.Skip(1).Take(3))
                                         {
+                                            ThrowIfStopped(ct);
                                             if (cand?.Episodes == null || cand.Episodes.Count == 0) continue;
                                             var candLine = ResolvePrivateIds(new VodLine { Name = cand.Name, Episodes = cand.Episodes }, site, cfg);
                                             int dead2 = 0;

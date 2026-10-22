@@ -35,6 +35,16 @@ namespace TvBox.Plugin
             IServerConfigurationManager serverConfigurationManager)
             : base(applicationPaths, xmlSerializer)
         {
+            // 2 核小机器：抬高线程池下限。同步里存在同步等待（spider 调用最长 45s、
+            // 海报下载），线程池被抽干时 Emby 的 Web 服务会整体失去响应，
+            // 连「停止同步」的请求都排不进去 —— 用户看到的就是“停不下来”。
+            try
+            {
+                System.Threading.ThreadPool.GetMinThreads(out var w, out var io);
+                System.Threading.ThreadPool.SetMinThreads(Math.Max(w, 64), Math.Max(io, 64));
+            }
+            catch { }
+
             _instance = this;
             _paths = applicationPaths;
             _host = applicationHost;

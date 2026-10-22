@@ -581,7 +581,7 @@ namespace TvBox.Plugin.Api
             return new SimpleResult
             {
                 Success = ok,
-                Message = ok ? "已请求停止，当前条目结束后会退出" : "停止请求未生效（可能刚好结束）",
+                Message = ok ? "已请求停止，当前条目结束后会退出" : "已请求停止（最迟等当前这次 spider 调用返回，约 45 秒内退出）",
             };
         }
 
@@ -785,6 +785,28 @@ namespace TvBox.Plugin.Api
         /// 直播：hub 的 /live/&lt;key&gt; 已经产出标准 M3U，这里原样转出去（顺带处理 key 省略时合并多站）。
         /// Emby 的「Live TV → 添加 M3U tuner」填 http://&lt;lan&gt;:8096/TvBox/Live?key=网络直播 即可。
         /// </summary>
+        /// <summary>
+        /// 同步取一个 URL 的正文。
+        ///
+        /// 全部改用 HttpClient 的**同步** Send/ReadAsStream，不再用
+        /// GetStringAsync(...).GetAwaiter().GetResult()：那是"同步等异步"，
+        /// 每个请求都会占住一个 Emby 线程去等续体。同步时（几百次校验 + 分片拉取）
+        /// 线程池被抽干 → Emby 整个 Web 服务失去响应，连"停止同步"都排不进去。
+        /// 同步 API 走纯阻塞 IO，不依赖线程池续体。
+        /// </summary>
+        internal static string HttpGetTextSync(HttpClient http, string url, int timeoutSeconds = 90)
+        {
+            using (var req = new HttpRequestMessage(HttpMethod.Get, url))
+            using (var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds)))
+            using (var resp = http.Send(req, HttpCompletionOption.ResponseContentRead, cts.Token))
+            {
+                resp.EnsureSuccessStatusCode();
+                using (var st = resp.Content.ReadAsStream())
+                using (var sr = new System.IO.StreamReader(st, System.Text.Encoding.UTF8))
+                    return sr.ReadToEnd();
+            }
+        }
+
         public object Any(LiveProxy req)
         {
             var cfg = P?.Configuration;
@@ -800,7 +822,7 @@ namespace TvBox.Plugin.Api
                     try
                     {
                         using var hc = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
-                        var js = hc.GetStringAsync(hub + "/api/sync-sites").GetAwaiter().GetResult();
+                        var js = HttpGetTextSync(hc, hub + "/api/sync-sites", 20);
                         using var doc = System.Text.Json.JsonDocument.Parse(js);
                         if (doc.RootElement.TryGetProperty("sites", out var arr) &&
                             arr.ValueKind == System.Text.Json.JsonValueKind.Array)
@@ -816,7 +838,7 @@ namespace TvBox.Plugin.Api
                 {
                     try
                     {
-                        var body = http.GetStringAsync(hub + "/live/" + Uri.EscapeDataString(key)).GetAwaiter().GetResult();
+                        var body = HttpGetTextSync(http, hub + "/live/" + Uri.EscapeDataString(key), 90);
                         if (string.IsNullOrWhiteSpace(body) || !body.Contains("#EXTINF")) continue;
                         foreach (var line in body.Split('\n'))
                         {
@@ -859,7 +881,7 @@ namespace TvBox.Plugin.Api
                         + "&id=" + Uri.EscapeDataString(req.Id) + "&json=1";
                 string body;
                 using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(45) })
-                    body = http.GetStringAsync(url).GetAwaiter().GetResult();
+                    body = HttpGetTextSync(http, url, 90);
 
                 bool ok = false; string real = null; string msg = null; string parse = null;
                 using (var doc = System.Text.Json.JsonDocument.Parse(body))
@@ -1010,8 +1032,8 @@ namespace TvBox.Plugin.Api
                     }
                 }
 
-                var resp = http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead)
-                               .GetAwaiter().GetResult();
+                // 同步 Send：不需要续体线程，避免同步校验/播放时把 Emby 线程池抽干
+                var resp = http.Send(request, HttpCompletionOption.ResponseHeadersRead);
 
                 var contentType = resp.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
                 var isPlaylist = contentType.IndexOf("mpegurl", StringComparison.OrdinalIgnoreCase) >= 0
