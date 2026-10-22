@@ -49,9 +49,13 @@ rotate_log() {
     fi
 }
 
+fails=0
 while true; do
     rotate_log
     log "启动 hub（SerialGC, pid 待定）"
+    # -Xverify:none 必须保留：TVBox 生态的部分 spider jar 里有不合规的 class
+    #（实测 ClassFormatError: Bad string initial value in class file com/github/catvod/spider/Init），
+    # 打开校验会让这些站点整站不可用。作为补偿，远程 jar 现在强制校验配置里的 ;md5;（Hub.downloadJar）。
     "$JAVA" -Xverify:none -Xmx512m -XX:+UseSerialGC -XX:+ExitOnOutOfMemoryError \
         -XX:MaxMetaspaceSize=256m -Dfile.encoding=UTF-8 \
         -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 \
@@ -72,6 +76,14 @@ while true; do
     fi
     # 崩溃后重启前把残留 socket 清掉，否则新进程 bind 会失败
     [ -S "$SOCK" ] && rm -f "$SOCK"
-    log "${DELAY} 秒后重新拉起（若是 JVM 段错误，hs_err_pid*.log 会在当前工作目录）"
-    sleep "$DELAY"
+    # 指数退避 + 连续失败上限：以前固定 5 秒无限重启，包损坏时会把 info.log 刷满并白烧 CPU
+    fails=$((fails + 1))
+    if [ "$fails" -ge 8 ]; then
+        log "连续 ${fails} 次异常退出，停止自动重启（请检查 info.log / hs_err_pid*.log）"
+        exit 1
+    fi
+    backoff=$(( DELAY * (1 << (fails - 1)) ))
+    [ "$backoff" -gt 120 ] && backoff=120
+    log "${backoff} 秒后重新拉起（连续失败 ${fails} 次）"
+    sleep "$backoff"
 done

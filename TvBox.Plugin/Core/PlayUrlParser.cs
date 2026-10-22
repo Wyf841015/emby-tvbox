@@ -69,7 +69,9 @@ namespace TvBox.Plugin.Core
                 // 把分集 id 当播放地址的源整站丢空。私有 id 留着，同步时经 hub
                 // 的 /play/ 端点走 Spider.playerContent 换成真地址。
                 if (string.IsNullOrWhiteSpace(url)) continue;
-                if (!IsPlayableUrl(url) && LooksLikeCloudShare(url)) continue;
+                // 只保留「http(s) 地址」或「私有分集 id」（形如 146660@1314815）：
+                // magnet:/ed2k:/ftp: 这类留着也会被改写成 /TvBox/Play 变成死链。
+                if (!IsPlayableUrl(url) && (LooksLikeCloudShare(url) || !LooksLikePrivateId(url))) continue;
                 autoIndex++;
                 list.Add(new VodEpisode
                 {
@@ -110,6 +112,25 @@ namespace TvBox.Plugin.Core
         /// 网盘分享页、甚至空串，这些进了 Emby 只会变成一堆报错的条目。
         /// </summary>
         /// <summary>网盘分享页：这类即使能拿到地址也播不了，直接跳过。</summary>
+        /// <summary>TVBox 的私有分集 id：形如 146660@1314815、98191、abc$def 之外的一般标识。</summary>
+        public static bool LooksLikePrivateId(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url)) return false;
+            var s2 = url.Trim();
+            if (s2.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                s2.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) return false;
+            if (s2.Contains("://")) return false;            // magnet:/ed2k:/ftp:/thunder: 一律不算
+            if (s2.Contains(" ")) return false;
+            // 至少含一个数字，且只由 id 合法字符组成
+            bool hasDigit = false;
+            foreach (var c in s2)
+            {
+                if (char.IsDigit(c)) { hasDigit = true; continue; }
+                if (!(char.IsLetterOrDigit(c) || c == '@' || c == '_' || c == '-' || c == '.')) return false;
+            }
+            return hasDigit;
+        }
+
         public static bool LooksLikeCloudShare(string url)
         {
             if (string.IsNullOrWhiteSpace(url)) return false;

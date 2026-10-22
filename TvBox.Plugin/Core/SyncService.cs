@@ -40,6 +40,8 @@ namespace TvBox.Plugin.Core
         public int Skipped { get; set; }
         /// <summary>解析阶段被排除的源数量（网盘类 + 黑白名单过滤）。</summary>
         public int NetdiskExcluded { get; set; }
+        /// <summary>本轮是否被 MaxItemsPerRun / MaxPagesPerCategory 之类的上限截断。</summary>
+        public bool Truncated { get; set; }
         public string Detail { get; set; } = "";
     }
 
@@ -552,11 +554,19 @@ namespace TvBox.Plugin.Core
 
                         try
                         {
-                            var n = await SyncOneSiteAsync(site, cfg, writer, keep, ct, summary).ConfigureAwait(false);
+                            // 用 token（linked，含 _cts）而不是 ct：否则点「停止」只影响
+                            // 站点级检查点，正在跑的逐集校验还要等满 TimeoutSeconds 才退出。
+                            var n = await SyncOneSiteAsync(site, cfg, writer, keep, token, summary).ConfigureAwait(false);
                             _log($"   {site.DisplayName}: {n} 个条目");
                             if (n > 0) await ReportSiteAsync(cfg, site.Key, true, ct).ConfigureAwait(false);
                         }
-                        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                        catch (OperationCanceledException) when (ct.IsCancellationRequested || token.IsCancellationRequested || _stopRequested) { throw; }
+                        catch (Exception ex) when (_stopRequested)
+                        {
+                            // 用户主动停止时这里的异常不是「站点坏了」：既不计失败，
+                            // 也不上报 /api/sites/fail（否则 hub 会把健康站点移出同步名单）。
+                            throw new OperationCanceledException("用户请求停止同步", ex);
+                        }
                         catch (Exception ex)
                         {
                             summary.SitesFailed++;
@@ -568,16 +578,26 @@ namespace TvBox.Plugin.Core
                     }
 
                     // ── 4. 清理孤儿 ──
-                    if (cfg.CleanupOrphans)
+                    // 只有「本轮跑完整了」才允许清理：被 MaxItemsPerRun 截断、或者有站点失败时，
+                    // keep 里缺的是「没来得及处理」而不是「已失效」，照删就是成片误删用户的 strm。
+                    var truncated = summary.Truncated;
+                    if (cfg.CleanupOrphans && summary.SitesFailed == 0 && !truncated)
                     {
                         Update(p => p.Stage = "清理失效条目");
                         var removed = writer.CleanupOrphans(keep, out var removedDirs);
-                        writer.SaveManifest(keep);          // 记下我们拥有的文件，下次清理以此为准
                         summary.Removed = removed;
                         _log($"清理了 {removed} 个失效 strm、{removedDirs} 个空目录");
                         if (writer.DeletesSkipped > 0)
                             _log("⚠️ " + writer.LastError);
                     }
+                    else if (cfg.CleanupOrphans)
+                    {
+                        _log(truncated
+                            ? "本轮被 MaxItemsPerRun 截断，跳过孤儿清理（避免误删没处理到的条目）"
+                            : "本轮有站点失败（" + summary.SitesFailed + "），跳过孤儿清理");
+                    }
+                    // 清单每轮都写：否则关掉清理期间新写的文件永远不进清单，之后也清不掉。
+                    try { writer.SaveManifest(keep); } catch (Exception ex) { _log("写清单失败: " + ex.Message); }
                 }
 
                 try { state.Save(force: true); } catch { }
@@ -755,7 +775,7 @@ namespace TvBox.Plugin.Core
                 foreach (var item in res.Items)
                 {
                     ThrowIfStopped(ct);
-                    if (cfg.MaxItemsPerRun > 0 && summary.Items >= cfg.MaxItemsPerRun) break;
+                    if (cfg.MaxItemsPerRun > 0 && summary.Items >= cfg.MaxItemsPerRun) { summary.Truncated = true; break; }
                     if (string.IsNullOrWhiteSpace(item.Id)) continue;
                     seen++;
                     // 增量：列表侧指纹没变且还在有效期内 → 详情都不拉
@@ -838,7 +858,7 @@ namespace TvBox.Plugin.Core
                             var epUrl = line.Episodes[0]?.Url;
                             if (cfg.VerifyPlayUrl)
                             {
-                                var (pok, why) = await client.VerifyPlayableAsync(epUrl, ct).ConfigureAwait(false);
+                                var (pok, why) = await client.VerifyPlayableAsync(epUrl, site?.Referer, ct).ConfigureAwait(false);
                                 if (!pok)
                                 {
                                     summary.Skipped++; Update(p => p.ItemsSkipped++);
@@ -868,7 +888,7 @@ namespace TvBox.Plugin.Core
                     }
                     if (cfg.RequestDelayMs > 0) await Task.Delay(cfg.RequestDelayMs, ct).ConfigureAwait(false);
                 }
-                if (cfg.MaxItemsPerRun > 0 && summary.Items >= cfg.MaxItemsPerRun) break;
+                if (cfg.MaxItemsPerRun > 0 && summary.Items >= cfg.MaxItemsPerRun) { summary.Truncated = true; break; }
                 if (res.Items.Count < 20) break;
             }
             _log("     没分类但直接拉到 " + seen + " 条，写入 " + written + " 条");
@@ -1279,7 +1299,7 @@ namespace TvBox.Plugin.Core
                                 if (cfg.VerifyPlayUrl)
                                 {
                                     var mvUrl = line.Episodes[0]?.Url;
-                                    var (mok, mwhy) = await client.VerifyPlayableAsync(mvUrl, ct).ConfigureAwait(false);
+                                    var (mok, mwhy) = await client.VerifyPlayableAsync(mvUrl, site?.Referer, ct).ConfigureAwait(false);
                                     if (!mok)
                                     {
                                         summary.Items++;
@@ -1310,6 +1330,7 @@ namespace TvBox.Plugin.Core
 
                             if (cfg.MaxItemsPerRun > 0 && summary.Items >= cfg.MaxItemsPerRun)
                             {
+                                summary.Truncated = true;
                                 _log($"     达到单次上限 {cfg.MaxItemsPerRun}，停止");
                                 return written;
                             }

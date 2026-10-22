@@ -30,6 +30,7 @@ if [ "$have_all" -eq 0 ]; then
         -o "$DEB" \
         "https://github.com/MediaBrowser/Emby.Releases/releases/download/${EMBY_VERSION}/emby-server-deb_${EMBY_VERSION}_amd64.deb"
     fi
+    command -v dpkg-deb >/dev/null 2>&1 || { echo "!! 需要 dpkg-deb 解包（Debian/Ubuntu 自带）" >&2; exit 1; }
     echo "==> 解包 deb（不安装）"
     mkdir -p "$DEV_DIR/emby"
     dpkg-deb -x "$DEB" "$DEV_DIR/emby"
@@ -55,8 +56,17 @@ DOTNET="${DOTNET:-$DOTNET_ROOT/dotnet}"
 "$DOTNET" build TvBox.Plugin/TvBox.Plugin.csproj -c Release --nologo
 
 OUT="TvBox.Plugin/bin/Release/TvBox.dll"
+[ -f "$OUT" ] || { echo "!! 没产出 $OUT" >&2; exit 1; }
+
+# 直接把产物落到打包目录，避免「编译成功但 fpk 里还是旧 DLL」
+PKG_DLL="fpk-src/ui/plugin/TvBox.dll"
+mkdir -p "$(dirname "$PKG_DLL")"
+cp -f "$OUT" "$PKG_DLL"
+chmod 644 "$PKG_DLL" 2>/dev/null || true
 echo
 echo "==> 产物: $OUT ($(du -h "$OUT" | cut -f1))"
+echo "==> 已同步到打包目录: $PKG_DLL"
+echo "    sha256: $(sha256sum "$PKG_DLL" | cut -d' ' -f1)"
 echo
 echo "安装到 Emby（把 TvBox.dll 放进 programdata/plugins/ 后重启 Emby）:"
 echo "  cp \"$OUT\" /path/to/emby/programdata/plugins/"

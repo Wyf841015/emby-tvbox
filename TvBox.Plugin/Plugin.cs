@@ -143,6 +143,7 @@ namespace TvBox.Plugin
         {
             try
             {
+                var fallback172 = new System.Collections.Generic.List<System.Net.IPAddress>();
                 var candidates = new System.Collections.Generic.List<System.Net.IPAddress>();
                 foreach (var ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
                 {
@@ -160,11 +161,16 @@ namespace TvBox.Plugin
                         var b = ip.GetAddressBytes();
                         if (b[0] == 127) continue;                                  // 回环
                         if (b[0] == 169 && b[1] == 254) continue;                   // 链路本地
-                        if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) continue;      // docker 默认网段
                         if (b[0] == 10 && b[1] == 88) continue;                     // 常见 overlay
+                        // 172.16/12 里有 docker 网桥，但也是真实 LAN 的常用段。
+                        // 直接整段排除会让这些用户的 ResolveEmbyBaseUrl 返回 null → 同步中止。
+                        // 改成「降级候选」：有 192.168/10 时优先用它们，没有才退回这里。
+                        if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) { fallback172.Add(ip); continue; }
                         candidates.Add(ip);
                     }
                 }
+
+                if (candidates.Count == 0) candidates.AddRange(fallback172);
 
                 // 私网优先，其次随便一个
                 foreach (var ip in candidates)

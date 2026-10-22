@@ -1,7 +1,12 @@
 #!/bin/bash
 # 安装后：给内置 JRE 补执行权限
-APP="${TRIM_APPDEST}"
+set -u
+APP="${TRIM_APPDEST:?TRIM_APPDEST 为空}"
+[ -n "${TRIM_PKGVAR:-}" ] || { echo "TRIM_PKGVAR 为空，日志无处可写" >&2; exit 1; }
 mkdir -p "${TRIM_PKGVAR}"
-chmod -R +x "${APP}/ui/jre/bin" 2>/dev/null
-ln -sfn "${APP}/ui/images" "${APP}/ui/images" 2>/dev/null
+# 包内是双架构 JRE：ui/jre-x64 和 ui/jre-arm64（老路径 ui/jre 已不存在，
+# 之前 chmod 打在不存在的目录上还加了 2>/dev/null，等于静默失效）
+chmod -R +x "${APP}"/ui/jre-*/bin "${APP}"/ui/jre/bin 2>/dev/null || true
+# 原来这里 ln -sfn "${APP}/ui/images" "${APP}/ui/images" 会在目录内造出自指软链 images/images
+# 让 find -L / 备份递归。直接删掉。
 echo "tvboxhub installed: ${TRIM_APPVER}" >> "${TRIM_PKGVAR}/info.log"

@@ -1,4 +1,4 @@
 #!/bin/bash
 APP="${TRIM_APPDEST}"
-chmod -R +x "${APP}/ui/jre/bin" 2>/dev/null
+chmod -R +x "${APP}"/ui/jre-*/bin "${APP}"/ui/jre/bin 2>/dev/null || true
 echo "tvboxhub upgraded: ${TRIM_OLD_APPVER} -> ${TRIM_APPVER}" >> "${TRIM_PKGVAR}/info.log"

@@ -1,5 +1,36 @@
 # emby-tvbox
 
+## v0.3.0 — 全量安全审计与修复（P0×7 / P1×14 / P2×20）
+
+对一个自建接入口做完整审计后按级别全修。所有 P0 都做了**实际利用验证**再确认拦截。
+
+### P0（7 项，都验证过）
+
+| 漏洞 | 修法 |
+|---|---|
+| 站点 key 可逃逸 `onclick` 双引号属性 → 存储型 XSS，配合 root 操作 | `escJs` 先实体化 `& < > "` 再转义 `\` `'`；5 组载荷实测全部中和 |
+| hub 管理面零鉴权 + `Access-Control-Allow-Origin: *` + socket 0755 | 删通配 ACAO；写操作强制 `application/json`、`OPTIONS→403`；破坏性端点要令牌（令牌注入页面 `<meta>`，跨站读不到）；socket `chmod 600` |
+| `/TvBox/Stream` 与 `/api/stream/seg` 免鉴权任意 URL 代理（`127.0.0.1.nip.io` 可绕过纯字符串判断） | 两端都改成**解析 DNS 后按 IP 段判定**（回环/私网/链路本地/CGNAT/组播全拒），插件关闭自动跳转并逐跳复检 |
+| `/api/emby/probe-as-emby` 拼 shell → 命令注入 | 改 `ProcessBuilder` 传 argv，路径加深度校验 |
+| `/api/emby/prepare-output` 递归 chown 整卷（`path=/vol3` 即毁卷） | 拒绝卷根/浅路径/平台目录；只 chown `movies`、`tv` 两棵子树，限 5 万条目 |
+| `HubOk` 在令牌为空时 fail-open + SelfUpdate 无签名 | 拆 `HubOk`/`HubOkStrict`，写入类 fail-closed；令牌常量时间比较 |
+| 远程 spider jar 以 root 加载且 `;md5;` 从不校验 | 按配置声明的 md5 校验（缓存命中同样校验） |
+
+### P1（14 项）
+
+前端请求全加 20s 超时 · POST 只在网络层失败时换前缀（不再重复推送/重复安装）· 搜索 in-flight 守卫 · 站点列表失败不再假装"没配源" · 卸载插件加确认 · 预览探测改为流式读 1KB（原来会把整片 mp4 读进内存）· 孤儿清理在截断或站点失败时跳过（防批量误删 strm）· 停止不再被计成站点失败 · 停止信号用 linked token 传到在途 HTTP · 停止/读源/写探针等路由补鉴权 · 写探针限输出目录子树 · 自定义头 CRLF 清洗 · 线程池改单次 deadline（锁只等 1/4 预算）· 代理复用静态 HttpClient · 配置保存加锁 + temp/rename 原子写 · 插件安装只允许检测到的 Emby 实例 · Docker 容器名白名单 · reload 关闭旧 ClassLoader。
+
+### P2（20 项）
+
+补齐从未定义的 `--muted`/`--fg` · toast 提到弹层之上 · ESC 按「播放器→详情→弹窗」出栈 · `color-mix` 兜底 · 修重复 `</tbody></table>` · `fmtUptime` 重名 · 站点列表输入防抖 · 500 不再回堆栈 · 缺参数改友好提示 · history/loadErrors/detailCache 并发安全 · 备份只留 3 份 · DoH 证书校验收窄 · `/var/lib/emby` 不再被误杀 · docker 命令超时真正生效 · 安装脚本 chmod 改到真实 JRE 路径、删自指软链 · `TRIM_PKGVAR` 拼写 · `status` 校验 `/proc/cmdline` · 启动前清残留 socket · 守护脚本指数退避（连续 8 次停手）· `build.sh` 自动同步 DLL 到打包目录。
+
+### 顺带修的两个真问题
+
+- **hub 进程会越积越多**：`stop` 只杀 java 不杀 supervisor，后启动的实例绑不到 8098 就顺延端口，网关连的永远是最老那个（跑旧代码）。已让 `status` 认出 supervisor，并在 `start` 前清理重复实例。
+- **mp4 直链播不了**：以前所有播放都走 hls.js，遇到单文件 mp4 报 `manifestParsingError`。现在按 content-type 分流，非 HLS 走原生 `<video>`。
+
+> `-Xverify:none` 保留：TVBox 生态部分 jar 有不合规 class（`ClassFormatError: Bad string initial value`），关掉校验器会让整站不可用。补偿措施是上面的 jar md5 强校验。
+
 ## v0.2.1 — 实测 Emby 播放 + 补「转码临时目录」检测
 
 拿真实生成的 strm 在 Emby 里从头到尾验了一遍：

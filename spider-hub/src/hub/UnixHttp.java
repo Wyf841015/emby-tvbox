@@ -66,6 +66,16 @@ public class UnixHttp {
     private final Handler handler;
     private volatile boolean running;
 
+    /** 并发连接上限：每连接一个线程，不设上限时几百条半开连接就能把进程栈打满。 */
+    private static final java.util.concurrent.Semaphore CONNS = new java.util.concurrent.Semaphore(128);
+    /** 单连接最长存活时间（挡住只发半个请求头就挂住的连接）。 */
+    private static final java.util.concurrent.ScheduledExecutorService WATCHDOG =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "unix-http-watchdog");
+                t.setDaemon(true);
+                return t;
+            });
+
     public UnixHttp(Path sockPath, Handler handler) {
         this.sockPath = sockPath;
         this.handler = handler;
@@ -81,13 +91,31 @@ public class UnixHttp {
 
         ServerSocketChannel server = ServerSocketChannel.open(StandardProtocolFamily.UNIX);
         server.bind(UnixDomainSocketAddress.of(sockPath));
+        // fnOS 网关以 root 连这个 socket；权限收到 600，别的本地用户就别想直接调管理面了。
+        try {
+            Files.setPosixFilePermissions(sockPath, java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
+        } catch (Exception e) {
+            System.out.println("[sock] chmod 600 失败（不影响启动）: " + e.getMessage());
+        }
         running = true;
 
         Thread t = new Thread(() -> {
             while (running) {
                 try {
                     SocketChannel ch = server.accept();
-                    Thread w = new Thread(() -> serve(ch));
+                    if (!CONNS.tryAcquire()) {
+                        try { ch.close(); } catch (Exception ignore) { }
+                        continue;
+                    }
+                    java.util.concurrent.ScheduledFuture<?> kill = WATCHDOG.schedule(() -> {
+                        try { ch.close(); } catch (Exception ignore) { }
+                    }, 120, java.util.concurrent.TimeUnit.SECONDS);
+                    Thread w = new Thread(() -> {
+                        try { serve(ch); } catch (Exception ignore) { } finally {
+                            kill.cancel(false);
+                            CONNS.release();
+                        }
+                    });
                     w.setDaemon(true);
                     w.start();
                 } catch (Exception e) {

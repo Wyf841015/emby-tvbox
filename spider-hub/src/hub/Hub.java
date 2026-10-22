@@ -73,7 +73,7 @@ public class Hub {
         return e.json;
     }
 
-    static void detailCachePut(String k, String json) {
+    static synchronized void detailCachePut(String k, String json) {
         long now = System.currentTimeMillis();
         if (detailCache.size() >= DETAIL_CACHE_MAX) {
             for (Map.Entry<String, DetailEntry> e : detailCache.entrySet())
@@ -110,7 +110,8 @@ public class Hub {
     static UnixHttp unix;
 
     // ── 操作记录（扫描/添加/安装等），落盘到 PKGVAR/history.json ──
-    static final java.util.List<Map<String, Object>> history = new java.util.ArrayList<>();
+    static final java.util.List<Map<String, Object>> history =
+            java.util.Collections.synchronizedList(new java.util.ArrayList<>());
     static final int HISTORY_MAX = 300;
     static Path historyFile;
     /** PKGVAR/data：允许本地配置文件读取的唯一位置。 */
@@ -283,6 +284,13 @@ public class Hub {
     static void handle(HttpExchange ex) {
         String path = ex.getRequestURI().getPath();
         try {
+            if (path.startsWith("/api/") && !apiWriteAllowed(ex, path)) {
+                Map<String, Object> err = new LinkedHashMap<>();
+                err.put("ok", false);
+                err.put("msg", "缺少令牌或请求不合法（CSRF 防护）");
+                sendJson(ex, "OPTIONS".equalsIgnoreCase(ex.getRequestMethod()) ? 403 : 401, err);
+                return;
+            }
             // 静态资源（hls.min.js 等）：只放行白名单扩展名，且不允许跳出 uiDir
             if (path.length() > 1 && uiDir != null) {
                 String lower = path.toLowerCase();
@@ -337,12 +345,80 @@ public class Hub {
             send(ex, 404, "text/plain; charset=utf-8", "404");
         } catch (Exception e) {
             try {
-                send(ex, 500, "text/plain; charset=utf-8", "ERROR: " + e + "\n" + stack(e));
+                // 不再把堆栈回给调用方：里面有内部路径/类名，排障看 info.log 就够
+                System.out.println("[500] " + path + " → " + e);
+                send(ex, 500, "text/plain; charset=utf-8", "ERROR: " + explain(e));
             } catch (Exception ignore) {
             }
         } finally {
             ex.close();
         }
+    }
+
+    /** 需要令牌才能调的破坏性端点（都是界面/插件主动触发、且会改磁盘或换代码的操作）。 */
+    static final java.util.Set<String> DESTRUCTIVE_APIS = java.util.Set.of(
+            "/api/emby/install", "/api/emby/uninstall", "/api/emby/prepare-output",
+            "/api/emby/probe-as-emby", "/api/save", "/api/reload", "/api/cache/clear");
+
+    /** 本地令牌：首次启动生成，注入到页面 <meta>，用于挡住「本机别的进程」和跨站 CSRF。 */
+    static String localToken() {
+        Object v = settings.get("localToken");
+        if (v != null && !String.valueOf(v).isBlank()) return String.valueOf(v);
+        StringBuilder sb = new StringBuilder();
+        for (byte b : java.security.SecureRandom.getSeed(24)) sb.append(String.format("%02x", b));
+        String t = sb.toString();
+        settings.put("localToken", t);
+        saveSettings();
+        return t;
+    }
+
+    static boolean tokenMatches(String given) {
+        if (given == null || given.isBlank()) return false;
+        String g = given.trim();
+        String local = localToken();
+        Object plugin = settings.get("embyToken");
+        boolean ok = constantTimeEquals(g, local)
+                || (plugin != null && constantTimeEquals(g, String.valueOf(plugin)));
+        return ok;
+    }
+
+    static boolean constantTimeEquals(String a, String b) {
+        if (a == null || b == null) return false;
+        byte[] x = a.getBytes(StandardCharsets.UTF_8), y = b.getBytes(StandardCharsets.UTF_8);
+        if (x.length != y.length) return false;
+        int d = 0;
+        for (int i = 0; i < x.length; i++) d |= x[i] ^ y[i];
+        return d == 0;
+    }
+
+    /**
+     * 写操作的准入闸门。
+     *
+     * 威胁模型：① 管理员的浏览器打开恶意网页 → 跨站简单请求打 /api/*（无 preflight）；
+     * ② 本机其他用户/进程直接打 127.0.0.1:8098；③ 网关之后的正常调用。
+     * 对策：OPTIONS 直接 403；写请求必须是 application/json（不属于 CORS 简单请求，
+     * 浏览器必须先 preflight，而 ACAO 已删 → 真请求发不出去）；破坏性端点再要令牌。
+     * 网关注入的 X-Trim-Userid 说明 fnOS 已经认证过这位用户，放行。
+     */
+    static boolean apiWriteAllowed(HttpExchange ex, String path) {
+        String method = ex.getRequestMethod() == null ? "GET" : ex.getRequestMethod().toUpperCase();
+        if (method.equals("OPTIONS")) return false;
+        String given = ex.getRequestHeaders().getFirst("X-TvBox-Token");
+        if (given == null) {
+            Map<String, String> q = query(ex.getRequestURI().getRawQuery());
+            given = q.get("token");
+        }
+        boolean viaGateway = ex.getRequestHeaders().getFirst("X-Trim-Userid") != null;
+        boolean tokenOk = tokenMatches(given);
+
+        if (method.equals("GET") || method.equals("HEAD")) {
+            if (DESTRUCTIVE_APIS.contains(path)) return viaGateway || tokenOk;
+            return true;   // 只读 GET 不设门槛（数据本身不含凭据）
+        }
+        if (DESTRUCTIVE_APIS.contains(path)) return viaGateway || tokenOk;
+        if (viaGateway || tokenOk) return true;
+        String ct = ex.getRequestHeaders().getFirst("Content-Type");
+        return ct != null && ct.toLowerCase().contains("application/json");
     }
 
     static void handleApi(HttpExchange ex, String path) throws Exception {
@@ -1388,12 +1464,43 @@ public class Hub {
                 String pd = firstNonEmpty(req.get("programdata"), str(settings.get("embyPath")));
                 // 本地优先、失败自动转 Docker。pd 允许为空：容器部署时压根没有宿主 programdata。
                 String container = firstNonEmpty(req.get("container"), str(settings.get("dockerContainer")));
+                if (container != null && !container.isBlank()) {
+                    boolean okName = container.matches("^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$");
+                    boolean known = false;
+                    if (okName) {
+                        for (java.util.Map<String, Object> c : DockerInstaller.containers()) {
+                            Object nm = c.get("name");
+                            if (nm != null && container.equals(String.valueOf(nm))) { known = true; break; }
+                        }
+                    }
+                    // 以前 container 直接来自表单：可以 docker restart mysql 打断任何服务，
+                    // 或把 DLL 拷进任意容器里以 root 执行命令。
+                    if (!okName || !known) {
+                        record("安装插件", container, false, "不是 Emby 容器", 0);
+                        sendJson(ex, 200, fail("只能安装到检测到的 Emby 容器，拒绝: " + container));
+                        return;
+                    }
+                }
                 String useDocker = req.get("docker");
                 boolean allowDocker = useDocker == null || !("0".equals(useDocker) || "false".equalsIgnoreCase(useDocker));
                 if (pd != null && !pd.isEmpty()) {
                     // 必须是真的 Emby programdata：本进程以 root 跑，不校验就等于
                     // 给任何调用者一个「往任意目录写文件」的原语。
                     String why = EmbyManager.validateProgramdata(pd);
+                // 只允许装到「本机真实存在的 Emby 实例」上。
+                // 以前任意可写目录（/tmp、/home）都能过校验，等于给调用方一个
+                // root 往任意目录投放 DLL + 含 HubToken 的 XML 的原语。
+                    if (why == null) {
+                        java.util.List<EmbyManager.Instance> found = EmbyManager.detect(null);
+                        boolean known = false;
+                        for (EmbyManager.Instance it : found) {
+                            if (it != null && it.programdata != null && EmbyManager.samePath(it.programdata, pd)) {
+                                known = true;
+                                break;
+                            }
+                        }
+                        if (!known) why = "不是本机检测到的 Emby 数据目录（拒绝安装到 " + pd + "）";
+                    }
                     if (why != null && !allowDocker) {
                         record("安装插件", pd, false, why, 0);
                         sendJson(ex, 200, fail("拒绝安装: " + why));
@@ -1637,14 +1744,21 @@ public class Hub {
             = new java.util.concurrent.ConcurrentHashMap<>();
 
     static String call(String key, Callable<String> task, int timeoutSec) throws Exception {
+        // key 为空时 ConcurrentHashMap.get(null) 直接 NPE，报出来的是一句
+        // "Cannot invoke Object.hashCode() because parameter1 is null"，完全看不出是缺参数。
+        if (key == null || key.isBlank()) throw new Exception("缺少 site/key 参数");
         java.util.concurrent.locks.ReentrantLock lock =
                 KEY_LOCKS.computeIfAbsent(String.valueOf(key), k -> new java.util.concurrent.locks.ReentrantLock());
-        // 拿不到锁说明这个站点正在被另一路请求用着，直接排队等（同 key 串行）
-        if (!lock.tryLock(timeoutSec, TimeUnit.SECONDS)) {
+        long deadline = System.currentTimeMillis() + timeoutSec * 1000L;
+        // 锁只等 1/4 预算：锁 + 执行原本各等满 timeout，一个请求最坏要 2×timeout，
+        // 16 个慢源并发就把 worker 池和 HTTP 线程一起拖死。
+        long lockWait = Math.max(1, timeoutSec / 4);
+        if (!lock.tryLock(lockWait, TimeUnit.SECONDS)) {
             throw new Exception("站点 " + key + " 正在处理中，请稍后重试");
         }
         try {
-            return callUnlocked(key, task, timeoutSec);
+            long left = Math.max(1, (deadline - System.currentTimeMillis()) / 1000);
+            return callUnlocked(key, task, (int) left);
         } finally {
             lock.unlock();
         }
@@ -2376,12 +2490,42 @@ public class Hub {
     }
 
     /** 下载（带镜像回退）站点 jar 并缓存；失败返回 null，调用方退回全局 jar。 */
-    static File downloadJar(String url) {
-        url = stripTvBoxSuffix(url);
+    /** 取 TVBox 配置里声明的 md5（形如 url;md5;abcdef...），没有就返回 null。 */
+    static String declaredMd5(String url) {
+        if (url == null) return null;
+        int i = url.indexOf(";md5;");
+        if (i < 0) return null;
+        String rest = url.substring(i + 5).trim();
+        int semi = rest.indexOf(';');
+        if (semi >= 0) rest = rest.substring(0, semi);
+        rest = rest.trim().toLowerCase();
+        return rest.matches("[0-9a-f]{32}") ? rest : null;
+    }
+
+    static String md5Hex(byte[] b) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
+            byte[] d = md.digest(b);
+            StringBuilder sb = new StringBuilder();
+            for (byte x : d) sb.append(String.format("%02x", x));
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    static File downloadJar(String urlWithSuffix) {
+        String wantMd5 = declaredMd5(urlWithSuffix);
+        String url = stripTvBoxSuffix(urlWithSuffix);
         try {
             String name = sha1Hex(url) + ".jar";
             Path target = jarCacheDir().resolve(name);
-            if (Files.isRegularFile(target) && Files.size(target) > 4096) return target.toFile();
+            if (Files.isRegularFile(target) && Files.size(target) > 4096) {
+                // 配置里声明了 md5 就必须对上，否则缓存也作废（配置指向的 jar 被换掉了）
+                if (wantMd5 == null || wantMd5.equals(md5Hex(Files.readAllBytes(target)))) return target.toFile();
+                System.out.println("站点 jar 缓存 md5 不符，重新下载: " + url);
+                Files.deleteIfExists(target);
+            }
 
             java.util.List<String> candidates = new ArrayList<>();
             candidates.add(url);
@@ -2402,6 +2546,16 @@ public class Hub {
                     if (r.body().length > 80 * 1024 * 1024) {
                         System.out.println("站点 jar 超过 80MB，跳过: " + u);
                         continue;
+                    }
+                    // 配置里写了 ;md5;xxx 就必须一致 —— 否则等于无条件信任任意远端 jar，
+                    // 而这个 jar 会被 URLClassLoader 以 root 身份加载并执行静态块。
+                    if (wantMd5 != null) {
+                        String got = md5Hex(r.body());
+                        if (!wantMd5.equals(got)) {
+                            System.out.println("站点 jar md5 不符，拒绝加载: " + u
+                                    + "（期望 " + wantMd5 + "，实际 " + got + "）");
+                            continue;
+                        }
                     }
                     // TVBox 生态里的 "spider jar" 有两种：真 jar，和 APK/dex 包。
                     // dex 包（含 classes.dex）JVM 的 URLClassLoader 加载不了，
@@ -2506,7 +2660,6 @@ public class Hub {
     static void send(HttpExchange ex, int code, String type, String body) throws Exception {
         byte[] b = body.getBytes(StandardCharsets.UTF_8);
         ex.getResponseHeaders().set("Content-Type", type);
-        ex.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
         ex.sendResponseHeaders(code, b.length);
         try (OutputStream os = ex.getResponseBody()) {
             os.write(b);
@@ -2525,7 +2678,12 @@ public class Hub {
         try (InputStream in = ex.getRequestBody(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
             byte[] buf = new byte[8192];
             int n;
-            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            int total = 0;
+            while ((n = in.read(buf)) > 0) {
+                total += n;
+                if (total > 2 * 1024 * 1024) throw new IllegalStateException("请求体超过 2MB");
+                out.write(buf, 0, n);
+            }
             return out.toString(StandardCharsets.UTF_8);
         }
     }
@@ -2576,18 +2734,85 @@ public class Hub {
         if (c instanceof java.net.http.HttpConnectTimeoutException) return "连接超时（Emby 没起或端口不对）";
         if (c instanceof java.net.ConnectException) return "连接被拒（Emby 没起或端口不对）";
         if (c instanceof java.net.http.HttpTimeoutException) return "请求超时（Emby 卡住或正在扫库）";
-        if (c instanceof java.io.IOException) return n + ": " + c.getMessage();
-        return e.getMessage() == null ? e.toString() : e.getMessage();
+        if (c instanceof java.io.IOException) {
+            String m = c.getMessage();
+            if (m != null && m.length() > 200) m = m.substring(0, 200) + "…";
+            return n + ": " + m;
+        }
+        String m2 = e.getMessage();
+        if (m2 == null) return n;
+        // 只回前 200 字：完整堆栈/内部路径走日志，不进 HTTP 响应
+        return m2.length() > 200 ? m2.substring(0, 200) + "…" : m2;
     }
 
     /** 空值统一成空字符串（避免页面上出现 None / null）。 */
+    /** 反向代理专用：复用同一个实例。以前每请求 new 一个，HLS 每小时上千个实例/线程。 */
+    static final java.net.http.HttpClient PROXY_HTTP = java.net.http.HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(8))
+            .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
+            .build();
+
     static final java.net.http.HttpClient HUB_HTTP = java.net.http.HttpClient.newBuilder()
             .connectTimeout(java.time.Duration.ofSeconds(15))
             .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
             .build();
 
     /** 带源 header 的 GET（Range 可选），拿原始字节。 */
+    /** 是否允许访问非公网地址（默认 false；内网自建视频源的用户可在配置里打开）。 */
+    static boolean allowPrivateProxy() {
+        Object v = settings.get("allowPrivateProxy");
+        return v != null && ("true".equalsIgnoreCase(String.valueOf(v)) || "1".equals(String.valueOf(v)));
+    }
+
+    /**
+     * 只允许 http/https，且域名解析出的地址必须全是公网。
+     *
+     * 为什么必须有：/api/stream/seg、/proxy 直接吃调用方给的 URL，
+     * 而 hub 是 root 跑的 —— 不校验就等于给任何人一个「读内网任意 HTTP 服务」的原语
+     * （127.0.0.1.nip.io 这类域名指向回环，纯字符串判断拦不住，必须解析）。
+     */
+    static boolean isPublicHttpUrl(String url) {
+        try {
+            java.net.URI u = java.net.URI.create(url.trim());
+            String scheme = u.getScheme() == null ? "" : u.getScheme().toLowerCase();
+            if (!scheme.equals("http") && !scheme.equals("https")) return false;
+            String host = u.getHost();
+            if (host == null || host.isBlank()) return false;
+            if (host.equals("localhost") || host.endsWith(".localhost") || host.endsWith(".local")) return false;
+            java.net.InetAddress[] addrs = java.net.InetAddress.getAllByName(host);
+            if (addrs.length == 0) return false;
+            for (java.net.InetAddress a : addrs) {
+                if (a.isLoopbackAddress() || a.isAnyLocalAddress() || a.isLinkLocalAddress()
+                        || a.isSiteLocalAddress() || a.isMulticastAddress()) return false;
+                byte[] b = a.getAddress();
+                if (b.length == 4) {
+                    int f = b[0] & 0xFF;
+                    if (f == 0 || f == 10 || f == 127) return false;
+                    if (f == 169 && (b[1] & 0xFF) == 254) return false;       // 云元数据
+                    if (f == 172 && (b[1] & 0xFF) >= 16 && (b[1] & 0xFF) <= 31) return false;
+                    if (f == 192 && (b[1] & 0xFF) == 168) return false;
+                    if (f >= 224) return false;                               // 组播/保留
+                } else if (b.length == 16) {
+                    if ((b[0] & 0xFE) == 0xFC) return false;                  // fc00::/7 ULA
+                    if ((b[0] & 0xFF) == 0xFE && (b[1] & 0xC0) == 0x80) return false;  // fe80::/10
+                    boolean mapped = true;
+                    for (int i = 0; i < 10; i++) if (b[i] != 0) { mapped = false; break; }
+                    if (mapped && (b[10] & 0xFF) == 0xFF && (b[11] & 0xFF) == 0xFF) {
+                        int f = b[12] & 0xFF;
+                        if (f == 10 || f == 127 || (f == 192 && (b[13] & 0xFF) == 168)) return false;
+                        if (f == 172 && (b[13] & 0xFF) >= 16 && (b[13] & 0xFF) <= 31) return false;
+                    }
+                }
+            }
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     static java.net.http.HttpResponse<byte[]> httpGetBytes(String url, String headerJson, String range) throws Exception {
+        if (!allowPrivateProxy() && !isPublicHttpUrl(url))
+            throw new Exception("拒绝访问非公网地址: " + url);
         java.net.http.HttpRequest.Builder b = java.net.http.HttpRequest.newBuilder(java.net.URI.create(url))
                 .timeout(java.time.Duration.ofSeconds(45))
                 .GET()
@@ -2742,8 +2967,7 @@ public class Hub {
     /** Unix 前端把请求反代到本地 TCP。 */
     static UnixHttp.Resp proxy(String method, String url, String body, Map<String, String> inHeaders, String pxUsed) {
         try {
-            java.net.http.HttpClient c = java.net.http.HttpClient.newBuilder()
-                    .connectTimeout(java.time.Duration.ofSeconds(10)).build();
+            java.net.http.HttpClient c = PROXY_HTTP;   // 复用静态实例（不再每请求 new）
             java.net.http.HttpRequest.Builder b = java.net.http.HttpRequest.newBuilder(java.net.URI.create(url))
                     .timeout(java.time.Duration.ofSeconds(180));
             // 转发给本机 handler 的请求头：Range 一定要带，否则视频没法边下边播
@@ -2976,10 +3200,22 @@ public class Hub {
         if (n > 0) System.out.println("恢复上次探测结果: " + n + " 个站点");
     }
 
+    static final Object SETTINGS_LOCK = new Object();
+
     static void saveSettings() {
         try {
-            if (dataFile != null) {
-                Files.writeString(dataFile, SpiderPool.Json.stringify(settings), StandardCharsets.UTF_8);
+            if (dataFile == null) return;
+            String json;
+            synchronized (SETTINGS_LOCK) {
+                json = SpiderPool.Json.stringify(settings);   // 锁内快照，避免并发遍历 CME
+            }
+            Path tmp = dataFile.resolveSibling(dataFile.getFileName() + ".tmp");
+            Files.writeString(tmp, json, StandardCharsets.UTF_8);
+            try {
+                Files.move(tmp, dataFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            } catch (Exception atomicFail) {
+                Files.move(tmp, dataFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             }
         } catch (Exception e) {
             System.out.println("保存配置失败: " + e.getMessage());
@@ -2988,15 +3224,32 @@ public class Hub {
 
     // ───────────────────────── Web UI ─────────────────────────
 
+    /** 把本地令牌注入页面 head，同源页面自动带上，跨站页面读不到。 */
+    static String injectToken(String html) {
+        if (html == null) return "";
+        String meta = "<meta name=\"hub-token\" content=\"" + localToken() + "\">";
+        // 注意：不能用 contains("name=\"hub-token\"") 判断是否已注入 —— 页面里的 JS
+        // 选择器 'meta[name="hub-token"]' 本身就含这段字面量，会导致永远判定「已注入」。
+        if (html.contains("<meta name=\"hub-token\"")) return html;
+        int i = html.indexOf("<head>");
+        if (i >= 0) return html.substring(0, i + 6) + "\n" + meta + html.substring(i + 6);
+        int j = html.indexOf("<html");
+        if (j >= 0) {
+            int k = html.indexOf('>', j);
+            if (k > 0) return html.substring(0, k + 1) + meta + html.substring(k + 1);
+        }
+        return meta + html;
+    }
+
     static String ui() {
         try {
             if (uiDir != null) {
                 Path u = uiDir.resolve("index.html");
-                if (Files.isRegularFile(u)) return Files.readString(u, StandardCharsets.UTF_8);
+                if (Files.isRegularFile(u)) return injectToken(Files.readString(u, StandardCharsets.UTF_8));
             }
             // 优先读 jar 同目录 web/index.html（方便改），否则读 classpath
             Path p = Path.of("web", "index.html");
-            if (Files.isRegularFile(p)) return Files.readString(p, StandardCharsets.UTF_8);
+            if (Files.isRegularFile(p)) return injectToken(Files.readString(p, StandardCharsets.UTF_8));
             Path p2 = Path.of(System.getProperty("hub.dir", "."), "web", "index.html");
             if (Files.isRegularFile(p2)) return Files.readString(p2, StandardCharsets.UTF_8);
             try (InputStream in = Hub.class.getResourceAsStream("/web/index.html")) {
@@ -3164,7 +3417,6 @@ public class Hub {
             }
             // 302 到真地址：播放器自己跟着走，hub 不占带宽
             ex.getResponseHeaders().add("Location", r[1]);
-            ex.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
             ex.getResponseHeaders().add("X-TvBox-Parse", r[3]);
             ex.sendResponseHeaders(302, -1);
             ex.close();
@@ -3319,6 +3571,10 @@ public class Hub {
                     }
                 }
                 if (target == null) { sendBytes(ex, 400, "text/plain", "missing url".getBytes(StandardCharsets.UTF_8)); return; }
+                if (!allowPrivateProxy() && !isPublicHttpUrl(target)) {
+                    sendBytes(ex, 403, "text/plain", "拒绝访问非公网地址".getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
                 try {
                     java.net.HttpURLConnection c = (java.net.HttpURLConnection) java.net.URI.create(target).toURL().openConnection();
                     c.setConnectTimeout(8000);
@@ -3383,7 +3639,6 @@ public class Hub {
 
     static void sendBytes(com.sun.net.httpserver.HttpExchange ex, int code, String contentType, byte[] body) throws java.io.IOException {
         ex.getResponseHeaders().set("Content-Type", contentType);
-        ex.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
         ex.sendResponseHeaders(code, body.length == 0 ? -1 : body.length);
         if (body.length > 0) {
             try (java.io.OutputStream os = ex.getResponseBody()) { os.write(body); }

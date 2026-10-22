@@ -100,7 +100,8 @@ public class SpiderPool {
     private static final long IDLE_MS = 15 * 60 * 1000L;
     private final Map<String, Long> lastUsed = new ConcurrentHashMap<>();
     private final AtomicLong evicted = new AtomicLong();
-    private final Map<String, String> loadErrors = new LinkedHashMap<>();
+    private final Map<String, String> loadErrors =
+            java.util.Collections.synchronizedMap(new LinkedHashMap<>());
     private ClassLoader spiderLoader;
     /** 站点自带 jar 的 ClassLoader（按 jar URL 缓存，父加载器是 spiderLoader）。 */
     private final Map<String, ClassLoader> jarLoaders = new ConcurrentHashMap<>();
@@ -116,7 +117,9 @@ public class SpiderPool {
     }
 
     public Map<String, String> loadErrors() {
-        return loadErrors;
+        synchronized (loadErrors) {
+            return new LinkedHashMap<>(loadErrors);   // 快照，避免调用方遍历时被写
+        }
     }
 
     public int size() {
@@ -134,6 +137,12 @@ public class SpiderPool {
     public void loadFromConfig(String json, String baseUrl) throws Exception {
         sites.clear();
         instances.clear();
+        // 旧 jar 的 URLClassLoader 必须显式关掉并清空，否则每次 reload 都把类留在 metaspace，
+        // 多仓配置反复重载必然 OOM（-XX:MaxMetaspaceSize=256m）。
+        for (ClassLoader ld : jarLoaders.values()) {
+            try { if (ld instanceof java.net.URLClassLoader) ((java.net.URLClassLoader) ld).close(); } catch (Exception ignore) { }
+        }
+        jarLoaders.clear();
         loadErrors.clear();
         netdiskCount = 0;
 

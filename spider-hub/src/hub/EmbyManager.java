@@ -414,13 +414,22 @@ public class EmbyManager {
         }
     }
 
-    private static boolean samePath(String a, String b) {
+    public static boolean samePath(String a, String b) {
         try {
             return Path.of(a).toAbsolutePath().normalize()
                     .equals(Path.of(b).toAbsolutePath().normalize());
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /** 只拒绝这些系统目录本身及其直接子系统，不再整段封 /var/lib（/var/lib/emby 是合法目标）。 */
+    static boolean isSystemDir(String path) {
+        for (String bad : new String[]{"/etc", "/root", "/usr", "/bin", "/sbin", "/lib", "/lib64",
+                                       "/boot", "/dev", "/proc", "/sys", "/var/lib/docker", "/var/run"}) {
+            if (path.equals(bad) || path.startsWith(bad + "/")) return true;
+        }
+        return false;
     }
 
     public static String validateProgramdata(String programdata) {
@@ -484,6 +493,16 @@ public class EmbyManager {
             Path target = plugins.resolve("TvBox.dll");
             String backup = null;
             if (Files.isRegularFile(target)) {
+                // 每次安装/升级都留一份备份，长期下来会把小分区占满 —— 只保留最近 3 份
+                try (java.util.stream.Stream<Path> old = java.nio.file.Files.list(plugins)) {
+                    java.util.List<Path> baks = new java.util.ArrayList<>();
+                    old.filter(x -> x.getFileName().toString().startsWith("TvBox.dll.bak-"))
+                       .forEach(baks::add);
+                    baks.sort(java.util.Comparator.comparing(p2 -> p2.getFileName().toString()));
+                    for (int i = 0; i + 3 < baks.size(); i++) {
+                        try { java.nio.file.Files.deleteIfExists(baks.get(i)); } catch (Exception ignore) { }
+                    }
+                } catch (Exception ignore) { }
                 Path bak = plugins.resolve("TvBox.dll.bak-" + System.currentTimeMillis());
                 Files.copy(target, bak, StandardCopyOption.REPLACE_EXISTING);
                 backup = bak.toString();
@@ -792,6 +811,12 @@ public class EmbyManager {
                 r.put("msg", "只允许在 /volN、/mnt、/media、/home、/srv 下建输出目录");
                 return r;
             }
+            String why = unsafeOutputPath(path);
+            if (why != null) {
+                r.put("ok", false);
+                r.put("msg", "拒绝这个输出目录: " + why);
+                return r;
+            }
             Path root = Path.of(path).toAbsolutePath().normalize();
             Files.createDirectories(root);
             Path movies = root.resolve("movies");
@@ -813,7 +838,11 @@ public class EmbyManager {
                 }
             }
             if (owner != null) {
-                adopt(root, owner, group, true);
+                // 只改我们自己建出来的 movies/ 和 tv/ 两层。
+                // 以前是对 root 整棵树递归 chown —— 传 /vol3 就把整个卷（含
+                // @appcenter 里以 root 运行的 hub.jar）交给 Emby 用户，且不可逆。
+                adopt(movies, owner, group, true);
+                adopt(tv, owner, group, true);
             }
             r.put("ok", true);
             r.put("msg", "已准备 " + root + "（movies/tv 已建，属主 " + (owner == null ? "未改" : owner.getName()) + "）");
@@ -827,13 +856,20 @@ public class EmbyManager {
     }
 
     /** 递归把属主/组设成指定用户（目录 775、文件 664）。 */
+    /** 单个目录的递归上限：超过就只改目录本身，避免一次 prepare 把整卷拉进内存。 */
+    private static final int ADOPT_MAX_ENTRIES = 50000;
+
     private static void adopt(Path start, java.nio.file.attribute.UserPrincipal owner,
                               java.nio.file.attribute.GroupPrincipal group, boolean recursive) throws Exception {
         java.util.List<Path> paths = new ArrayList<>();
         paths.add(start);
         if (recursive && Files.isDirectory(start)) {
             try (java.util.stream.Stream<Path> st = Files.walk(start)) {
-                st.forEach(paths::add);
+                java.util.Iterator<Path> it = st.iterator();
+                int n = 0;
+                while (it.hasNext() && n++ < ADOPT_MAX_ENTRIES) paths.add(it.next());
+            } catch (Exception e) {
+                System.out.println("[prepare] 遍历中断，只改目录本身: " + e.getMessage());
             }
         }
         for (Path p : paths) {
@@ -866,16 +902,26 @@ public class EmbyManager {
             r.put("msg", "找不到 plugins 目录的属主，没法确定 Emby 运行用户");
             return r;
         }
+        String bad = unsafeOutputPath(path);
+        if (bad != null) {
+            r.put("ok", false);
+            r.put("msg", "拒绝探测这个目录: " + bad);
+            return r;
+        }
         for (String dir : new String[]{path, path + "/movies", path + "/tv"}) {
             Map<String, Object> it = new LinkedHashMap<>();
             it.put("path", dir);
-            String script = "mkdir -p '" + dir + "' 2>/dev/null; "
-                    + "p='" + dir + "/.tvbox-probe-$$'; "
-                    + "if touch \"$p\" 2>/tmp/.tvbox_probe_err && echo ok > \"$p\" 2>>/tmp/.tvbox_probe_err; "
-                    + "then rm -f \"$p\"; echo WRITABLE; else echo FAILED; fi; "
-                    + "cat /tmp/.tvbox_probe_err 2>/dev/null; rm -f /tmp/.tvbox_probe_err";
-            String out = runAs(user, script);
-            boolean ok = out.contains("WRITABLE");
+            // 参数化执行，不经过 shell —— 以前是 "mkdir -p '" + dir + "'"，
+            // 路径里带一个单引号就能注入任意命令，而执行身份是 root→Emby。
+            String out = "";
+            String probe = dir + "/.tvbox-probe-" + ProcessHandle.current().pid();
+            out += runAsArgv(user, "/bin/mkdir", "-p", "--", dir);
+            String touch = runAsArgv(user, "/usr/bin/touch", probe);
+            out += touch;
+            String rm = runAsArgv(user, "/bin/rm", "-f", "--", probe);
+            out += rm;
+            boolean ok = !touch.contains("ERROR") && !touch.contains("TIMEOUT") && !touch.startsWith("FAILED");
+            if (!ok) out += " FAILED";
             it.put("writable", ok);
             if (!ok) {
                 allOk = false;
@@ -907,6 +953,41 @@ public class EmbyManager {
     }
 
     /** 以指定用户执行一段 sh，返回 stdout+stderr。 */
+    /** 参数化版 runAs：argv 直传，不经过 shell（路径里的引号/分号不再有特殊含义）。 */
+    static String runAsArgv(String user, String... argv) {
+        try {
+            java.util.List<String> cmd = new java.util.ArrayList<>();
+            boolean runuser = Files.isExecutable(Path.of("/usr/sbin/runuser"));
+            if (runuser) {
+                cmd.add("/usr/sbin/runuser");
+                cmd.add("-u");
+                cmd.add(user);
+                cmd.add("--");
+                cmd.addAll(java.util.Arrays.asList(argv));
+            } else {
+                // su 没有 -- 语法，只能把 argv 交给 sh 重新展开成位置参数，仍然不拼字符串
+                cmd.add("/bin/su");
+                cmd.add("-s");
+                cmd.add("/bin/sh");
+                cmd.add(user);
+                cmd.add("-c");
+                cmd.add("\"$0\" \"$@\"");
+                cmd.addAll(java.util.Arrays.asList(argv));
+            }
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            pb.redirectErrorStream(true);
+            Process pr = pb.start();
+            String out = new String(pr.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            if (!pr.waitFor(20, java.util.concurrent.TimeUnit.SECONDS)) {
+                pr.destroyForcibly();
+                return "TIMEOUT";
+            }
+            return out;
+        } catch (Exception e) {
+            return "ERROR " + e.getClass().getSimpleName() + ": " + e.getMessage();
+        }
+    }
+
     static String runAs(String user, String script) {
         try {
             ProcessBuilder pb;
@@ -925,6 +1006,34 @@ public class EmbyManager {
             return out;
         } catch (Exception e) {
             return "ERROR " + e.getClass().getSimpleName() + ": " + e.getMessage();
+        }
+    }
+
+    /**
+     * 输出目录的「深度/形态」校验（在 underMediaRoots 之上再收一道）。
+     * 拒绝：数据卷根、单层目录、封装了平台目录（@app*、.@#local 等）的路径。
+     */
+    static String unsafeOutputPath(String path) {
+        try {
+            Path p = Path.of(path).toAbsolutePath().normalize();
+            String[] seg = p.toString().split("/");
+            java.util.List<String> parts = new java.util.ArrayList<>();
+            for (String x : seg) if (!x.isBlank()) parts.add(x);
+            if (parts.isEmpty()) return "路径为空";
+            for (String x : parts) {
+                if (x.startsWith("@app") || x.startsWith("@sys") || x.startsWith(".@")
+                        || x.equals("@" + "appcenter") || x.startsWith("@appdata")) {
+                    return "不能指向平台目录 " + x;
+                }
+            }
+            if (parts.get(0).matches("vol[0-9]+")) {
+                if (parts.size() < 3) return "不能是卷根或卷下一层目录（至少要像 /vol2/1000/tvbox）";
+            } else if (parts.size() < 3) {
+                return "目录层级太浅，至少要到 /home/<用户>/<目录> 这种深度";
+            }
+            return null;
+        } catch (Exception e) {
+            return "路径不合法: " + e.getMessage();
         }
     }
 

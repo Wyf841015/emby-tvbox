@@ -18,7 +18,7 @@ PORT=8098
 SOCK="${APP}/tvboxhub.sock"
 
 mkdir -p "${TRIM_PKGVAR}"
-export TRM_PKGVAR="${TRIM_PKGVAR}"
+export TRIM_PKGVAR="${TRIM_PKGVAR}"    # 之前写成 TRM_PKGVAR（少一个 I），子进程拿不到
 
 log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"; }
 
@@ -41,8 +41,13 @@ log_msg "arch=${ARCH} jre=${JAVA:-none}"
 status() {
     if [ -f "${PID_FILE}" ]; then
         pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+        # 只看 kill -0 会把「PID 被复用给别的进程」当成还在运行 → 永远不启动 → 网关 502。
+        # 必须确认这个 pid 的命令行里真的有 hub.Hub。
         if [ -n "$pid" ] && kill -0 "${pid}" 2>/dev/null; then
-            return 0
+            cmd=$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null)
+            case "$cmd" in
+                *'hub.Hub'*|*'run-hub.sh'*) return 0 ;;
+            esac
         fi
         rm -f "${PID_FILE}"
     fi
@@ -50,6 +55,19 @@ status() {
 }
 
 start_process() {
+    # 非正常退出后 socket 文件会残留，bind 必失败（靠 5 秒重启自愈太慢）
+    [ -S "${SOCK}" ] && rm -f "${SOCK}"
+
+    # 兜底回收重复实例：历史上 stop 只杀 java 不杀 supervisor，会越积越多，
+    # 后启动的实例绑不到 8098 就顺延端口 → 网关连的是最老那个（跑旧代码）。
+    dups=$(ps -eo pid,args | grep -E 'run-hub\.sh|hub\.Hub --port' | grep -v grep | awk '{print $1}')
+    if [ -n "$dups" ]; then
+        log_msg "清理残留实例: $(echo $dups | tr '\n' ' ')"
+        kill -TERM $dups 2>/dev/null
+        sleep 2
+        kill -KILL $dups 2>/dev/null
+        rm -f "${PID_FILE}"
+    fi
     if status; then
         log_msg "already running (pid=$(cat "${PID_FILE}"))"
         return 0
@@ -95,7 +113,8 @@ start_process() {
     if [ -S "${SOCK}" ]; then
         log_msg "socket ready after ${count}s"
     else
-        log_msg "WARNING: 15 秒内 socket 未出现"
+        log_msg "ERROR: 15 秒内 socket 未出现，启动失败"
+        return 1
     fi
     return 0
 }

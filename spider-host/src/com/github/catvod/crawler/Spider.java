@@ -95,8 +95,14 @@ public class Spider {
             c.setConnectTimeout(3000);
             c.setReadTimeout(3000);
             c.setRequestProperty("Accept", "application/dns-json");
-            if (c instanceof javax.net.ssl.HttpsURLConnection)
-                ((javax.net.ssl.HttpsURLConnection) c).setHostnameVerifier((h, session) -> true);   // 直连 IP，证书绑的是 IP
+            if (c instanceof javax.net.ssl.HttpsURLConnection) {
+                // 连的是 IP 字面量（223.5.5.5），证书 SAN 只能是那几家 DoH 提供方的域名。
+                // 以前直接 (h,s)->true 全放行 = 关掉证书校验，可被 MITM 投毒整个 DNS。
+                ((javax.net.ssl.HttpsURLConnection) c).setHostnameVerifier((h, session) ->
+                        h != null && (h.equalsIgnoreCase("dns.alidns.com")
+                                || h.equalsIgnoreCase("doh.pub")
+                                || h.equalsIgnoreCase("cloudflare-dns.com")));
+            }
             if (c.getResponseCode() == 200) {
                 java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
                 try (java.io.InputStream in = c.getInputStream()) {

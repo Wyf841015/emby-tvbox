@@ -14,6 +14,8 @@
     --bg:#0a1220; --bg-2:#0d1626; --surface:#111c2e; --surface-2:#16233a;
     --line:#22304a; --line-soft:#1a2740;
     --text:#e8eefb; --text-2:#b6c4da; --dim:#7d8ea8;
+    /* 这两个变量被 CSS 引用了很久却从没定义过：简介正文/表格次要列全部退化成继承色 */
+    --fg:var(--text); --muted:var(--dim);
     --ok:#2ecc71; --warn:var(--gold); --bad:#f2555a;
 
     --accent:var(--brand); --accent-soft:rgba(51,112,255,.12); --accent-line:rgba(51,112,255,.36);
@@ -33,6 +35,7 @@
     --bg:#eef2f9; --bg-2:#e7ecf6; --surface:#ffffff; --surface-2:#f5f8fd;
     --line:#d9e2f0; --line-soft:#e6ecf6;
     --text:#16233a; --text-2:#374861; --dim:#57687f;
+    --fg:var(--text); --muted:var(--dim);
     --accent-soft:rgba(51,112,255,.09); --accent-line:rgba(51,112,255,.30);
     --ok-soft:rgba(46,204,113,.14); --bad-soft:rgba(242,85,90,.12);
     --sh-1:0 1px 2px rgba(22,35,58,.07);
@@ -100,6 +103,7 @@
   .topbar{
     position:sticky;top:0;z-index:30;
     padding:12px 0;border-bottom:1px solid var(--line-soft);
+    background:var(--bg);                                   /* 老 CEF 不支持 color-mix 时的兜底 */
     background:color-mix(in srgb, var(--bg) 86%, transparent);
     backdrop-filter:blur(14px) saturate(150%);-webkit-backdrop-filter:blur(14px) saturate(150%);
   }
@@ -199,7 +203,7 @@
   }
   td{padding:9px 10px;border-bottom:1px solid var(--line-soft);vertical-align:middle}
   tbody tr{transition:background var(--t-fast)}
-  tbody tr:nth-child(even) td{background:color-mix(in srgb, var(--surface-2) 55%, transparent)}
+  tbody tr:nth-child(even) td{background:var(--surface-2);background:color-mix(in srgb, var(--surface-2) 55%, transparent)}
   tbody tr:hover td{background:var(--accent-soft)}
   code{
     font-family:var(--mono);font-size:12px;background:var(--bg-2);
@@ -341,7 +345,7 @@
 
   /* Toast */
   .toast{
-    position:fixed;right:22px;bottom:22px;z-index:99;max-width:420px;
+    position:fixed;right:22px;bottom:22px;z-index:1400;max-width:420px;
     background:var(--surface-2);border:1px solid var(--line);border-left:3px solid var(--brand);
     padding:12px 16px;border-radius:var(--r);font-size:13px;box-shadow:var(--sh-3);
     opacity:0;transform:translateY(10px);transition:opacity var(--t),transform var(--t);
@@ -450,7 +454,7 @@
       <div class="brand-text">
         <div class="brand-line">
           <h1>TvBox For Emby</h1>
-          <span class="ver">v0.2.1</span>
+          <span class="ver">v0.3.0</span>
         </div>
         <div class="sub">点播源 → Emby</div>
       </div>
@@ -543,7 +547,7 @@
           <option value="bad">失败 / 未测</option>
         </select>
         <input type="text" id="siteSearch" placeholder="搜索站点名 / key"
-               oninput="renderSites()" style="max-width:260px">
+               oninput="scheduleRenderSites()" style="max-width:260px">
         <button class="primary" onclick="probeAll()" id="btnProbe">批量探测当前</button>
         <button onclick="loadSites()">重载站点</button>
         <span class="hint" id="probeProgress" style="margin:0"></span>
@@ -889,14 +893,34 @@ function looksLikeHtml(t) {
   return s.charAt(0) === '<' || /^Not Found$/i.test(s) || /^404 page/i.test(s) || s === '';
 }
 
+function hubToken() {
+  try {
+    var m = document.querySelector('meta[name="hub-token"]');
+    return m ? (m.getAttribute('content') || '') : '';
+  } catch (e) { return ''; }
+}
+
 function api(path, opt) {
   var rel = path.replace(/^\/+/, '');
+  opt = opt || {};
+  // 带上网关注入的本地令牌：hub 的破坏性端点要求它（挡本机其他进程 + 跨站 CSRF）
+  var tk = hubToken();
+  if (tk) {
+    var h = Object.assign({}, opt.headers || {});
+    if (!h['X-TvBox-Token']) h['X-TvBox-Token'] = tk;
+    opt = Object.assign({}, opt, { headers: h });
+  }
+  // 所有请求都设超时：hub/网关卡住时不至于让按钮永久停在「进行中」
+  if (!opt.signal && typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
+    opt = Object.assign({}, opt, { signal: AbortSignal.timeout(20000) });
+  }
   var tries = apiBase ? [apiBase].concat(API_CANDIDATES) : API_CANDIDATES.slice();
-  var idx = 0, lastErr = null;
+  var idx = 0, lastErr = null, gotResponse = false;
   function attempt() {
     if (idx >= tries.length) return Promise.reject(lastErr || new Error('所有候选前缀都取不到接口'));
     var base = tries[idx++];
     return fetch(base + rel, opt).then(function (r) {
+      gotResponse = true;
       return r.text().then(function (t) {
         if (looksLikeHtml(t)) throw new Error('非 JSON: ' + String(t).trim().slice(0, 40));
         var j;
@@ -904,7 +928,14 @@ function api(path, opt) {
         apiBase = base;
         return j;
       });
-    }).catch(function (e) { lastErr = e; return attempt(); });
+    }).catch(function (e) {
+      lastErr = e;
+      // 非幂等请求（POST）一旦拿到过 HTTP 响应就绝不重放，否则会重复推送/重复安装
+      var isWrite = opt && opt.method && String(opt.method).toUpperCase() !== 'GET';
+      if (gotResponse && isWrite) throw e;
+      gotResponse = false;
+      return attempt();
+    });
   }
   return attempt();
 }
@@ -926,7 +957,9 @@ function esc(s) {
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-function fmtUptime(s) {
+// 短格式（KPI 卡片用）；长格式是下面那个 fmtUptime。
+// 以前两个同名函数，后一个静默覆盖前一个，第一个成了死代码。
+function fmtUptimeShort(s) {
   if (s < 60) return s + ' 秒';
   if (s < 3600) return Math.floor(s / 60) + ' 分';
   return Math.floor(s / 3600) + ' 时 ' + Math.floor((s % 3600) / 60) + ' 分';
@@ -941,9 +974,14 @@ function fmtMs(ms) {
 // ══════════ 搜索 + 一键推送 ══════════
 var _searchItems = [];
 
+var _searching = false;
+
 function doSearch() {
   var wd = (document.getElementById('searchInput').value || '').trim();
   if (!wd) { toast('请输入关键词', 'warn'); return; }
+  // 输入框回车不受按钮 disabled 约束：不加守卫时连按 N 次就是 N 路全站搜
+  if (_searching) { toast('上一轮搜索还没结束', 'warn'); return; }
+  _searching = true;
   var hint = document.getElementById('searchHint');
   var btn = document.getElementById('btnSearch');
   btn.disabled = true; btn.textContent = '搜索中…';
@@ -960,6 +998,7 @@ function doSearch() {
     hint.textContent = '搜索失败: ' + e.message;
     toast('搜索失败: ' + e.message, 'err');
   }).then(function () {
+    _searching = false;
     btn.disabled = false; btn.textContent = '🔍 搜索';
   });
 }
@@ -1019,10 +1058,20 @@ function openPlayer(urls, title, info, directUrl) {
 }
 
 function probeUrl(url) {
-  return fetch(url, { headers: { Range: 'bytes=0-99' }, cache: 'no-store', credentials: 'same-origin' })
+  // 以前无条件 arrayBuffer()：源站忽略 Range 返回整片 mp4 时，几百 MB 直接进内存 → WebView 白屏。
+  // 现在只读第一个数据块就取消，拿 content-length 当前大小。
+  return fetch(url, { headers: { Range: 'bytes=0-1023' }, cache: 'no-store', credentials: 'same-origin' })
     .then(function (res) {
-      return res.arrayBuffer().then(function (ab) {
-        return { ok: res.ok, status: res.status, ct: (res.headers.get('content-type') || ''), size: ab.byteLength };
+      var ct = res.headers.get('content-type') || '';
+      var cl = parseInt(res.headers.get('content-length') || '0', 10) || 0;
+      var reader = res.body && res.body.getReader ? res.body.getReader() : null;
+      if (!reader) return { ok: res.ok, status: res.status, ct: ct, size: cl };
+      return reader.read().then(function (chunk) {
+        var n = (chunk && chunk.value) ? chunk.value.byteLength : 0;
+        try { reader.cancel(); } catch (e) {}
+        return { ok: res.ok, status: res.status, ct: ct, size: cl || n };
+      }).catch(function () {
+        return { ok: res.ok, status: res.status, ct: ct, size: cl };
       });
     });
 }
@@ -1046,10 +1095,43 @@ function playCurrent() {
       fail('返回的不是视频（' + (r.ct || '无 content-type') + '，' + r.size + ' 字节）');
       return;
     }
+    if (!/mpegurl|m3u8/i.test(r.ct)) {
+      // mp4 / flv / webm 这类直链：交给浏览器原生播放器，
+      // 用 hls.js 解会直接报 manifestParsingError（很多源就是单个 mp4）
+      startNative(url, r.ct);
+      return;
+    }
     startHls(url);
   }).catch(function (e) {
     fail('请求失败 ' + (e && e.message ? e.message : ''));
   });
+}
+
+function startNative(url, ct) {
+  var v = document.getElementById('playerVideo');
+  var hint = document.getElementById('playerHint');
+  if (_hls) { try { _hls.destroy(); } catch (e) { } _hls = null; }
+  var done = false;
+  function ok() { done = true; hint.innerHTML = '正在播放（' + esc(ct || '直链') + '）　' + _directLink(); }
+  function bad() {
+    if (done) return;
+    done = true;
+    // 原生也放不了就换下一种方式，不要静默黑屏
+    _play.i++;
+    if (_play.i >= _play.urls.length) {
+      hint.innerHTML = '播放失败：浏览器不支持这个格式（' + esc(ct || '未知') + '）。可以把 '
+        + _directLink() + ' 复制到 VLC 试试。';
+    } else {
+      hint.innerHTML = '这种格式放不了，换下一种…　' + _directLink();
+      playCurrent();
+    }
+  }
+  v.addEventListener('loadedmetadata', ok, { once: true });
+  v.addEventListener('error', bad, { once: true });
+  v.src = url;
+  var pr = v.play(); if (pr && pr.catch) pr.catch(function () { });
+  // 有些容器（CEF 里的 mp4）不触发 loadedmetadata，给个兜底提示
+  setTimeout(function () { if (!done && v.readyState >= 1) ok(); }, 2500);
 }
 
 function startHls(url) {
@@ -1058,6 +1140,8 @@ function startHls(url) {
   if (_hls) { try { _hls.destroy(); } catch (e) { } _hls = null; }
 
   function fail(why) {
+    // 旧 hls 实例不 destroy 会继续抛 fatal，一次故障就能跳过好几个候选地址
+    if (_hls) { try { _hls.destroy(); } catch (e) { } _hls = null; }
     _play.i++;
     if (_play.i >= _play.urls.length) {
       hint.innerHTML = '播放失败：' + esc(why || '未知原因') + '。可以把 ' + _directLink() + ' 复制到 VLC 试试。';
@@ -1336,6 +1420,15 @@ function bindSponsorImgs() {
 
 document.addEventListener('keydown', function (e) {
   if (e.key !== 'Escape') return;
+  // 按层级出栈：全屏播放器最上层，其次详情弹层，最后才是赞助/联系
+  var pl = document.getElementById('playerMask');
+  if (pl && pl.classList.contains('show') && typeof closePlayer === 'function') { closePlayer(); return; }
+  var dlg = document.getElementById('dlgMask');
+  if (dlg && dlg.classList.contains('show')) {
+    if (typeof closePlayer === 'function') closePlayer();   // 关详情也别留着一个在播的播放器
+    dlg.classList.remove('show');
+    return;
+  }
   ['sponsorImgOverlay', 'sponsorModal', 'contactModal'].forEach(function (id) {
     var el = document.getElementById(id);
     if (el) el.classList.remove('show');
@@ -1494,7 +1587,10 @@ async function pushMany(list, btn) {
     } catch (e) { fail++; failed.push(label + '：' + e.message); }
   }
   searchUpdateSel();
-  if (btn) btn.disabled = searchGetSelected().length === 0;
+  // 只有「推送选中」才看选中数；「全部推送」以前也被这行置灰，
+  // 推完（勾选被清空）就再也不可点，用户以为功能坏了。
+  if (btn && btn.id === 'btnPushSel') btn.disabled = searchGetSelected().length === 0;
+  else if (btn) btn.disabled = false;
   hint.textContent = '推送完成：成功 ' + ok + ' 条（共 ' + files + ' 个文件），失败 ' + fail + ' 条'
     + (failed.length ? '｜' + failed.slice(0, 3).join('；') + (failed.length > 3 ? ' …' : '') : '');
   toast('推送完成：成功 ' + ok + ' / 失败 ' + fail, fail ? 'warn' : 'ok');
@@ -1571,6 +1667,13 @@ function status() {
 }
 
 // ══════════ 站点 ══════════
+var _renderSitesTimer = null;
+function scheduleRenderSites() {
+  // 189 个站点 × 两张表，每敲一个键全量重建 innerHTML 会卡住输入
+  if (_renderSitesTimer) clearTimeout(_renderSitesTimer);
+  _renderSitesTimer = setTimeout(function () { _renderSitesTimer = null; renderSites(); }, 180);
+}
+
 function loadSites() {
   var withNd = document.getElementById('showNetdisk');
   window._sitesUrl = 'api/sites' + (withNd && withNd.checked ? '?netdisk=1' : '');
@@ -1590,6 +1693,14 @@ function loadSites() {
     sites = d.sites || [];
     renderSites();
     document.getElementById('tabSiteCount').textContent = sites.length;
+  }).catch(function (e) {
+    // 接口挂了却被渲染成「还没有站点」，会把人误导去改配置
+    var msg = '站点列表加载失败: ' + (e && e.message ? e.message : e);
+    ['siteTable', 'siteTableSync'].forEach(function (id) {
+      var box = document.getElementById(id);
+      if (box) box.innerHTML = '<div class="empty" style="color:#ef4444">' + esc(msg) + '</div>';
+    });
+    toast(msg, 'err');
   });
 }
 
@@ -1708,8 +1819,18 @@ function bulkSync(on) {
   }).catch(function (e) { toast('失败: ' + (e && e.message ? e.message : e), 'bad'); });
 }
 
+// 放进 onclick="fn('...')" 里用。属性是双引号包裹的，所以：
+//   & < > " 先实体化（否则 key 里的 " 会直接闭合属性 → XSS，
+//                    而 &#39; 这种实体又会被 HTML 先解码再交给 JS → 绕过转义）
+//   再转义 \ 和 '（这两个必须留成字面转义，不能被实体化）
 function escJs(s) {
-  return String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'");
 }
 
 function currentSite(i) {
@@ -2107,9 +2228,11 @@ function installPlugin() {
 function uninstallPlugin() {
   var pd = document.getElementById('embyPath').value.trim();
   if (!pd) { toast('先选或填 Emby 数据目录', 'bad'); return; }
+  if (!confirm('确定从 Emby 卸载 TvBox 插件？\n（会删掉 plugins/TvBox.dll，需要重新安装才能恢复）')) return;
   api('api/emby/uninstall', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ programdata: pd }) })
-    .then(function (d) { toast(d.msg || '已卸载', d.ok ? 'ok' : 'bad'); embyStatus(); loadLogs(); });
+    .then(function (d) { toast(d.msg || '已卸载', d.ok ? 'ok' : 'bad'); embyStatus(); loadLogs(); })
+    .catch(function (e) { toast('卸载失败: ' + (e && e.message ? e.message : e), 'bad'); });
 }
 
 
@@ -2159,7 +2282,7 @@ function detectLibs() {
     html += '<div class="hint">插件会把 strm 分到输出目录下的 <code>movies/</code> 和 <code>tv/</code> 两个子目录，' +
       '所以 Emby 里要建两个库：电影 → <code>&lt;输出目录&gt;/movies</code>，' +
       '电视剧 → <code>&lt;输出目录&gt;/tv</code>。选 movies 那个库，输出目录会自动取它的上一级。</div>';
-    html += '</tbody></table><div id="libWriteOut"></div>';
+    html += '<div id="libWriteOut"></div>';
     box.innerHTML = html;
 
     var firstOk = dirs.find(function (x) { return x.exists && x.writable; });

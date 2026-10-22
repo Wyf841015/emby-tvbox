@@ -239,17 +239,19 @@ public final class DockerInstaller {
             ProcessBuilder pb = new ProcessBuilder(argv);
             pb.redirectErrorStream(true);
             Process p = pb.start();
+            // 先等进程结束再读输出：以前是先 read 到 EOF 再 waitFor，
+            // docker 卡住时 read 永不返回，超时形同不存在。
+            if (!p.waitFor(Math.max(5, timeoutSec), TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                c.code = -1;
+                c.out = "超时（" + timeoutSec + "s）";
+                return c;
+            }
             ByteArrayOutputStream buf = new ByteArrayOutputStream();
             try (InputStream in = p.getInputStream()) {
                 byte[] b = new byte[8192];
                 int n;
                 while ((n = in.read(b)) > 0) buf.write(b, 0, n);
-            }
-            if (!p.waitFor(Math.max(5, timeoutSec), TimeUnit.SECONDS)) {
-                p.destroyForcibly();
-                c.code = -1;
-                c.out = "超时";
-                return c;
             }
             c.code = p.exitValue();
             c.out = buf.toString(StandardCharsets.UTF_8);

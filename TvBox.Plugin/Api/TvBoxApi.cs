@@ -338,9 +338,32 @@ namespace TvBox.Plugin.Api
         {
             var cfg = P?.Configuration;
             if (cfg == null) return false;
+            // token 没配时只允许只读接口通过（否则界面自检会全废），
+            // 写/换代码类接口一律走 HubOkStrict。
             if (string.IsNullOrWhiteSpace(cfg.HubToken)) return true;
-            var expect = cfg.HubToken.Trim();
-            return !string.IsNullOrEmpty(token) && string.Equals(token.Trim(), expect, StringComparison.Ordinal);
+            return TokenEquals(token, cfg.HubToken);
+        }
+
+        /// <summary>
+        /// 严格版：没配 token 直接拒绝（fail-closed）。
+        /// 用在会改磁盘、写媒体库、换 DLL 的接口上 —— 以前这里 fail-open，
+        /// 新装环境等于所有人都能换插件 DLL（以 Emby 用户身份 RCE）。
+        /// </summary>
+        private static bool HubOkStrict(string token)
+        {
+            var cfg = P?.Configuration;
+            if (cfg == null) return false;
+            if (string.IsNullOrWhiteSpace(cfg.HubToken)) return false;
+            return TokenEquals(token, cfg.HubToken);
+        }
+
+        private static bool TokenEquals(string given, string expect)
+        {
+            if (string.IsNullOrEmpty(given)) return false;
+            var a = System.Text.Encoding.UTF8.GetBytes(given.Trim());
+            var b = System.Text.Encoding.UTF8.GetBytes(expect.Trim());
+            if (a.Length != b.Length) return false;
+            return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(a, b);
         }
 
         // ── 插件自更新 ──
@@ -594,6 +617,9 @@ namespace TvBox.Plugin.Api
         {
             var p = P;
             if (p == null) return new SimpleResult { Message = "插件未初始化" };
+            // 以前这里没校验：任何人都能反复打断正在跑的同步（DoS），
+            // 还会把中断算成「站点失败」污染死站退避。
+            if (!HubOk(req?.Token)) return new SimpleResult { Success = false, Message = "token 无效" };
             if (!p.SyncService.IsRunning)
                 return new SimpleResult { Success = false, Message = "当前没有正在运行的同步" };
             var ok = p.SyncService.RequestStop();
@@ -608,7 +634,7 @@ namespace TvBox.Plugin.Api
         public object Get(GetConfig req)
         {
             var p = P;
-            if (!HubOk(req?.Token)) return new ConfigResult { Success = false, Message = "token 无效" };
+            if (!HubOkStrict(req?.Token)) return new ConfigResult { Success = false, Message = "token 无效或未配置（拒绝改配置）" };
             var cfg = p?.Configuration;
             if (cfg == null) return new ConfigResult { Success = false, Message = "插件未初始化" };
             return new ConfigResult
@@ -685,7 +711,22 @@ namespace TvBox.Plugin.Api
         public object Get(ProbeWrite req)
         {
             var p = P;
-            if (!HubOk(req?.Token)) return new WriteProbeResult { Ok = false, Message = "token 无效" };
+            if (!HubOkStrict(req?.Token)) return new WriteProbeResult { Ok = false, Message = "token 无效或未配置（拒绝写探针）" };
+            // 以前 Path 完全不做校验：传 /tmp/evil 就能以 Emby 身份建任意目录树、写文件、再删掉。
+            // 现在只允许在插件自己的输出目录（OutputRoot）里做写入探测。
+            var rootFull = SafeFullPath(p?.ResolveOutputRoot());
+            var reqFull = SafeFullPath(req?.Path);
+            if (rootFull == null || reqFull == null ||
+                !(reqFull.Equals(rootFull, StringComparison.Ordinal) ||
+                  reqFull.StartsWith(rootFull.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar,
+                                    StringComparison.OrdinalIgnoreCase)))
+            {
+                return new WriteProbeResult
+                {
+                    Ok = false,
+                    Message = "只允许探测输出目录（" + (rootFull ?? "未配置") + "）下的路径，已拒绝: " + (req?.Path ?? ""),
+                };
+            }
             if (req == null || string.IsNullOrWhiteSpace(req.Path))
                 return new WriteProbeResult { Ok = false, Message = "缺少 Path 参数" };
 
@@ -804,7 +845,7 @@ namespace TvBox.Plugin.Api
         public async Task<object> Post(PushItem req)
         {
             var p = P;
-            if (!HubOk(req?.Token)) return new PushItemResult { Ok = false, Msg = "token 无效" };
+            if (!HubOkStrict(req?.Token)) return new PushItemResult { Ok = false, Msg = "token 无效或未配置（拒绝写库）" };
             var cfg = p.Configuration;
             var root = p.ResolveOutputRoot();
             try
@@ -1037,7 +1078,9 @@ namespace TvBox.Plugin.Api
                 var handler = new HttpClientHandler
                 {
                     AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate,
-                    AllowAutoRedirect = true,
+                    // 关掉自动跳转：否则「公网地址 302 到 127.0.0.1」就绕过了 IsBlockedHost。
+                    // 下面手动跟最多 3 跳，每一跳都重新做一次 host 校验。
+                    AllowAutoRedirect = false,
                 };
                 var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };
 
@@ -1063,7 +1106,10 @@ namespace TvBox.Plugin.Api
                 {
                     foreach (var kv in customHeaders)
                     {
-                        var k = (kv.Key ?? "").Trim();
+                        // 头名/头值里出现 CR/LF/NUL 就是请求头注入：TryAddWithoutValidation
+                        // 不会替你挡，实测能把 "a\r\nInjected: 1" 发成两个独立头。
+                        var k = StripCtl(kv.Key);
+                        var v = StripCtl(kv.Value);
                         if (k.Length == 0) continue;
                         // 逐跳/受控头不让源覆盖
                         if (k.Equals("Host", StringComparison.OrdinalIgnoreCase) ||
@@ -1076,12 +1122,30 @@ namespace TvBox.Plugin.Api
                         {
                             request.Headers.Remove(k);
                         }
-                        request.Headers.TryAddWithoutValidation(k, kv.Value ?? "");
+                        request.Headers.TryAddWithoutValidation(k, v ?? "");
                     }
                 }
 
                 // 同步 Send：不需要续体线程，避免同步校验/播放时把 Emby 线程池抽干
                 var resp = http.Send(request, HttpCompletionOption.ResponseHeadersRead);
+
+                // 手动跟 302/301/307/308，每一跳都要重新校验目标 host（最多 3 跳）
+                for (int hop = 0; hop < 3 && (int)resp.StatusCode >= 300 && (int)resp.StatusCode < 400; hop++)
+                {
+                    var loc = resp.Headers.Location?.ToString();
+                    if (string.IsNullOrWhiteSpace(loc)) break;
+                    string next;
+                    try { next = new Uri(new Uri(rawUrl), loc).ToString(); } catch { break; }
+                    if (IsBlockedHost(next))
+                    {
+                        resp.Dispose();
+                        return PlainText(403, "blocked redirect host");
+                    }
+                    resp.Dispose();
+                    var req2 = new HttpRequestMessage(isHead ? HttpMethod.Head : HttpMethod.Get, next);
+                    if (!string.IsNullOrWhiteSpace(rangeHeader)) req2.Headers.TryAddWithoutValidation("Range", rangeHeader);
+                    resp = http.Send(req2, HttpCompletionOption.ResponseHeadersRead);
+                }
 
                 var contentType = resp.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
                 var isPlaylist = contentType.IndexOf("mpegurl", StringComparison.OrdinalIgnoreCase) >= 0
@@ -1156,7 +1220,8 @@ namespace TvBox.Plugin.Api
                 if (name.Length > 64) name = name.Substring(name.Length - 64);
             }
             catch { }
-            var path = "/TvBox/Stream/" + name + "?u=" + SyncService.Base64UrlEncode(originalUrl);
+            // 分片名可能含 ? # & 空格：不编码会把 ?u= 后面的查询串截断。
+            var path = "/TvBox/Stream/" + Uri.EscapeDataString(name) + "?u=" + SyncService.Base64UrlEncode(originalUrl);
             if (!string.IsNullOrWhiteSpace(referer))
                 path += "&r=" + SyncService.Base64UrlEncode(referer);
             if (!string.IsNullOrWhiteSpace(headerB64))
@@ -1206,6 +1271,13 @@ namespace TvBox.Plugin.Api
             }
         }
 
+        /// <summary>规范化成绝对路径；失败返回 null（调用方按拒绝处理）。</summary>
+        private static string SafeFullPath(string p)
+        {
+            if (string.IsNullOrWhiteSpace(p)) return null;
+            try { return Path.GetFullPath(p.Trim()); } catch { return null; }
+        }
+
         private object PlainText(int status, string text)
         {
             try { if (Response != null) Response.StatusCode = status; } catch { }
@@ -1218,6 +1290,9 @@ namespace TvBox.Plugin.Api
                 // 改成设到工厂返回的 IHttpResult 上，这个才是真正被写回响应的对象。
                 if (built is MediaBrowser.Model.Services.IHttpResult hr)
                 {
+                    // Emby 4.9 里 IHttpResult.Status(int) 才是真正写回响应的那个，
+                    // 只设 StatusCode 时实测一律返回 200。
+                    try { hr.Status = status; } catch { }
                     try { hr.StatusCode = (System.Net.HttpStatusCode)status; } catch { }
                 }
                 return built;
@@ -1280,6 +1355,19 @@ namespace TvBox.Plugin.Api
         /// 否则客户端拿到原始地址后依然会 403（防盗链）。
         /// </summary>
         /// <summary>把 base64url 的 header JSON 解成字典；空/坏值返回 null。</summary>
+        /// <summary>去掉会破坏 HTTP 头的控制字符（CR/LF/NUL/其它 C0）。</summary>
+        private static string StripCtl(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return s;
+            var sb = new StringBuilder(s.Length);
+            foreach (var c in s)
+            {
+                if (c == '\r' || c == '\n' || c == '\0' || (c < 0x20 && c != '\t')) continue;
+                sb.Append(c);
+            }
+            return sb.ToString().Trim();
+        }
+
         private static Dictionary<string, string> ParseHeaderB64(string b64)
         {
             if (string.IsNullOrWhiteSpace(b64)) return null;
@@ -1308,7 +1396,9 @@ namespace TvBox.Plugin.Api
                 if (line.Length == 0 || line.StartsWith("#"))
                 {
                     if (line.StartsWith("#EXT-X-KEY") || line.StartsWith("#EXT-X-MAP"))
-                        sb.Append(RewriteUriAttribute(line, baseUri)).Append('\n');
+                        // 密钥/key 也要带 Referer+header：AES-128 源对 key 请求同样查防盗链，
+                        // 不带就整条播放 403（以前这里只传了 URL）。
+                        sb.Append(RewriteUriAttribute(line, baseUri, referer, headerB64)).Append('\n');
                     else
                         sb.Append(line).Append('\n');
                     continue;
@@ -1351,7 +1441,8 @@ namespace TvBox.Plugin.Api
             catch { return false; }
         }
 
-        private static string RewriteUriAttribute(string line, Uri baseUri)
+        private static string RewriteUriAttribute(string line, Uri baseUri,
+                                                string referer = null, string headerB64 = null)
         {
             var idx = line.IndexOf("URI=\"", StringComparison.Ordinal);
             if (idx < 0) return line;
@@ -1361,7 +1452,7 @@ namespace TvBox.Plugin.Api
             var uri = line.Substring(start, end - start);
             var abs = ToAbsolute(uri, baseUri);
             if (abs == null) return line;
-            return line.Substring(0, start) + BuildProxyPath(abs) + line.Substring(end);
+            return line.Substring(0, start) + BuildProxyPath(abs, referer, headerB64) + line.Substring(end);
         }
 
         private static string ToAbsolute(string url, Uri baseUri)
@@ -1393,7 +1484,79 @@ namespace TvBox.Plugin.Api
         ///         放开这一档等于给任何人一个打本机、打内网元数据的代理。
         ///   档二（可配放行）：10/8、172.16/12、192.168/16 —— TVBox 有些源就在内网。
         /// </summary>
+        /// <summary>
+        /// 判断一个 IP 是否属于「不该被代理访问」的地址段。
+        /// allowPrivate=false 时连 10/172.16/192.168 一起拒（默认）。
+        /// </summary>
+        private static bool IsBlockedIp(System.Net.IPAddress ip, bool allowPrivate)
+        {
+            if (ip == null) return true;
+            if (System.Net.IPAddress.IsLoopback(ip)) return true;              // 127/8、::1
+            if (ip.Equals(System.Net.IPAddress.Any) || ip.Equals(System.Net.IPAddress.IPv6Any)) return true;
+            if (ip.IsIPv6LinkLocal) return true;                                // fe80::/10
+            if (ip.IsIPv6SiteLocal) return true;
+
+            // IPv4-mapped IPv6（::ffff:127.0.0.1 之类）先摊平成 IPv4 再判
+            if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 && ip.IsIPv4MappedToIPv6)
+                ip = ip.MapToIPv4();
+
+            var b = ip.GetAddressBytes();
+            if (b.Length == 4)
+            {
+                if (b[0] == 0) return true;
+                if (b[0] == 169 && b[1] == 254) return true;                    // link-local + 云元数据
+                if (b[0] >= 224) return true;                                   // 组播/保留
+                if (!allowPrivate)
+                {
+                    if (b[0] == 10) return true;
+                    if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return true;
+                    if (b[0] == 192 && b[1] == 168) return true;
+                    if (b[0] == 100 && b[1] >= 64 && b[1] <= 127) return true;  // CGNAT
+                }
+                return false;
+            }
+            if (b.Length == 16)
+            {
+                if ((b[0] & 0xFE) == 0xFC) return !allowPrivate;                 // fc00::/7 ULA
+                return false;
+            }
+            return true;
+        }
+
         private bool IsBlockedHost(string url)
+        {
+            bool allowPrivate = P?.Configuration?.AllowPrivateHosts == true;
+            try
+            {
+                var u = new Uri(url);
+                var host = u.Host;
+                if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return true;
+                if (host.Equals("localhost.localdomain", StringComparison.OrdinalIgnoreCase)) return true;
+                if (host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase)) return true;
+                if (host.EndsWith(".local", StringComparison.OrdinalIgnoreCase)) return true;
+
+                if (System.Net.IPAddress.TryParse(host, out var ip))
+                    return IsBlockedIp(ip, allowPrivate);
+
+                // 关键：非 IP 主机名必须真的去解析。
+                // 以前这里直接 return false —— 于是 127.0.0.1.nip.io 这类指向回环的域名
+                // 轻松绕过「禁止访问本机」，把只监听 127.0.0.1 的 hub 管理面暴露给任何
+                // 能访问 Emby 8096 的人。解析失败一律按非法处理。
+                System.Net.IPAddress[] addrs;
+                try
+                {
+                    addrs = System.Net.Dns.GetHostAddresses(host);
+                }
+                catch { return true; }
+                if (addrs == null || addrs.Length == 0) return true;
+                foreach (var a in addrs)
+                    if (IsBlockedIp(a, allowPrivate)) return true;
+                return false;
+            }
+            catch { return true; }
+        }
+
+        private bool IsBlockedHostLegacy(string url)
         {
             bool allowPrivate = P?.Configuration?.AllowPrivateHosts == true;
             try
