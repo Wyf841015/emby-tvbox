@@ -505,9 +505,50 @@ public class Hub {
                     return s.detailContent(ids);
                 }, 60);
                 Map<String, Object> m = new LinkedHashMap<>();
+                Object parsedDetail = tryParse(raw);
                 m.put("ok", true);
                 m.put("raw", raw);
-                m.put("parsed", tryParse(raw));
+                m.put("parsed", parsedDetail);
+                // 归一化一份给 UI 用（搜索页点开看详情）
+                Map<?, ?> d = null;
+                if (parsedDetail instanceof Map) {
+                    Object lst = ((Map<?, ?>) parsedDetail).get("list");
+                    if (lst instanceof java.util.List && !((java.util.List<?>) lst).isEmpty()) {
+                        Object o = ((java.util.List<?>) lst).get(0);
+                        if (o instanceof Map) d = (Map<?, ?>) o;
+                    }
+                }
+                if (d != null) {
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("name", str0(d.get("vod_name")));
+                    item.put("year", str0(d.get("vod_year")));
+                    item.put("area", str0(d.get("vod_area")));
+                    item.put("type", str0(d.get("type_name")));
+                    item.put("remarks", str0(d.get("vod_remarks")));
+                    item.put("pic", str0(d.get("vod_pic")));
+                    item.put("actor", str0(d.get("vod_actor")));
+                    item.put("director", str0(d.get("vod_director")));
+                    item.put("content", str0(d.get("vod_content")));
+                    item.put("lang", str0(d.get("vod_lang")));
+                    item.put("score", str0(d.get("vod_douban_score")));
+                    item.put("updated", str0(d.get("vod_time")));
+                    java.util.List<Object> lines = new java.util.ArrayList<>();
+                    String from = str0(d.get("vod_play_from"));
+                    String urls2 = str0(d.get("vod_play_url"));
+                    String[] froms = from.split("\\$\\$\\$");
+                    String[] groups = urls2.split("\\$\\$\\$");
+                    for (int i = 0; i < froms.length; i++) {
+                        String g = i < groups.length ? groups[i] : "";
+                        int cnt = 0;
+                        for (String seg : g.split("#")) if (!seg.isBlank()) cnt++;
+                        Map<String, Object> line = new LinkedHashMap<>();
+                        line.put("name", froms[i].isBlank() ? ("线路" + (i + 1)) : froms[i]);
+                        line.put("count", cnt);
+                        lines.add(line);
+                    }
+                    item.put("lines", lines);
+                    m.put("item", item);
+                }
                 sendJson(ex, 200, m);
                 return;
             }
@@ -2430,8 +2471,13 @@ public class Hub {
      * （用户可能在界面上手动移出过，自动加回会抢用户的决定）。
      */
     static void maybeAutoRemove(String key, int fails) {
+        // 默认**不**自动移出。
+        // 教训：一次「停止同步 + 重启 Emby + 重启 hub」的折腾会被算成连续失败，
+        // 结果把用户勾好的同步名单一个个摘光（实测 6 个站被清空成 0）。
+        // 要这个行为就显式配 settings.autoDisableAfter = N（N>=2）。
+        if (!settings.containsKey("autoDisableAfter")) return;
         int limit = (int) num(settings.get("autoDisableAfter"));
-        if (limit <= 0) limit = 3;
+        if (limit < 2) return;
         if (fails < limit) return;
         java.util.LinkedHashSet<String> set = new java.util.LinkedHashSet<>(syncSiteKeys());
         if (!set.remove(key)) return;
