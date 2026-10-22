@@ -491,7 +491,7 @@
       <div class="brand-text">
         <div class="brand-line">
           <h1>TvBox For Emby</h1>
-          <span class="ver">v0.5.2</span>
+          <span class="ver">v0.5.3</span>
         </div>
         <div class="sub">点播源 → Emby</div>
       </div>
@@ -605,12 +605,6 @@
         <div class="k">④ 播放</div><div class="v">Emby 播放时，插件按需补 Referer/UA、重写 HLS 分片地址，跳过防盗链。</div>
         <div class="k">不影响原库</div><div class="v">只在输出目录里写文件，不会改你已有的影视文件。</div>
       </div>
-    </div>
-
-    <div class="panel">
-      <h2>还需要你自己准备的东西（可选）</h2>
-      <div class="hint">下面这些 hub 没法替你生成：缺了不影响基本使用，只是对应站点用不了。</div>
-      <div id="guidePending" style="margin-top:8px"><div class="empty" style="padding:10px 0">正在检测…</div></div>
     </div>
 
     <div class="panel">
@@ -1790,8 +1784,7 @@ function guideCheck(manual) {
   var jobs = [
     api('api/config').catch(function () { return null; }),
     api('api/sync-sites').catch(function () { return null; }),
-    api('api/emby/status').catch(function () { return null; }),
-    api('api/status').catch(function () { return null; })
+    api('api/emby/status').catch(function () { return null; })
   ];
   Promise.all(jobs).then(function (r) {
     var wrap = r[0] || {};
@@ -1801,9 +1794,7 @@ function guideCheck(manual) {
     var sites = ss.sites || [];
     _gs.syncCount = (typeof ss.count === 'number') ? ss.count : (Array.isArray(sites) ? sites.length : 0);
     _gs.pluginInstalled = !!(r[2] && r[2].installed);
-    _gs.pending = (r[3] && r[3].pending) || null;
     guideRender();
-    guideRenderPending();
     var ts = document.getElementById('guideTs');
     if (ts) ts.textContent = '检测于 ' + new Date().toLocaleTimeString();
   }).catch(function (e) {
@@ -1846,28 +1837,6 @@ function guideRender() {
       + (it.go ? '<div class="ga"><button class="tiny" onclick="guideGo(\'' + it.go + '\')">去处理</button></div>' : '')
       + '</div>';
   }).join('');
-}
-
-// 需要用户自己放的文件（hub 只报状态）
-function guideRenderPending() {
-  var box = document.getElementById('guidePending');
-  if (!box) return;
-  var p = _gs.pending || {};
-  var rows = [
-    { ok: !!p.biliCookie, name: 'B 站 Cookie',
-      desc: p.biliCookie ? ('已放置：' + (p.biliCookiePath || ''))
-        : ('B 站系约 12 个源需要它；把 cookie 写进 ' + (p.biliCookiePath || 'data/file/TVBox/bili_cookie.txt')) },
-    { ok: !!p.parseApis, name: '外部解析接口',
-      desc: p.parseApis ? ('已放置：' + (p.parseApisPath || ''))
-        : ('「Sao火」「布布」这类 parse=1 的站需要；一行一个模板写到 ' + (p.parseApisPath || 'data/parse-apis.txt')) }
-  ];
-  box.innerHTML = rows.map(function (it) {
-    return '<div class="guide-step ' + (it.ok ? 'ok' : 'no') + '">'
-      + '<div class="gi">' + (it.ok ? '✓' : '○') + '</div>'
-      + '<div class="gt"><b>' + esc(it.name) + '</b><div class="hint">' + esc(it.desc) + '</div></div>'
-      + '</div>';
-  }).join('')
-    + '<div class="hint" style="margin-top:10px">还有 97 个站的 spider 类打包在 dex 里，本机跑不起来（缺 dex2jar），这些站在「站点」页会显示不可用 —— 不是你的配置问题。</div>';
 }
 
 // 打开 Emby：优先用配置里的地址；但配置里常见 127.0.0.1/localhost，
