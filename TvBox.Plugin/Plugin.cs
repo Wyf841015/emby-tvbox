@@ -70,7 +70,7 @@ namespace TvBox.Plugin
 
         public ILogger Logger => _logger;
 
-        public override string Name => "TVBox 源接入";
+        public override string Name => "TvBox For Emby";
 
         public override string Description =>
             "把 TVBox 配置里的点播源（苹果 CMS 接口）同步成 .strm 媒体库，让 Emby 能浏览、搜索、播放。";

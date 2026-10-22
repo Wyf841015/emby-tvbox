@@ -1,5 +1,15 @@
 # emby-tvbox
 
+## v0.1.0 — 更名为 TvBox For Emby
+
+项目名统一改成 **TvBox For Emby**（应用名 `tvboxhub` 保持不变，装好的路径/网关前缀都不动）：
+
+- 侧边栏标题、页面 `<title>`、fnOS 桌面入口标题（`ui/config` 的 `title`）、manifest `display_name`
+- Emby 插件列表里的名字也改成 `TvBox For Emby`（`Plugin.Name`）
+- 版本号按你的要求重置为 **0.1.0**（之前累积到 0.17.x，重命名后重新起算）
+
+功能与之前完全一致，只是换了名字和版本号。
+
 ## v0.17.0 — 赞助 / 联系按钮
 
 顶栏加了两个按钮（照 fnclearup 的做法搬过来的）：

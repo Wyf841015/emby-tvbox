@@ -1,7 +1,7 @@
 {
   ".url": {
     "tvboxhub.Application": {
-      "title": "TVBox 中转",
+      "title": "TvBox For Emby",
       "icon": "images/icon_{0}.png",
       "type": "iframe",
       "url": "/app/tvboxhub/",
