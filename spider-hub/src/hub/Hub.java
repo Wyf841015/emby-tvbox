@@ -482,6 +482,8 @@ public class Hub {
                 m.put("detailCache", detailCacheStats());
                 m.put("loadErrors", pool.loadErrors());
                 m.put("javaVersion", System.getProperty("java.version"));
+                m.put("osArch", System.getProperty("os.arch"));
+                m.put("jreHome", System.getProperty("java.home"));
                 m.put("tcpPort", tcpPort);
                 m.put("tcpOk", tcpOk);
                 m.put("pluginDll", pluginDll == null ? null
@@ -2049,9 +2051,27 @@ public class Hub {
             }
             Map<String, Object> out = new LinkedHashMap<>();
             for (Map.Entry<?, ?> e : m.entrySet()) out.put(String.valueOf(e.getKey()), e.getValue());
+            // 插件不返回 HubToken（怕泄露），但「有没有配」界面要能判断 —— 直接看配置文件
+            out.put("HubTokenSet", pluginTokenConfigured(out));
             return out;
         } catch (Exception e) {
             return null;
+        }
+    }
+
+    /** 读插件配置文件，判断 HubToken 是否已设置（只回布尔，不回值）。 */
+    static boolean pluginTokenConfigured(Map<String, Object> cfg) {
+        Object p = cfg.get("ConfigFilePath");
+        if (p == null) return false;
+        try {
+            java.nio.file.Path f = java.nio.file.Path.of(String.valueOf(p));
+            if (!java.nio.file.Files.isRegularFile(f)) return false;
+            String xml = java.nio.file.Files.readString(f);
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("<HubToken>\\s*([^<]*)\\s*</HubToken>").matcher(xml);
+            return m.find() && m.group(1) != null && !m.group(1).isBlank();
+        } catch (Exception e) {
+            return false;
         }
     }
 

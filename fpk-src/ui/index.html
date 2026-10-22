@@ -292,6 +292,24 @@
   .spon-full.show{display:flex}
   .spon-full img{max-width:86%;max-height:86%;border-radius:var(--r);background:#fff}
   .qq-num{font-size:28px;font-weight:800;letter-spacing:2px;color:var(--accent);padding:12px;border-radius:var(--r);background:var(--surface-2);cursor:pointer;user-select:all}
+  /* ── 配置检测 ── */
+  .cfg-head{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+  .cfg-head h2{font-size:15px}
+  .cfg-ts{color:var(--dim);font-size:12px}
+  .cfg-head button{margin-left:auto}
+  .cfg-rows{display:flex;flex-direction:column;gap:2px}
+  .cfg-row{display:grid;grid-template-columns:20px 132px 1fr;gap:10px;align-items:baseline;
+           padding:8px 10px;border-radius:var(--r-sm);font-size:13px}
+  .cfg-row + .cfg-row{border-top:1px solid var(--line-soft)}
+  .cfg-row .ic{text-align:center;font-size:13px;line-height:1}
+  .cfg-row .nm{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cfg-row .dt{color:var(--text);min-width:0;word-break:break-all}
+  .cfg-row.ok .ic{color:#22c55e}
+  .cfg-row.warn .ic{color:var(--gold)}
+  .cfg-row.bad .ic{color:#ef4444}
+  .cfg-row .fix{display:block;color:var(--dim);font-size:12px;margin-top:2px}
+  html[data-theme="light"] .cfg-row .nm{color:#5a6b84}
+  @media(max-width:560px){ .cfg-row{grid-template-columns:18px 96px 1fr;gap:8px;font-size:12.5px} }
   .hint{color:var(--dim);font-size:12px;margin-top:10px;line-height:1.7}
   .hint code{color:var(--brand-2)}
   .pbar{height:9px;border-radius:var(--r-full);background:var(--line);overflow:hidden;margin-top:8px}
@@ -432,7 +450,7 @@
       <div class="brand-text">
         <div class="brand-line">
           <h1>TvBox For Emby</h1>
-          <span class="ver">v0.1.4</span>
+          <span class="ver">v0.2.0</span>
         </div>
         <div class="sub">点播源 → Emby</div>
       </div>
@@ -479,6 +497,15 @@
       <div class="card"><div class="k">已验证可用</div><div class="v ok" id="kOk">–</div></div>
       <div class="card"><div class="k">失败 / 未测</div><div class="v bad" id="kBad">–</div></div>
       <div class="card"><div class="k">运行时长</div><div class="v" id="kUptime" style="font-size:17px">–</div></div>
+    </div>
+
+    <div class="panel" id="cfgCard">
+      <div class="cfg-head">
+        <h2 style="margin:0">配置检测</h2>
+        <span class="cfg-ts" id="cfgTs"></span>
+        <button class="tiny" onclick="runConfigCheck(true)">重新检测</button>
+      </div>
+      <div class="cfg-rows" id="cfgRows"><div class="empty" style="padding:14px 0">正在检测…</div></div>
     </div>
 
     <div class="panel">
@@ -1101,6 +1128,145 @@ function playDetail(idx, epVal) {
     if (btns.length) btns[0].textContent = '▶ 播放';
     toast('播放失败：' + e.message, 'err');
   });
+}
+
+// ══════════ 概览：配置检测 ══════════
+var _cfgRunning = false;
+
+function cfgRow(icon, level, name, detail, fix) {
+  return '<div class="cfg-row ' + level + '">'
+    + '<div class="ic">' + icon + '</div>'
+    + '<div class="nm">' + esc(name) + '</div>'
+    + '<div class="dt">' + esc(detail) + (fix ? '<span class="fix">' + esc(fix) + '</span>' : '') + '</div>'
+    + '</div>';
+}
+
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  if (n > 1048576) return (n / 1048576).toFixed(1) + ' MB';
+  if (n > 1024) return Math.round(n / 1024) + ' KB';
+  return n + ' B';
+}
+
+function fmtUptime(sec) {
+  sec = Math.max(0, Math.round(sec || 0));
+  var d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
+  if (d) return d + ' 天 ' + h + ' 小时';
+  if (h) return h + ' 小时 ' + m + ' 分';
+  if (m) return m + ' 分';
+  return sec + ' 秒';
+}
+
+// 进概览就自动跑一遍：源 / 引擎 / 同步名单 / 输出目录 / 插件 / Emby 地址 / 令牌 / 运行环境
+function runConfigCheck(manual) {
+  if (_cfgRunning) return;
+  _cfgRunning = true;
+  var box = document.getElementById('cfgRows');
+  var ts = document.getElementById('cfgTs');
+  if (manual && box) box.innerHTML = '<div class="empty" style="padding:14px 0">正在检测…</div>';
+  if (ts) ts.textContent = '检测中…';
+
+  var jobs = [
+    api('/api/status').catch(function () { return null; }),
+    api('/api/config').catch(function () { return null; }),
+    api('/api/sync-sites').catch(function () { return null; }),
+    api('/api/emby/status').catch(function () { return null; }),
+    api('/api/emby/write-check').catch(function () { return null; }),
+    api('/api/plugin/info').catch(function () { return null; })
+  ];
+
+  Promise.all(jobs).then(function (r) {
+    var st = r[0], cfg0 = r[1], sync = r[2], emb = r[3], wc = r[4], pinfo = r[5];
+    var cfg = (cfg0 && cfg0.config) || {};
+    var stats = (st && st.stats) || {};
+    var rows = [];
+
+    // 1) 采集源
+    if (st && st.configUrl) {
+      rows.push(cfgRow('✓', 'ok', '采集源配置', st.configUrl +
+        '（' + (stats.total || 0) + ' 个站点）'));
+    } else {
+      rows.push(cfgRow('✕', 'bad', '采集源配置', '没有配置采集源地址',
+        '去「配置」页填 ConfigUrl'));
+    }
+
+    // 2) spider 引擎
+    var loaded = (st && st.pool && st.pool.cached) || 0;
+    if (stats.total > 0) {
+      rows.push(cfgRow('✓', 'ok', 'spider 引擎',
+        '已加载 ' + stats.total + ' 站（缓存 ' + loaded + '/' + ((st.pool && st.pool.max) || '-') + '，可播 ' + (stats.playable || 0) + '）'));
+    } else {
+      rows.push(cfgRow('✕', 'bad', 'spider 引擎', '一个站点都没加载出来', '点「站点」页的重新加载'));
+    }
+
+    // 3) 同步名单
+    var nSync = (sync && sync.count) || 0;
+    var names = (sync && sync.sites) || [];
+    var shown = names.slice(0, 6).join('、') + (names.length > 6 ? ' 等' : '');
+    rows.push(nSync > 0
+      ? cfgRow('✓', 'ok', '同步名单', nSync + ' 个站点：' + shown)
+      : cfgRow('!', 'warn', '同步名单', '还没勾选任何站点', '去「站点」页勾选要同步的源'));
+
+    // 4) 输出目录（可写性由插件以 Emby 身份实测）
+    var wr = (wc && wc.result) || null;
+    if (wr && wr.Ok) {
+      var items = wr.Items || [];
+      rows.push(cfgRow('✓', 'ok', '输出目录', (cfg.OutputRoot || items[0] && items[0].Path || '—') +
+        '（' + (wr.User || '') + ' 可写）'));
+    } else if (wr) {
+      rows.push(cfgRow('✕', 'bad', '输出目录', (cfg.OutputRoot || '—') + ' 不可写：' + (wr.Message || '未知'),
+        '检查目录属主，或点「同步」页的目录预检'));
+    } else {
+      rows.push(cfgRow('!', 'warn', '输出目录', (cfg.OutputRoot || '—') + '（未检测到 Emby，无法验证写入）'));
+    }
+
+    // 5) Emby 插件
+    var dllOk = emb && emb.installed && emb.exists && emb.size > 0;
+    if (dllOk) {
+      var same = pinfo && pinfo.sha256 && emb.size === pinfo.bytes;
+      rows.push(cfgRow(same ? '✓' : '!', same ? 'ok' : 'warn', 'Emby 插件',
+        '已安装 ' + fmtBytes(emb.size) + '（' + (emb.mtime || '') + '）',
+        same ? '' : '包内插件与已安装的大小不同，可在「Emby 插件」页点一键更新'));
+    } else {
+      rows.push(cfgRow('✕', 'bad', 'Emby 插件', emb && emb.initialized === false ? '插件未加载' : '未安装到 Emby',
+        '去「Emby 插件」页点安装'));
+    }
+
+    // 6) Emby 地址（外网播放依赖它）
+    var base = cfg.EmbyBaseUrl || (wc && wc.emby) || '';
+    if (!base) {
+      rows.push(cfgRow('!', 'warn', 'Emby 地址', '未设置', '外网/手机播放需要在插件配置里设成客户端能访问的地址'));
+    } else if (/127\.0\.0\.1|localhost/.test(base)) {
+      rows.push(cfgRow('!', 'warn', 'Emby 地址', base + '（仅本机）',
+        '手机/外网会连自己，改成局域网或外网地址'));
+    } else {
+      rows.push(cfgRow('✓', 'ok', 'Emby 地址', base));
+    }
+
+    // 7) 令牌
+    // 插件出于安全不返回 HubToken 本身，hub 会额外回一个 HubTokenSet 布尔
+    var tokenSet = cfg.HubTokenSet === true || (cfg.HubToken && String(cfg.HubToken).length > 0);
+    rows.push(tokenSet
+      ? cfgRow('✓', 'ok', 'hub 令牌', '已配置')
+      : cfgRow('!', 'warn', 'hub 令牌', '未配置', 'hub 与插件之间调用会没有鉴权'));
+
+    // 8) 运行环境
+    if (st) {
+      rows.push(cfgRow('✓', 'ok', '运行环境',
+        'Java ' + (st.javaVersion || '?') + ' · ' + (st.osArch || '?') +
+        ' · 已运行 ' + fmtUptime(st.uptimeSec) + (st.tcpPort ? ' · 端口 ' + st.tcpPort : '')));
+    } else {
+      rows.push(cfgRow('✕', 'bad', '运行环境', 'hub 状态接口取不到', '看「操作记录」或 info.log'));
+    }
+
+    var bad = rows.filter(function (x) { return x.indexOf('cfg-row bad') >= 0; }).length;
+    if (box) box.innerHTML = rows.join('');
+    if (ts) ts.textContent = bad ? (bad + ' 项异常 · ' + new Date().toLocaleTimeString())
+                                 : ('全部正常 · ' + new Date().toLocaleTimeString());
+  }).catch(function (e) {
+    if (box) box.innerHTML = cfgRow('✕', 'bad', '检测失败', e.message || String(e));
+    if (ts) ts.textContent = '检测失败';
+  }).then(function () { _cfgRunning = false; });
 }
 
 // ══════════ 赞助 / 联系 ══════════
@@ -2303,6 +2469,9 @@ try {
   switchTab = function (name, el) {
     if (origSwitch) origSwitch(name, el);
     setPaneTitle(name);
+    if (name === 'overview') setTimeout(function () {
+      if (typeof runConfigCheck === 'function') runConfigCheck();
+    }, 60);
   };
   window.switchTab = switchTab;
 
@@ -2352,6 +2521,13 @@ try {
 
     var act = document.querySelector('.tab.active');
     setPaneTitle(act ? act.getAttribute('data-pane') : 'overview');
+
+    // 概览默认就把所有配置项检测一遍
+    setTimeout(function () {
+      var cur = document.querySelector('.tab.active');
+      var pane = cur ? cur.getAttribute('data-pane') : 'overview';
+      if (pane === 'overview' && typeof runConfigCheck === 'function') runConfigCheck();
+    }, 120);
 
     // 导航也用 DOM 绑定兜底（inline onclick 之外再挂一层）
     Array.prototype.forEach.call(document.querySelectorAll('.tab[data-pane]'), function (t) {
