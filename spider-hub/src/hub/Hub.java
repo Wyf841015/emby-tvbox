@@ -282,6 +282,29 @@ public class Hub {
     static void handle(HttpExchange ex) {
         String path = ex.getRequestURI().getPath();
         try {
+            // 静态资源（hls.min.js 等）：只放行白名单扩展名，且不允许跳出 uiDir
+            if (path.length() > 1 && uiDir != null) {
+                String lower = path.toLowerCase();
+                boolean asset = lower.endsWith(".js") || lower.endsWith(".css") || lower.endsWith(".png")
+                        || lower.endsWith(".jpg") || lower.endsWith(".webp") || lower.endsWith(".svg")
+                        || lower.endsWith(".woff2") || lower.endsWith(".map");
+                if (asset) {
+                    try {
+                        Path f = uiDir.resolve(path.substring(1)).normalize();
+                        if (f.startsWith(uiDir) && Files.isRegularFile(f)) {
+                            String ct = lower.endsWith(".css") ? "text/css; charset=utf-8"
+                                    : lower.endsWith(".js") ? "application/javascript; charset=utf-8"
+                                    : lower.endsWith(".svg") ? "image/svg+xml"
+                                    : lower.endsWith(".woff2") ? "font/woff2"
+                                    : "image/" + (lower.endsWith(".png") ? "png" : lower.endsWith(".webp") ? "webp" : "jpeg");
+                            byte[] bytes = Files.readAllBytes(f);
+                            ex.getResponseHeaders().set("Cache-Control", "public, max-age=86400");
+                            sendBytes(ex, 200, ct, bytes);
+                            return;
+                        }
+                    } catch (Exception ignore) { }
+                }
+            }
             if ("/".equals(path) || "/index.html".equals(path)) {
                 send(ex, 200, "text/html; charset=utf-8", ui());
                 return;
@@ -493,6 +516,88 @@ public class Hub {
                 m.put("raw", raw);
                 m.put("parsed", tryParse(raw));
                 sendJson(ex, 200, m);
+                return;
+            }
+            case "/api/play-resolve": {   // 详情页「播放」：挑线路/集 → playerContent 解出真地址 → 给浏览器可播的地址
+                String key = q.getOrDefault("site", "").trim();
+                String vid = q.getOrDefault("id", "").trim();
+                int epIdx = 0;
+                try { epIdx = Integer.parseInt(q.getOrDefault("ep", "0")); } catch (Exception ignore) { }
+                String wantFlag = q.getOrDefault("flag", "").trim();
+                if (key.isEmpty() || vid.isEmpty()) { sendJson(ex, 200, fail("缺少 site / id")); return; }
+                final String vidf = vid;
+                try {
+                    // 1) 拉详情，拿到所有线路 × 分集
+                    String draw = call(key, () -> pool.get(key).detailContent(java.util.Collections.singletonList(vidf)), 60);
+                    Map<?, ?> d = firstItem(tryParse(draw));
+                    if (d == null) { sendJson(ex, 200, fail("这个站点没返回详情")); return; }
+
+                    java.util.List<Object> linesOut = new java.util.ArrayList<>();
+                    String chosenFlag = null, chosenId = null, chosenEp = null;
+                    String from = str0(d.get("vod_play_from"));
+                    String urls = str0(d.get("vod_play_url"));
+                    String[] froms = from.split("\\$\\$\\$");
+                    String[] groups = urls.split("\\$\\$\\$");
+                    for (int i = 0; i < froms.length; i++) {
+                        String g = i < groups.length ? groups[i] : "";
+                        java.util.List<Object> eps = new java.util.ArrayList<>();
+                        for (String seg : g.split("#")) {
+                            if (seg.isBlank()) continue;
+                            String epName = seg, epId = seg;
+                            int cut = seg.lastIndexOf('$');
+                            if (cut >= 0) { epName = seg.substring(0, cut); epId = seg.substring(cut + 1); }
+                            Map<String, Object> e1 = new LinkedHashMap<>();
+                            e1.put("name", epName);
+                            e1.put("id", epId);
+                            eps.add(e1);
+                        }
+                        if (eps.isEmpty()) continue;
+                        String lineName = froms[i].isBlank() ? ("线路" + (i + 1)) : froms[i];
+                        Map<String, Object> line = new LinkedHashMap<>();
+                        line.put("name", lineName);
+                        line.put("episodes", eps);
+                        linesOut.add(line);
+                        if (chosenFlag == null || (!wantFlag.isEmpty() && wantFlag.equals(lineName))) {
+                            if (chosenFlag == null || wantFlag.equals(lineName)) {
+                                chosenFlag = lineName;
+                                int pick = Math.min(Math.max(0, epIdx), eps.size() - 1);
+                                Map<?, ?> pe = (Map<?, ?>) eps.get(pick);
+                                chosenId = str0(pe.get("id"));
+                                chosenEp = str0(pe.get("name"));
+                            }
+                        }
+                    }
+                    if (chosenFlag == null) { sendJson(ex, 200, fail("这条没有播放地址")); return; }
+
+                    // 2) 交给 playerContent 换真地址（跟 /play/ 同一条逻辑）
+                    String[] r = resolveEpisode(key, chosenFlag, chosenId);
+                    String emby = browserEmbyBase(ex);
+                    Map<String, Object> out = new LinkedHashMap<>();
+                    boolean ok = "1".equals(r[0]);
+                    out.put("ok", ok);
+                    out.put("msg", r[2]);
+                    out.put("parse", r[3]);
+                    out.put("site", key);
+                    out.put("id", vid);
+                    out.put("flag", chosenFlag);
+                    out.put("episode", chosenEp);
+                    out.put("lines", linesOut);
+                    if (ok && emby != null) {
+                        // 走插件代理：浏览器直接拉 CDN 多半被 CORS/Referer 挡住，
+                        // 用 /TvBox/Stream 转发（顺带带上源要求的 header）
+                        StringBuilder su = new StringBuilder(emby).append("/TvBox/Stream?u=")
+                                .append(b64url(r[1]));
+                        if (r.length > 4 && r[4] != null) su.append("&h=").append(b64url(r[4]));
+                        out.put("url", r[1]);
+                        out.put("streamUrl", su.toString());
+                    } else if (ok) {
+                        out.put("url", r[1]);
+                        out.put("streamUrl", r[1]);
+                    }
+                    sendJson(ex, 200, out);
+                } catch (Exception e) {
+                    sendJson(ex, 200, fail("解析播放地址失败: " + explain(e)));
+                }
                 return;
             }
             case "/api/detail": {
@@ -1742,6 +1847,33 @@ public class Hub {
         return set;
     }
 
+    /**
+     * 给**浏览器**用的 Emby 基地址。
+     *
+     * embyBase() 是给服务端内部调用用的（回环就行），但播放地址是浏览器去拉的：
+     * 走 127.0.0.1 的话，用户手机/电视上的浏览器会连自己。
+     * 优先用设置里的 embyBaseUrl，其次用请求的 Host（网关转发时就是局域网地址），
+     * 直连 hub（:8098）的 Host 不可用，退回回环。
+     */
+    static String browserEmbyBase(com.sun.net.httpserver.HttpExchange ex) {
+        String saved = str(settings.get("embyBaseUrl"));
+        if (saved != null && !saved.isEmpty()) {
+            String s2 = saved.replaceAll("/+$", "");
+            String lo = s2.toLowerCase();
+            // 回环地址对浏览器没用（手机/电视会去连自己），当作没配
+            boolean loopback = lo.contains("127.0.0.1") || lo.contains("localhost") || lo.contains("[::1]");
+            if (!loopback) return s2;
+        }
+        try {
+            String host = ex.getRequestHeaders().getFirst("Host");
+            String proto = ex.getRequestHeaders().getFirst("X-Forwarded-Proto");
+            if (proto == null || proto.isEmpty()) proto = "http";
+            if (host != null && !host.isEmpty() && !host.toLowerCase().contains(":8098"))
+                return proto + "://" + host;
+        } catch (Exception ignore) { }
+        return embyBase();
+    }
+
     static String embyBase() {
         String saved = str(settings.get("embyBaseUrl"));
         if (saved != null && !saved.isEmpty()) return saved.replaceAll("/+$", "");
@@ -2307,6 +2439,22 @@ public class Hub {
     }
 
     /** 空值统一成空字符串（避免页面上出现 None / null）。 */
+    /** 从 detailContent 解析结果里取第一条。 */
+    static Map<?, ?> firstItem(Object parsed) {
+        if (!(parsed instanceof Map)) return null;
+        Object lst = ((Map<?, ?>) parsed).get("list");
+        if (!(lst instanceof java.util.List) || ((java.util.List<?>) lst).isEmpty()) return null;
+        Object o = ((java.util.List<?>) lst).get(0);
+        return (o instanceof Map) ? (Map<?, ?>) o : null;
+    }
+
+    /** base64url（跟插件的 SyncService.Base64UrlEncode 对齐）。 */
+    static String b64url(String s) {
+        if (s == null) return "";
+        return java.util.Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(s.getBytes(StandardCharsets.UTF_8));
+    }
+
     static String str0(Object o) {
         if (o == null) return "";
         String v;

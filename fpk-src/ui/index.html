@@ -732,6 +732,20 @@
     </div><!-- /.wrap -->
   </div><!-- /.main -->
 </div><!-- /.app -->
+<div class="mask" id="playerMask" onclick="if(event.target===this)closePlayer()">
+  <div class="dlg" style="width:min(1000px,100%)">
+    <div class="dlg-head">
+      <h3 id="playerTitle">播放</h3>
+      <span class="chip" id="playerInfo"></span>
+      <button class="x" onclick="closePlayer()">✕</button>
+    </div>
+    <div style="padding:14px 18px 18px">
+      <video id="playerVideo" controls playsinline autoplay style="width:100%;max-height:70vh;background:#000;border-radius:10px"></video>
+      <div class="hint" id="playerHint" style="margin-top:8px"></div>
+    </div>
+  </div>
+</div>
+
 <div class="mask" id="dlgMask" onclick="if(event.target===this)closeDetail()">
   <div class="dlg">
     <div class="dlg-head">
@@ -749,6 +763,7 @@
 
 <div class="toast" id="toast"></div>
 
+<script src="hls.min.js"></script>
 <script>
 // ══════════ API 前缀自动探测 ══════════
 // fnOS 网关下页面可能落在 /app/tvboxhub/、/app/tvboxhub（无尾斜杠）、/app/ 或直连 /
@@ -870,6 +885,83 @@ function renderSearchResults(r) {
   searchUpdateSel();
 }
 
+var _hls = null;
+
+function closePlayer() {
+  var v = document.getElementById('playerVideo');
+  if (_hls) { try { _hls.destroy(); } catch (e) { } _hls = null; }
+  try { v.pause(); } catch (e) { }
+  v.removeAttribute('src'); v.load();
+  document.getElementById('playerMask').classList.remove('show');
+}
+
+function openPlayer(streamUrl, title, info) {
+  document.getElementById('playerTitle').textContent = title || '播放';
+  document.getElementById('playerInfo').textContent = info || '';
+  document.getElementById('playerHint').textContent = '';
+  document.getElementById('playerMask').classList.add('show');
+  var v = document.getElementById('playerVideo');
+  if (_hls) { try { _hls.destroy(); } catch (e) { } _hls = null; }
+  var isHls = /\.m3u8(\?|$)/i.test(streamUrl) || streamUrl.indexOf('/TvBox/Stream') >= 0;
+  var playPromise;
+  if (isHls && window.Hls && window.Hls.isSupported()) {
+    _hls = new Hls({ maxBufferLength: 30, enableWorker: true });
+    _hls.on(Hls.Events.ERROR, function (evt, data) {
+      if (data && data.fatal) {
+        document.getElementById('playerHint').textContent = '播放出错：' + (data.details || data.type)
+          + '（换个线路或源试试）';
+      }
+    });
+    _hls.loadSource(streamUrl);
+    _hls.attachMedia(v);
+    _hls.on(Hls.Events.MANIFEST_PARSED, function () {
+      playPromise = v.play(); if (playPromise && playPromise.catch) playPromise.catch(function () { });
+    });
+  } else {
+    // Safari / iOS 原生支持 HLS
+    v.src = streamUrl;
+    document.getElementById('playerHint').textContent = window.Hls ? '' : '（浏览器不支持 MSE，尝试原生播放）';
+    playPromise = v.play(); if (playPromise && playPromise.catch) playPromise.catch(function () { });
+  }
+}
+
+function playDetail(idx, epVal) {
+  var it = _searchItems[idx];
+  if (!it) return;
+  var ep = epVal != null ? parseInt(epVal, 10) : 0;
+  if (isNaN(ep)) ep = 0;
+  var title = it.name || it.id;
+  document.getElementById('dlgFoot').querySelectorAll('button')[0].textContent = '解析中…';
+  var q2 = '/api/play-resolve?site=' + encodeURIComponent(it.site)
+         + '&id=' + encodeURIComponent(it.id) + '&ep=' + ep;
+  api(q2).then(function (r) {
+    var btns = document.getElementById('dlgFoot').querySelectorAll('button');
+    if (btns.length) btns[0].textContent = '▶ 播放';
+    if (!r || !r.ok || !r.streamUrl) {
+      var why = (r && r.msg) || '解析不出播放地址';
+      if (r && r.parse === '1') why = '这个源只给了网页地址，需要外部解析器（可在 data/parse-apis.txt 里配）';
+      toast('播放失败：' + why, 'err');
+      return;
+    }
+    // 集数下拉
+    var sel = document.getElementById('dlgEpSel');
+    var lines = r.lines || [];
+    var cur = lines.filter(function (l) { return l.name === r.flag; })[0] || lines[0];
+    var eps = (cur && cur.episodes) || [];
+    if (eps.length > 1) {
+      sel.style.display = '';
+      sel.innerHTML = eps.map(function (e, i) {
+        return '<option value="' + i + '"' + (i === ep ? ' selected' : '') + '>' + esc(e.name || ('第' + (i + 1) + '集')) + '</option>';
+      }).join('');
+    } else { sel.style.display = 'none'; }
+    openPlayer(r.streamUrl, title, (r.flag || '') + (r.episode ? ' · ' + r.episode : ''));
+  }).catch(function (e) {
+    var btns = document.getElementById('dlgFoot').querySelectorAll('button');
+    if (btns.length) btns[0].textContent = '▶ 播放';
+    toast('播放失败：' + e.message, 'err');
+  });
+}
+
 var _dlgItem = null, _dlgIdx = -1;
 
 function closeDetail() { document.getElementById('dlgMask').classList.remove('show'); }
@@ -884,7 +976,9 @@ function showDetail(idx) {
   document.getElementById('dlgMeta').innerHTML = '<div style="color:var(--muted);font-size:13px">正在拉取详情…</div>';
   document.getElementById('dlgSyn').textContent = '';
   document.getElementById('dlgFoot').innerHTML =
-    '<button class="primary" onclick="pushItem(' + idx + ',this)">推送到 Emby</button>'
+    '<button class="primary" onclick="playDetail(' + idx + ')">▶ 播放</button>'
+    + '<select id="dlgEpSel" onchange="playDetail(' + idx + ', this.value)" style="max-width:220px;display:none"></select>'
+    + '<button onclick="pushItem(' + idx + ',this)">推送到 Emby</button>'
     + '<button onclick="closeDetail()">关闭</button>';
   document.getElementById('dlgMask').classList.add('show');
 
