@@ -246,6 +246,9 @@
   /* ── 详情弹窗 ── */
   .mask{position:fixed;inset:0;background:rgba(3,7,18,.62);z-index:900;display:none;align-items:center;justify-content:center;padding:20px}
   .mask.show{display:flex}
+  /* 播放器必须盖在详情弹窗之上（两个遮罩 z-index 一样时，DOM 靠后的会压住先出现的） */
+  #playerMask{z-index:1000}
+  #dlgMask{z-index:900}
   .dlg{width:min(760px,100%);max-height:86vh;overflow:auto;background:var(--panel,#161b26);border:1px solid var(--line);border-radius:16px;box-shadow:0 24px 60px rgba(0,0,0,.45)}
   .dlg-head{display:flex;align-items:center;gap:10px;padding:16px 18px;border-bottom:1px solid var(--line);position:sticky;top:0;background:inherit;z-index:2}
   .dlg-head h3{margin:0;font-size:16px}
