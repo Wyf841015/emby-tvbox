@@ -85,13 +85,41 @@ public class Spider {
         return "{\"list\":[]}";
     }
 
+    /** catvod 原版的视频扩展名表（spider 用它判断"这个地址是不是视频直链"）。 */
+    private static final String[] VIDEO_FORMAT = {
+            ".m3u8", ".mp4", ".rmvb", ".avi", ".mpeg", ".mkv", ".flv", ".mov",
+            ".wmv", ".webm", ".mpd", ".m4v", ".ts", ".m4s", ".f4v", ".3gp"
+    };
+
+    /**
+     * 和 catvod 原版对齐：带视频扩展名才算视频，且排除 URL 里含 "js" 的情况
+     * （源站经常把 .json/.js 也塞进播放地址列表，误判成视频会让上层把网页当流播）。
+     * 之前只认 4 种扩展名（m3u8/mp4/flv/mkv），.mpd/.ts/.mov 这类会被判成"不是视频"，
+     * spider 于是去做网页解析，最后拿不到地址 —— 属于隐性丢源。
+     */
     public static boolean isVideoFormat(String url) {
         if (url == null) return false;
         String u = url.toLowerCase();
-        return u.contains(".m3u8") || u.contains(".mp4") || u.contains(".flv") || u.contains(".mkv");
+        if (u.contains("js")) return false;
+        for (String s : VIDEO_FORMAT) {
+            if (u.contains(s)) return true;
+        }
+        return false;
     }
 
+    /** 需要二次解析的主流站关键词（catvod 原版的 VIP 判定，缺了会让 spider 少走解析分支）。 */
+    private static final String[] VIP_KEYWORDS = {
+            "v.qq.com", "qq.com/x/cover", "iqiyi.com", "youku.com", "mgtv.com",
+            "bilibili.com", "pptv.com", "le.com", "sohu.com", "tudou.com",
+            "acfun.cn", "wasu.cn", "1905.com", "fun.tv", "qiyi.com"
+    };
+
     public static boolean isVip(String url) {
+        if (url == null) return false;
+        String u = url.toLowerCase();
+        for (String s : VIP_KEYWORDS) {
+            if (u.contains(s)) return true;
+        }
         return false;
     }
 }

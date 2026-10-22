@@ -2414,6 +2414,7 @@ public class Hub {
                 m.put("url", r[1]);
                 m.put("msg", r[2]);
                 m.put("parse", r[3]);
+                if (r.length > 4 && r[4] != null) m.put("header", SpiderPool.Json.parse(r[4]));
                 sendJson(ex, "1".equals(r[0]) ? 200 : 502, m);
                 return;
             }
@@ -2432,25 +2433,31 @@ public class Hub {
     static String[] resolveEpisode(String key, String flag, String id) {
         try {
             String raw = call(key, () -> pool.get(key).playerContent(flag, id, new ArrayList<String>()), 45);
-            if (raw == null || raw.isBlank()) return new String[]{"0", "", "playerContent 返回空", ""};
+            if (raw == null || raw.isBlank()) return new String[]{"0", "", "playerContent 返回空", "", null};
             Object parsed = tryParse(raw);
-            if (!(parsed instanceof Map)) return new String[]{"0", "", "playerContent 返回的不是 JSON: " + abbrev(raw, 80), ""};
+            if (!(parsed instanceof Map)) return new String[]{"0", "", "playerContent 返回的不是 JSON: " + abbrev(raw, 80), "", null};
             Map<?, ?> m = (Map<?, ?>) parsed;
             String url = str(m.get("url"));
             String parse = str(m.get("parse"));
-            if (url.isBlank()) return new String[]{"0", "", "playerContent 没给 url: " + abbrev(raw, 80), parse};
+            // playerContent 常带 header（Referer / User-Agent / Cookie），
+            // 不转给播放端，那些 CDN 直接 401/403。用第 5 个返回值带出去。
+            String headerJson = null;
+            Object hdr = m.get("header");
+            if (hdr instanceof Map && !((Map<?, ?>) hdr).isEmpty())
+                headerJson = SpiderPool.Json.stringify(hdr);
+            if (url.isBlank()) return new String[]{"0", "", "playerContent 没给 url: " + abbrev(raw, 80), parse, headerJson};
             url = url.replace(" ", "%20");
             if (!(url.startsWith("http://") || url.startsWith("https://")))
-                return new String[]{"0", url, "playerContent 给的也不是 http 地址", parse};
+                return new String[]{"0", url, "playerContent 给的也不是 http 地址", parse, headerJson};
             // parse=1 表示还要送给外部解析器，这里尽量再往前推一步
             if ("1".equals(parse)) {
                 String deeper = tryParseService(url);
-                if (deeper != null) return new String[]{"1", deeper, "解析接口已解出", parse};
-                return new String[]{"0", url, "parse=1，解析接口没解出直链", parse};
+                if (deeper != null) return new String[]{"1", deeper, "解析接口已解出", parse, headerJson};
+                return new String[]{"0", url, "parse=1，解析接口没解出直链", parse, headerJson};
             }
-            return new String[]{"1", url, "playerContent 已解出", parse};
+            return new String[]{"1", url, "playerContent 已解出", parse, headerJson};
         } catch (Exception e) {
-            return new String[]{"0", "", "playerContent 失败: " + explain(e), ""};
+            return new String[]{"0", "", "playerContent 失败: " + explain(e), "", null};
         }
     }
 

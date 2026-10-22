@@ -211,6 +211,12 @@ namespace TvBox.Plugin.Api
 
         public string U { get; set; }
         public string R { get; set; }
+
+        /// <summary>
+        /// playerContent 给的 header（JSON，base64url）。CDN 常要求特定 Referer/UA/Cookie，
+        /// 没有它整条播放链 401/403。分片重写时也要带着走。
+        /// </summary>
+        public string H { get; set; }
     }
 
     // ───────────────────── 返回模型 ─────────────────────
@@ -867,7 +873,10 @@ namespace TvBox.Plugin.Api
             // redirect：直接 302 到源站，NAS 只做跳转不转发字节（省带宽/CPU）。
             // auto：按 RedirectHosts 白名单决定，但 m3u8 一律走代理 —— 分片地址里
             //       通常还要补同样的防盗链头，302 出去后客户端会裸连失败。
+            var customHeaders = ParseHeaderB64(req?.H);
             var streamMode = (cfg?.StreamMode ?? "proxy").Trim().ToLowerInvariant();
+            // 带自定义 header 时不能 302：客户端跳过去会丢掉这些头
+            if (customHeaders != null && customHeaders.Count > 0) streamMode = "proxy";
             if (streamMode == "redirect" || streamMode == "auto")
             {
                 var isM3u8 = rawUrl.IndexOf(".m3u8", StringComparison.OrdinalIgnoreCase) >= 0;
@@ -907,6 +916,28 @@ namespace TvBox.Plugin.Api
                 if (!string.IsNullOrWhiteSpace(refToUse))
                     request.Headers.TryAddWithoutValidation("Referer", refToUse);
 
+                // playerContent 给的 header 优先（源站自带的 UA/Cookie/Referer 比我们猜的准）
+                if (customHeaders != null)
+                {
+                    foreach (var kv in customHeaders)
+                    {
+                        var k = (kv.Key ?? "").Trim();
+                        if (k.Length == 0) continue;
+                        // 逐跳/受控头不让源覆盖
+                        if (k.Equals("Host", StringComparison.OrdinalIgnoreCase) ||
+                            k.Equals("Range", StringComparison.OrdinalIgnoreCase) ||
+                            k.Equals("Content-Length", StringComparison.OrdinalIgnoreCase) ||
+                            k.StartsWith("Connection", StringComparison.OrdinalIgnoreCase) ||
+                            k.StartsWith("Accept-Encoding", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (k.Equals("User-Agent", StringComparison.OrdinalIgnoreCase) ||
+                            k.Equals("Referer", StringComparison.OrdinalIgnoreCase))
+                        {
+                            request.Headers.Remove(k);
+                        }
+                        request.Headers.TryAddWithoutValidation(k, kv.Value ?? "");
+                    }
+                }
+
                 var resp = http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead)
                                .GetAwaiter().GetResult();
 
@@ -917,7 +948,7 @@ namespace TvBox.Plugin.Api
                 if (isPlaylist)
                 {
                     var text = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-                    var rewritten = RewritePlaylist(text, rawUrl);
+                    var rewritten = RewritePlaylist(text, rawUrl, referer ?? cfg?.Referer, req?.H);
                     var bytes = Encoding.UTF8.GetBytes(rewritten);
                     resp.Dispose();
                     http.Dispose();
@@ -957,7 +988,7 @@ namespace TvBox.Plugin.Api
         }
 
         /// <summary>把原始地址包装成带扩展名的代理路径，例如 /TvBox/Stream/seg0.ts?u=...</summary>
-        public static string BuildProxyPath(string originalUrl, string referer = null)
+        public static string BuildProxyPath(string originalUrl, string referer = null, string headerB64 = null)
         {
             string name = "stream";
             try
@@ -986,6 +1017,8 @@ namespace TvBox.Plugin.Api
             var path = "/TvBox/Stream/" + name + "?u=" + SyncService.Base64UrlEncode(originalUrl);
             if (!string.IsNullOrWhiteSpace(referer))
                 path += "&r=" + SyncService.Base64UrlEncode(referer);
+            if (!string.IsNullOrWhiteSpace(headerB64))
+                path += "&h=" + headerB64;      // 分片也得带同一份 header，不然一样被拒
             return path;
         }
 
@@ -1104,7 +1137,24 @@ namespace TvBox.Plugin.Api
         /// 把 HLS 播放列表里的分片/子列表地址改写成走本代理，
         /// 否则客户端拿到原始地址后依然会 403（防盗链）。
         /// </summary>
-        private static string RewritePlaylist(string text, string playlistUrl)
+        /// <summary>把 base64url 的 header JSON 解成字典；空/坏值返回 null。</summary>
+        private static Dictionary<string, string> ParseHeaderB64(string b64)
+        {
+            if (string.IsNullOrWhiteSpace(b64)) return null;
+            try
+            {
+                var json = SyncService.Base64UrlDecode(b64);
+                if (string.IsNullOrWhiteSpace(json)) return null;
+                var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                using var doc = System.Text.Json.JsonDocument.Parse(json);
+                foreach (var prop in doc.RootElement.EnumerateObject())
+                    dict[prop.Name] = prop.Value.ToString();
+                return dict.Count > 0 ? dict : null;
+            }
+            catch { return null; }
+        }
+
+        private static string RewritePlaylist(string text, string playlistUrl, string referer = null, string headerB64 = null)
         {
             var sb = new StringBuilder(text.Length + 256);
             Uri baseUri = null;
@@ -1131,7 +1181,7 @@ namespace TvBox.Plugin.Api
                 // 这些图本来也不是视频分片，直接丢掉。
                 if (IsNonMediaSegment(abs)) continue;
 
-                sb.Append(BuildProxyPath(abs)).Append('\n');
+                sb.Append(BuildProxyPath(abs, referer, headerB64)).Append('\n');
             }
             return sb.ToString();
         }
