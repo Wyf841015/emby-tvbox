@@ -107,7 +107,10 @@
     max-width:1180px;width:100%;margin:0 auto;padding:0 20px;
     display:flex;align-items:center;gap:10px;flex-wrap:wrap;
   }
-  .topbar .title{font-size:14px;font-weight:650;letter-spacing:.2px;color:var(--text)}
+  /* 标题 + 版本号必须同一行：放进一个 nowrap 的 flex 组里，换行只可能发生在组与按钮之间 */
+  .topbar-title{display:inline-flex;align-items:center;gap:8px;white-space:nowrap;flex:0 0 auto}
+  .topbar .title{font-size:14px;font-weight:650;letter-spacing:.2px;color:var(--text);white-space:nowrap}
+  .topbar .crumb{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .topbar .crumb{color:var(--dim);font-size:12.5px}
   .wrap{max-width:1180px;width:100%;margin:0 auto;padding:20px 20px 64px}
   @media(max-width:900px){ .topbar-inner{padding:0 12px} }
@@ -449,9 +452,11 @@
   <div class="main">
     <header class="topbar">
       <div class="topbar-inner">
-        <span class="title" id="paneTitle">概览</span>
+        <span class="topbar-title">
+          <span class="title" id="paneTitle">概览</span>
+          <span class="ver">v0.1.2</span>
+        </span>
         <span class="crumb">TVBox 点播源接入 Emby</span>
-        <span class="ver">v0.1.1</span>
         <div class="spacer"></div>
         <div class="topbar-actions">
           <button class="tiny" onclick="showSponsorModal()" title="赞助作者">💖 赞助</button>
