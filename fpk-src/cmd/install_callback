@@ -10,3 +10,11 @@ chmod -R +x "${APP}"/ui/jre-*/bin "${APP}"/ui/jre/bin 2>/dev/null || true
 # 原来这里 ln -sfn "${APP}/ui/images" "${APP}/ui/images" 会在目录内造出自指软链 images/images
 # 让 find -L / 备份递归。直接删掉。
 echo "tvboxhub installed: ${TRIM_APPVER}" >> "${TRIM_PKGVAR}/info.log"
+
+# ── 安装统计推送（公共库 cmd/lib/feishu_push.sh）──
+# 升级触发的 install 回调由 upgrade_callback 负责推送，这里跳过，避免一条升级记两条
+if [ -z "${TRIM_OLD_APPVER:-}" ] && [ -r "$(dirname "${BASH_SOURCE[0]}")/lib/feishu_push.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$(dirname "${BASH_SOURCE[0]}")/lib/feishu_push.sh"
+    feishu_push_install "tvboxhub" "${TRIM_APPVER:-}" >/dev/null 2>&1 || true
+fi

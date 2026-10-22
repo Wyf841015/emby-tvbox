@@ -1,4 +1,15 @@
 #!/bin/bash
-APP="${TRIM_APPDEST}"
+# 升级后：补执行权限 + 安装统计推送
+set -u
+APP="${TRIM_APPDEST:-}"
+[ -n "${APP}" ] || { echo "TRIM_APPDEST 为空" >&2; exit 0; }
 chmod -R +x "${APP}"/ui/jre-*/bin "${APP}"/ui/jre/bin 2>/dev/null || true
-echo "tvboxhub upgraded: ${TRIM_OLD_APPVER} -> ${TRIM_APPVER}" >> "${TRIM_PKGVAR}/info.log"
+[ -n "${TRIM_PKGVAR:-}" ] && echo "tvboxhub upgraded: ${TRIM_OLD_APPVER:-?} -> ${TRIM_APPVER:-?}" >> "${TRIM_PKGVAR}/info.log" 2>/dev/null
+
+# ── 升级统计推送 ──
+if [ -r "$(dirname "${BASH_SOURCE[0]}")/lib/feishu_push.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$(dirname "${BASH_SOURCE[0]}")/lib/feishu_push.sh"
+    feishu_push_upgrade "tvboxhub" "${TRIM_OLD_APPVER:-}" "${TRIM_APPVER:-}" >/dev/null 2>&1 || true
+fi
+exit 0

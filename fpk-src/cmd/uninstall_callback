@@ -1,6 +1,64 @@
 #!/bin/bash
-# 卸载时停掉服务并清掉 socket
-SOCK="${TRIM_APPDEST}/tvboxhub.sock"
-[ -f "${TRIM_PKGVAR}/app.pid" ] && kill "$(cat "${TRIM_PKGVAR}/app.pid")" 2>/dev/null
-rm -f "${SOCK}"
-echo "tvboxhub uninstalled" >> "${TRIM_PKGVAR}/info.log" 2>/dev/null
+### 卸载回调：停服务 + 清 socket + 按向导选择决定是否删数据/移除 Emby 插件
+set -u
+
+APPDEST="${TRIM_APPDEST:-}"
+PKGVAR="${TRIM_PKGVAR:-}"
+ACTION="${wizard_data_action:-keep}"
+EMBY_ACTION="${wizard_emby_action:-keep}"
+
+log_line() {
+    [ -n "${PKGVAR}" ] && mkdir -p "${PKGVAR}" 2>/dev/null && \
+        echo "$(date '+%F %T') uninstall: $*" >> "${PKGVAR}/info.log" 2>/dev/null
+    echo "uninstall: $*"
+}
+
+# ── 1. 停服务、删 socket ──
+if [ -n "${PKGVAR}" ] && [ -f "${PKGVAR}/app.pid" ]; then
+    PID="$(cat "${PKGVAR}/app.pid" 2>/dev/null || true)"
+    if [ -n "${PID}" ] && kill -0 "${PID}" 2>/dev/null; then
+        kill "${PID}" 2>/dev/null || true
+        sleep 1
+        kill -9 "${PID}" 2>/dev/null || true
+    fi
+fi
+[ -n "${APPDEST}" ] && rm -f "${APPDEST}/tvboxhub.sock" 2>/dev/null
+log_line "服务已停止，socket 已清理"
+
+# ── 2. 是否需要从 Emby 摘掉插件（必须在删 PKGVAR 之前读配置）──
+# hub.json 里存着安装时用的 Emby 数据目录
+EMBY_PD=""
+if [ -n "${PKGVAR}" ] && [ -f "${PKGVAR}/hub.json" ]; then
+    EMBY_PD="$(sed -n 's/.*"embyPath"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${PKGVAR}/hub.json" | head -1)"
+fi
+
+if [ "${EMBY_ACTION}" = "remove" ]; then
+    # 结构校验：Emby 数据目录一定有 plugins/ 和 config/system.xml
+    # （不用路径白名单——容器/自定义部署的路径五花八门，硬编码前缀会误跳）
+    case "${EMBY_PD}" in
+        ""|"/"|"/var"|"/usr"|"/etc"|"/home"|"/tmp"|"/opt"|"/vol1"|"/vol2"|"/vol3") EMBY_PD="" ;;
+    esac
+    if [ -n "${EMBY_PD}" ] && [ -d "${EMBY_PD}/plugins" ] && [ -f "${EMBY_PD}/config/system.xml" ]; then
+        rm -f "${EMBY_PD}/plugins/TvBox.dll" 2>/dev/null
+        rm -f "${EMBY_PD}/plugins/configurations/TvBox.xml" 2>/dev/null
+        log_line "已从 Emby 移除插件: ${EMBY_PD}/plugins/TvBox.dll（重启 Emby 后生效）"
+    else
+        log_line "跳过移除 Emby 插件：${EMBY_PD:-读不到 Emby 路径} 不是有效的 Emby 数据目录"
+    fi
+else
+    log_line "保留 Emby 插件，未做改动"
+fi
+
+# ── 3. 应用数据 ──
+if [ "${ACTION}" = "delete" ]; then
+    if [ -n "${PKGVAR}" ] && [ -d "${PKGVAR}" ]; then
+        # 先记到系统日志（下面就把这个目录删了）
+        logger -t tvboxhub "uninstall: 删除应用数据 ${PKGVAR}" 2>/dev/null || true
+        rm -rf "${PKGVAR}"
+        echo "uninstall: 已删除应用数据 ${PKGVAR}"
+    fi
+else
+    log_line "按用户选择保留应用数据: ${PKGVAR}"
+fi
+
+exit 0

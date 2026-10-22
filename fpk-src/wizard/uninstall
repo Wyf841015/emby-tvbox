@@ -1,0 +1,59 @@
+[
+    {
+        "stepTitle": "确认卸载",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "您即将卸载 TvBox For Emby。请选择如何处理应用数据："
+            },
+            {
+                "type": "radio",
+                "field": "wizard_data_action",
+                "label": "应用数据",
+                "initValue": "keep",
+                "options": [
+                    {
+                        "label": "保留数据（推荐）- 站点选择、hub 配置、日志都会留着，将来重装可恢复",
+                        "value": "keep"
+                    },
+                    {
+                        "label": "删除所有应用数据 - 不可恢复（hub.json 里的 Emby 路径/令牌/站点勾选都会丢）",
+                        "value": "delete"
+                    }
+                ],
+                "rules": [
+                    {
+                        "required": true,
+                        "message": "请选择数据保留选项"
+                    }
+                ]
+            },
+            {
+                "type": "radio",
+                "field": "wizard_emby_action",
+                "label": "Emby 里的插件",
+                "initValue": "keep",
+                "options": [
+                    {
+                        "label": "保留 Emby 插件（推荐）- 只是卸载这个 App，插件还在；但插件会连不上 hub",
+                        "value": "keep"
+                    },
+                    {
+                        "label": "同时从 Emby 移除插件 - 删掉 TvBox.dll 和它的配置，Emby 需重启后生效",
+                        "value": "remove"
+                    }
+                ],
+                "rules": [
+                    {
+                        "required": true,
+                        "message": "请选择是否移除 Emby 插件"
+                    }
+                ]
+            },
+            {
+                "type": "tips",
+                "helpText": "已生成的 .strm 媒体文件不会被删除（在 Emby 媒体库目录里，请自行处理）。"
+            }
+        ]
+    }
+]
