@@ -101,6 +101,15 @@
     width:3px;height:18px;border-radius:0 3px 3px 0;background:var(--brand);
   }
   .tab .ico{width:18px;flex:0 0 auto;text-align:center;font-size:14px;line-height:1;filter:saturate(.9)}
+  /* ── 侧边栏收起 / 展开 ── */
+  .nav-toggle{flex:0 0 auto;padding:5px 8px;font-size:15px;line-height:1}
+  .nav-scrim{display:none}
+  .sidebar{transition:width .18s ease}
+  @media(min-width:901px){
+    /* 桌面：收起 = 宽度归零，顶卡片按钮随时拉回来 */
+    .app[data-nav="closed"] .sidebar{width:0;padding:0;border-right:0;overflow:hidden}
+    .app[data-nav="closed"] .sidebar > *{opacity:0;pointer-events:none}
+  }
   .tab .lb{min-width:0;overflow:hidden;text-overflow:ellipsis}
   .tab:hover{background:var(--surface-2)}
   .tab .n{
@@ -391,7 +400,23 @@
   .toast.ok{border-left-color:var(--ok-text)} .toast.bad{border-left-color:var(--bad-text)}
 
   /* ═══════════════ 响应式 ═══════════════ */
-  /* 窄屏：侧边栏保持竖排菜单，收窄成「图标 + 小字」，不再拍平成顶部横条 */
+  /* 窄屏：侧边栏默认收起，展开时是覆盖式抽屉（不挤压内容） */
+  @media(max-width:900px){
+    .app[data-nav="closed"] .sidebar{display:none}
+    .app[data-nav="open"] .sidebar{
+      position:fixed;left:0;top:0;bottom:0;z-index:60;width:186px;height:100vh;
+      padding:12px 10px;border-right:1px solid var(--line);background:var(--surface);
+      box-shadow:var(--sh-3);overflow-y:auto;transform:none;
+    }
+    .app[data-nav="open"] .sidebar .tab{flex-direction:row;gap:10px;padding:11px 12px;font-size:13.5px;text-align:left}
+    .app[data-nav="open"] .sidebar .tab .lb{font-size:13.5px;word-break:normal}
+    .app[data-nav="open"] .sidebar-foot{display:flex}
+    .app[data-nav="open"] .nav-scrim{
+      display:block;position:fixed;inset:0;z-index:55;background:rgba(4,10,20,.5);backdrop-filter:none;
+    }
+  }
+
+/* 窄屏：侧边栏保持竖排菜单，收窄成「图标 + 小字」，不再拍平成顶部横条 */
   @media(max-width:900px){
     .app{flex-direction:row}
     .sidebar{
@@ -501,9 +526,11 @@
 </style>
 </head>
 <body>
-<div class="app">
+<div class="app" data-nav="open">
 
-  <aside class="sidebar">
+  <div class="nav-scrim" onclick="toggleNav(false)" aria-hidden="true"></div>
+
+  <aside class="sidebar" id="sidebar">
     <nav class="tabs" aria-label="主导航">
       <div class="tab active" data-pane="overview" onclick="switchTab('overview',this)"><span class="ico">📊</span><span class="lb">概览</span></div>
       <div class="tab" data-pane="guide" onclick="switchTab('guide',this)"><span class="ico">📖</span><span class="lb">使用说明</span></div>
@@ -524,11 +551,12 @@
   <div class="main">
     <header class="topbar">
       <div class="topbar-inner">
+        <button class="tiny nav-toggle" id="navToggle" onclick="toggleNav()" title="收起 / 展开菜单" aria-label="收起或展开菜单"><span id="navToggleIcon">☰</span></button>
         <div class="logo" aria-hidden="true">T</div>
         <div class="brand-text">
           <div class="brand-line">
             <h1>TvBox For Emby</h1>
-            <span class="ver">v0.5.5</span>
+            <span class="ver">v0.5.6</span>
           </div>
           <div class="sub"><span id="paneTitle">概览</span></div>
         </div>
@@ -2977,6 +3005,7 @@ try {
   switchTab = function (name, el) {
     if (origSwitch) origSwitch(name, el);
     setPaneTitle(name);
+    if (typeof navCloseQuiet === 'function') navCloseQuiet();   // 移动端选完自动收起抽屉
     if (name === 'overview') setTimeout(function () {
       if (typeof runConfigCheck === 'function') runConfigCheck();
     }, 60);
@@ -2989,6 +3018,74 @@ try {
   window.guideCheck = guideCheck;
   window.guideGo = guideGo;
   window.guideOpenEmby = guideOpenEmby;
+
+  // ══════════ 侧边栏收起 / 展开 ══════════
+  // 移动端默认收起（内容占满宽度），桌面默认展开；用户手动切过就记在服务端 prefs 里
+  var NAV_PREF = 'navCollapsed';
+  var _navClosed = null;
+
+  function navIsMobile() {
+    return window.matchMedia && window.matchMedia('(max-width:900px)').matches;
+  }
+
+  function navRender() {
+    var app = document.querySelector('.app');
+    if (!app) return;
+    app.setAttribute('data-nav', _navClosed ? 'closed' : 'open');
+    var icon = document.getElementById('navToggleIcon');
+    if (icon) icon.textContent = _navClosed ? '☰' : '✕';
+    var btn = document.getElementById('navToggle');
+    if (btn) btn.title = _navClosed ? '展开菜单' : '收起菜单';
+  }
+
+  // 不传参 = 切换；传 true/false = 明确设置为收起/展开
+  function toggleNav(forceClosed) {
+    _navClosed = (typeof forceClosed === 'boolean') ? forceClosed : !_navClosed;
+    navRender();
+    // 移动端不记偏好：每次进来都要是「默认收起」，否则用户偶然展开一次就变成永久展开
+    if (navIsMobile()) return;
+    try { localStorage.setItem('tvboxhub.' + NAV_PREF, _navClosed ? '1' : '0'); } catch (e) { }
+    try {
+      var body = {}; body[NAV_PREF] = _navClosed;
+      api('/api/prefs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        .catch(function () { });
+    } catch (e) { }
+  }
+
+  // 选完菜单项后静悄悄收起（移动端抽屉用），不影响偏好
+  function navCloseQuiet() {
+    if (!navIsMobile()) return;
+    _navClosed = true;
+    navRender();
+  }
+  window.navCloseQuiet = navCloseQuiet;
+
+  function navInit(prefValue) {
+    if (navIsMobile()) { _navClosed = true; navRender(); return; }   // 移动端恒定默认收起
+    if (typeof prefValue === 'boolean') { _navClosed = prefValue; }
+    else {
+      var local = null;
+      try { local = localStorage.getItem('tvboxhub.' + NAV_PREF); } catch (e) { }
+      if (local === '1') _navClosed = true;
+      else if (local === '0') _navClosed = false;
+      else _navClosed = navIsMobile();      // 没记录过：移动端默认收回
+    }
+    navRender();
+    // 视口跨过断点时按「移动端默认收回」重算一次（用户手动设置过则不打扰）
+    if (window.matchMedia) {
+      var mq = window.matchMedia('(max-width:900px)');
+      var onChange = function (e) {
+        var hadLocal = false;
+        try { hadLocal = localStorage.getItem('tvboxhub.' + NAV_PREF) !== null; } catch (err) { }
+        if (!hadLocal) { _navClosed = e.matches; navRender(); }
+      };
+      if (mq.addEventListener) mq.addEventListener('change', onChange);
+      else if (mq.addListener) mq.addListener(onChange);
+    }
+  }
+
+  window.toggleNav = toggleNav;
+  window.navInit = navInit;
 
   // ── 主题 ──
   function applyTheme(theme) {
@@ -3026,6 +3123,9 @@ try {
     var btn = document.getElementById('themeBtn');
     if (btn) btn.onclick = toggleTheme;          // CEF 下 inline onclick 不稳，改 DOM 绑定
 
+    // 侧边栏：先按视口定默认态（移动端收起），避免首屏闪一下再收
+    if (typeof navInit === 'function') navInit();
+
     // 服务端偏好兜底：fnOS WebView / 隐私模式下 localStorage 常常写不进去，
     // 只靠它会出现「切了主题一刷新就回去」。
     api('/api/prefs').then(function (r) {
@@ -3036,6 +3136,7 @@ try {
       var localDone = false;
       try { localDone = localStorage.getItem('tvboxhub.' + GUIDE_PREF) === '1'; } catch (e) { }
       if (!p[GUIDE_PREF] && !localDone) setTimeout(function () { guideOpen(); }, 700);
+      if (typeof p[NAV_PREF] === 'boolean') { try { navInit(p[NAV_PREF]); } catch (e) { } }
     }).catch(function () {
       var localDone = false;
       try { localDone = localStorage.getItem('tvboxhub.' + GUIDE_PREF) === '1'; } catch (e) { }
