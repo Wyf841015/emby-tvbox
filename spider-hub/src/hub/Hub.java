@@ -534,6 +534,7 @@ public class Hub {
                     String real = r[1];
                     String hdr = (r.length > 4) ? r[4] : null;
                     String base = basePath(ex);     // 例如 /app/tvboxhub
+                    ex.getResponseHeaders().set("X-Accel-Buffering", "no");   // 别让 nginx 攒着不发
                     if (isM3u8(real)) {
                         String body = new String(httpGetBytes(real, hdr, null).body(), StandardCharsets.UTF_8);
                         String rewritten = rewritePlaylist(body, real, hdr, base);
@@ -558,6 +559,7 @@ public class Hub {
                 String hdr = q.containsKey("h") ? unb64url(q.get("h")) : null;
                 if (u == null || u.isBlank()) { sendText(ex, 400, "缺少 u"); return; }
                 try {
+                    ex.getResponseHeaders().set("X-Accel-Buffering", "no");
                     java.net.http.HttpResponse<byte[]> resp = httpGetBytes(u, hdr,
                             ex.getRequestHeaders().getFirst("Range"));
                     String ct = resp.headers().firstValue("Content-Type").orElse("application/octet-stream");
