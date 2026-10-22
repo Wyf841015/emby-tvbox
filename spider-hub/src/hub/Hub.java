@@ -286,7 +286,19 @@ public class Hub {
                 send(ex, 200, "text/html; charset=utf-8", ui());
                 return;
             }
+            if (path.startsWith("/api/warm")) {
+                handleWarm(ex);
+                return;
+            }
+            if (path.startsWith("/play/")) {
+                handlePlay(ex, path);
+                return;
+            }
             if (path.startsWith("/v/")) {
+                // 记一条请求行：插件跟 curl 拿到不同结果时，靠这个对齐请求差异
+                System.out.println("[cms] " + ex.getRequestURI().getRawPath()
+                        + (ex.getRequestURI().getRawQuery() == null ? "" : "?" + ex.getRequestURI().getRawQuery())
+                        + "  ua=" + ex.getRequestHeaders().getFirst("User-Agent"));
                 handleCms(ex, path);
                 return;
             }
@@ -751,6 +763,15 @@ public class Hub {
                 if (base == null) { sendJson(ex, 200, fail("还没连上 Emby")); return; }
                 long t0 = System.currentTimeMillis();
                 Map<String, Object> m = new LinkedHashMap<>();
+                // 先把同步名单里的 spider 全部实例化好再让插件开始。
+                // 之前是后台线程预热，同步可能抢在预热完成前跑，
+                // 插件拿到的是"初始化中"的实例，表现为整站「0 个条目」。
+                int warmed = 0;
+                for (String k : syncSiteKeys()) {
+                    try { pool.warm(k); warmed++; } catch (Exception ignore) {}
+                }
+                if (warmed > 0) pool.pin(syncSiteKeys());
+                m.put("warmed", warmed);
                 try {
                     String body = embyHttp("POST", base + "/TvBox/Sync?token=" + embyToken());
                     Object parsed = SpiderPool.Json.parse(body);
@@ -1261,6 +1282,7 @@ public class Hub {
         pool.loadFromConfig(body, url);
         System.out.println("已加载 " + pool.size() + " 个 spider 站点");
         restoreProbeState();
+        pool.pin(syncSiteKeys());   // 同步名单常驻，避免冷启动撞插件超时
         return pool.size();
     }
 
@@ -1277,6 +1299,40 @@ public class Hub {
             .connectTimeout(Duration.ofSeconds(4))
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build();
+
+    /**
+     * GET/POST /api/warm[?key=x]  预热 spider 实例。
+     * 不带 key 就把同步名单里的站点全部预热并常驻，避免冷启动撞插件超时。
+     */
+    static void handleWarm(com.sun.net.httpserver.HttpExchange ex) {
+        try {
+            Map<String, String> q = query(ex.getRequestURI().getRawQuery());
+            List<String> keys = new ArrayList<>();
+            String one = q.get("key");
+            if (one != null && !one.isBlank()) {
+                keys.add(one);
+            } else {
+                keys.addAll(syncSiteKeys());
+            }
+            pool.pin(keys);
+            final List<String> target = new ArrayList<>(keys);
+            new Thread(() -> {
+                long t0 = System.currentTimeMillis();
+                for (String k : target) {
+                    try { pool.warm(k); } catch (Exception ignore) {}
+                }
+                System.out.println("[warm] 预热 " + target.size() + " 个站点，用时 "
+                        + (System.currentTimeMillis() - t0) + "ms");
+            }, "warm").start();
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("ok", true);
+            m.put("warmed", keys.size());
+            m.put("pinned", pool.pinnedCount());
+            sendJson(ex, 200, m);
+        } catch (Exception e) {
+            try { sendJson(ex, 500, Map.of("ok", false, "msg", explain(e))); } catch (Exception ignore) {}
+        }
+    }
 
     /** 探测可播性用的 HttpClient（短超时，带 UA）。 */
     static final HttpClient PROBE_HTTP = HttpClient.newBuilder()
@@ -1319,8 +1375,17 @@ public class Hub {
 
         final String oneId = vid;
         String raw = call(key, () -> pool.get(key).detailContent(new ArrayList<>(List.of(oneId))), 60);
-        String playUrl = firstPlayUrl(tryParse(raw));
+        Object detailParsed = tryParse(raw);
+        String playUrl = firstPlayUrl(detailParsed);
         if (playUrl == null || playUrl.isBlank()) return new String[]{"0", "详情里没有播放地址"};
+        // 私有格式（146660@1314815 / CO4K_… / /play/xxx.html）不是 URL，
+        // 要经 playerContent 才能换出真地址，TVBox 客户端就是这么做的。
+        if (!(playUrl.startsWith("http://") || playUrl.startsWith("https://"))) {
+            String flag = firstFlag(detailParsed);
+            String[] r = resolveEpisode(key, flag, playUrl);
+            if ("1".equals(r[0])) return fetchOnce(r[1]);
+            return new String[]{"0", "私有格式需 playerContent 解析：" + r[2]};
+        }
         return fetchOnce(playUrl);
     }
 
@@ -1335,6 +1400,17 @@ public class Hub {
             }
         }
         return null;
+    }
+
+    private static String firstFlag(Object parsed) {
+        if (!(parsed instanceof Map)) return "";
+        Object l = ((Map<?, ?>) parsed).get("list");
+        if (!(l instanceof List) || ((List<?>) l).isEmpty()) return "";
+        Object first = ((List<?>) l).get(0);
+        if (!(first instanceof Map)) return "";
+        Object pf = ((Map<?, ?>) first).get("vod_play_from");
+        if (pf == null) return "";
+        return String.valueOf(pf).split("\\$\\$\\$")[0].trim();
     }
 
     private static String firstPlayUrl(Object parsed) {
@@ -2309,6 +2385,103 @@ public class Hub {
             }
         }
         System.out.println("[fileserver] 起不来（端口被占），依赖 127.0.0.1:9978 的站点会读不到 cookie");
+    }
+
+    /**
+     * GET /play/&lt;key&gt;?flag=&lt;线路&gt;&amp;id=&lt;分集 id&gt;[&amp;json=1]
+     *
+     * 很多 spider 的 vod_play_url 里根本不是 URL，而是它自己的私有格式：
+     *   金牌影视  146660@1314815
+     *   半日99    CO4K_...@CO4K@重生@1
+     *   Sao火     /play/50375-1-1.html
+     * TVBox 客户端每次播放都会先调 Spider.playerContent(flag, id, vipFlags) 换成真地址，
+     * 我们之前直接把私有 id 当 URL 用，这些源就整站同步不到。
+     * 这个端点补上这一层：解析出真地址后 302 过去（json=1 则返回 JSON 说明）。
+     */
+    static void handlePlay(com.sun.net.httpserver.HttpExchange ex, String path) {
+        try {
+            Map<String, String> q = query(ex.getRequestURI().getRawQuery());
+            String key = java.net.URLDecoder.decode(path.substring("/play/".length()), StandardCharsets.UTF_8);
+            String flag = q.getOrDefault("flag", "");
+            String id = q.getOrDefault("id", "");
+            boolean wantJson = "1".equals(q.get("json"));
+            if (id.isBlank()) { sendJson(ex, 400, Map.of("ok", false, "msg", "缺少 id")); return; }
+
+            String[] r = resolveEpisode(key, flag, id);
+            if (wantJson || !"1".equals(r[0])) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("ok", "1".equals(r[0]));
+                m.put("url", r[1]);
+                m.put("msg", r[2]);
+                m.put("parse", r[3]);
+                sendJson(ex, "1".equals(r[0]) ? 200 : 502, m);
+                return;
+            }
+            // 302 到真地址：播放器自己跟着走，hub 不占带宽
+            ex.getResponseHeaders().add("Location", r[1]);
+            ex.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
+            ex.getResponseHeaders().add("X-TvBox-Parse", r[3]);
+            ex.sendResponseHeaders(302, -1);
+            ex.close();
+        } catch (Exception e) {
+            try { sendJson(ex, 500, Map.of("ok", false, "msg", explain(e))); } catch (Exception ignore) {}
+        }
+    }
+
+    /** 调 playerContent 换真地址，返回 {ok(1/0), url, 说明, parse 标记}。 */
+    static String[] resolveEpisode(String key, String flag, String id) {
+        try {
+            String raw = call(key, () -> pool.get(key).playerContent(flag, id, new ArrayList<String>()), 45);
+            if (raw == null || raw.isBlank()) return new String[]{"0", "", "playerContent 返回空", ""};
+            Object parsed = tryParse(raw);
+            if (!(parsed instanceof Map)) return new String[]{"0", "", "playerContent 返回的不是 JSON: " + abbrev(raw, 80), ""};
+            Map<?, ?> m = (Map<?, ?>) parsed;
+            String url = str(m.get("url"));
+            String parse = str(m.get("parse"));
+            if (url.isBlank()) return new String[]{"0", "", "playerContent 没给 url: " + abbrev(raw, 80), parse};
+            url = url.replace(" ", "%20");
+            if (!(url.startsWith("http://") || url.startsWith("https://")))
+                return new String[]{"0", url, "playerContent 给的也不是 http 地址", parse};
+            // parse=1 表示还要送给外部解析器，这里尽量再往前推一步
+            if ("1".equals(parse)) {
+                String deeper = tryParseService(url);
+                if (deeper != null) return new String[]{"1", deeper, "解析接口已解出", parse};
+                return new String[]{"0", url, "parse=1，解析接口没解出直链", parse};
+            }
+            return new String[]{"1", url, "playerContent 已解出", parse};
+        } catch (Exception e) {
+            return new String[]{"0", "", "playerContent 失败: " + explain(e), ""};
+        }
+    }
+
+    /** 解析接口形如 ?url=@|… 或直接返回 {"url":…}，尽量抠出直链。 */
+    static String tryParseService(String url) {
+        try {
+            String[] r = fetchOnce(url);
+            // fetchOnce 只返回 {ok,msg}，这里要正文，单独再拉一次
+            HttpRequest req = HttpRequest.newBuilder(java.net.URI.create(sanitizeForUri(url)))
+                    .timeout(Duration.ofSeconds(20))
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                    .GET().build();
+            HttpResponse<String> resp = PROBE_HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+            String body = resp.body();
+            if (body == null) return null;
+            Object p = tryParse(body);
+            if (p instanceof Map) {
+                String u = str(((Map<?, ?>) p).get("url"));
+                if (u.startsWith("http")) return u;
+            }
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("https?:[^\s\"'<>()\\]*?\\.(?:m3u8|mp4|flv|ts|mkv)(?:\\?[^\\s\"'<>()\\]*)?").matcher(body);
+            if (m.find()) return m.group();
+        } catch (Exception ignore) {
+        }
+        return null;
+    }
+
+    private static String abbrev(String s, int n) {
+        if (s == null) return "";
+        return s.length() <= n ? s : s.substring(0, n) + "…";
     }
 
     static void handleFileRequest(com.sun.net.httpserver.HttpExchange ex) {

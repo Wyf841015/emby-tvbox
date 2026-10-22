@@ -371,7 +371,7 @@ public class SpiderPool {
     private void maybeEvict() {
         long now = System.currentTimeMillis();
         for (Map.Entry<String, Long> e : lastUsed.entrySet()) {
-            if (now - e.getValue() > IDLE_MS && instances.size() > 8) {
+            if (now - e.getValue() > IDLE_MS && instances.size() > 8 && !pinned.contains(e.getKey())) {
                 if (instances.remove(e.getKey()) != null) {
                     lastUsed.remove(e.getKey());
                     evicted.incrementAndGet();
@@ -385,6 +385,7 @@ public class SpiderPool {
         int target = (int) (MAX_INSTANCES * 0.8);
         for (Map.Entry<String, Long> e : ordered) {
             if (instances.size() <= target) break;
+            if (pinned.contains(e.getKey())) continue;   // 同步名单常驻
             if (instances.remove(e.getKey()) != null) {
                 lastUsed.remove(e.getKey());
                 evicted.incrementAndGet();
@@ -398,6 +399,7 @@ public class SpiderPool {
     public Map<String, Object> instanceStats() {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("cached", instances.size());
+        m.put("pinned", pinned.size());
         m.put("max", MAX_INSTANCES);
         m.put("evicted", evicted.get());
         return m;
@@ -462,6 +464,40 @@ public class SpiderPool {
      * 从磁盘恢复一次探测结果（hub 重启后测试列不清空）。
      * err 非空表示上次是失败，此时 data 一律 false。
      */
+    /**
+     * 同步名单里的站点：常驻内存，不被 LRU 淘汰。
+     * 金牌影视这类 spider 冷启动要 30~60 秒（上游接口慢 + jar 初始化），
+     * 刚被淘汰又赶上插件 45 秒超时，就会表现成「0 个条目」。
+     */
+    private final java.util.Set<String> pinned = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    public void pin(java.util.Collection<String> keys) {
+        if (keys == null) return;
+        for (String k : keys) if (k != null && !k.isBlank()) pinned.add(k);
+    }
+
+    public void unpin(java.util.Collection<String> keys) {
+        if (keys == null) return;
+        for (String k : keys) if (k != null) pinned.remove(k);
+    }
+
+    public boolean isPinned(String key) {
+        return pinned.contains(key);
+    }
+
+    /** 预热：实例化并 init，不取数据。失败不影响调用方。 */
+    public void warm(String key) {
+        try {
+            get(key);
+            lastUsed.put(key, System.currentTimeMillis());
+        } catch (Exception ignore) {
+        }
+    }
+
+    public int pinnedCount() {
+        return pinned.size();
+    }
+
     /** 记录「能不能播」的检测结果。 */
     public void markPlayable(String key, Boolean ok, String msg) {
         Site s = sites.get(key);

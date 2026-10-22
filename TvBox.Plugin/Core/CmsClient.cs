@@ -20,6 +20,13 @@ namespace TvBox.Plugin.Core
     {
         public string Name { get; set; }
         public string Url { get; set; }
+
+        /// <summary>
+        /// 地址已经确定过（例如私有分集 id 已换成 hub 的 /play/ 地址）。
+        /// 这类地址不能再走一遍「间接地址解析」——它本身是 302 到 m3u8，
+        /// 解析器会把播放列表里的 .ts 分片当成新地址，校验时就变 404 了。
+        /// </summary>
+        public bool Resolved { get; set; }
     }
 
     public class VodLine
@@ -413,8 +420,19 @@ namespace TvBox.Plugin.Core
                         u.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) continue;
                     if (u.StartsWith("//")) { ep.Url = "https:" + u; continue; }
                     if (u.StartsWith("/")) { ep.Url = origin + u; continue; }
-                    // 形如 play/123.html —— 按站点根目录拼
-                    if (!u.Contains("://")) ep.Url = origin + "/" + u.TrimStart('.', '/');
+                    // 只有「看起来像路径」的才补成绝对地址。
+                    // 大量 spider 的 vod_play_url 是它自己的分集 id（146660@1314815、
+                    // CO4K_…@CO4K@重生@1），这些不是相对路径；以前一律补成
+                    // http://127.0.0.1:8098/146660@1314815 → 请求 404 →
+                    // 整站条目全被判「播放地址不可用」。这类 id 保持原样，
+                    // 交给 SyncService 走 hub 的 /play/（playerContent）解析。
+                    bool looksLikePath = u.StartsWith("./") || u.StartsWith("../")
+                        || u.Contains(".html") || u.Contains(".htm") || u.Contains(".php")
+                        || u.Contains(".m3u8") || u.Contains(".mp4") || u.Contains(".mpd")
+                        || u.Contains(".mkv") || u.Contains(".flv") || u.Contains(".ts?")
+                        || (u.Contains('/') && !u.Contains('@'));
+                    if (looksLikePath && !u.Contains("://"))
+                        ep.Url = origin + "/" + u.TrimStart('.', '/');
                 }
             }
         }

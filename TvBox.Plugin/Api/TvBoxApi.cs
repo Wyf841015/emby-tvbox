@@ -185,6 +185,19 @@ namespace TvBox.Plugin.Api
     }
 
     [Unauthenticated]
+    [Route("/TvBox/Play", "GET,HEAD", Summary = "把 spider 的私有分集 id 解析成真地址（内部走 hub /play/）")]
+    public class PlayResolve : IReturnVoid
+    {
+        /// <summary>站点 key（hub 里的站点标识）。</summary>
+        public string Site { get; set; }
+        /// <summary>线路名（vod_play_from，如「在线播放」「高清」）。</summary>
+        public string Flag { get; set; }
+        /// <summary>spider 的私有分集 id（如 146660@1314815）。</summary>
+        public string Id { get; set; }
+        public string Token { get; set; }
+    }
+
+    [Unauthenticated]   // 播放器/ffmpeg 拉分片不会带 Emby token，缺这个整条播放链 401
     [Route("/TvBox/Stream/{Name}", "GET,HEAD", Summary = "播放地址代理（补 Referer / UA，并重写 HLS 分片地址）")]
     [Route("/TvBox/Stream", "GET,HEAD", Summary = "播放地址代理（兼容无扩展名写法）")]
     public class StreamProxy : IReturnVoid
@@ -274,6 +287,9 @@ namespace TvBox.Plugin.Api
         public IResponse Response { get; set; }
 
         private static Plugin P => Plugin.Instance;
+
+        /// <summary>当前站点的 Referer，Play 代理时补上（很多 CDN 缺它就 403）。</summary>
+        private static string _lastPlayReferer = null;
 
         /// <summary>
         /// 共享令牌校验。token 从 DTO 上取（ServiceStack 自动绑定 ?token=），
@@ -744,6 +760,63 @@ namespace TvBox.Plugin.Api
         //     而 Emby 内部 ffmpeg 拉流不会带 token，不加会直接 401。
         //  2) 不能用 Response.OutputWriter 自己写再 return null —— Emby 会当成空响应返回 204。
         //     正确做法是用 IHttpResultFactory.GetResult 返回 Stream 结果。
+        /// <summary>
+        /// 解析私有分集 id → 真播放地址，然后 302 给客户端。
+        ///
+        /// 为什么不让客户端直接打 hub：hub 的 TCP 只监听回环（安全审计的结论），
+        /// 局域网客户端连不上；Emby 本来就在局域网可达，所以由它代跳一次。
+        /// hub 内部调 Spider.playerContent(flag, id) —— TVBox 客户端播放前做的同一件事。
+        /// </summary>
+        public object Any(PlayResolve req)
+        {
+            var cfg = P?.Configuration;
+            var hub = (cfg?.SpiderHubUrl ?? string.Empty).Trim().TrimEnd('/');
+            if (hub.Length == 0) return PlainText(400, "插件里没配 hub 地址");
+            if (string.IsNullOrWhiteSpace(req?.Id)) return PlainText(400, "缺少 id");
+
+            try
+            {
+                var url = hub + "/play/" + Uri.EscapeDataString(req.Site ?? string.Empty)
+                        + "?flag=" + Uri.EscapeDataString(req.Flag ?? string.Empty)
+                        + "&id=" + Uri.EscapeDataString(req.Id) + "&json=1";
+                string body;
+                using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(45) })
+                    body = http.GetStringAsync(url).GetAwaiter().GetResult();
+
+                bool ok = false; string real = null; string msg = null; string parse = null;
+                using (var doc = System.Text.Json.JsonDocument.Parse(body))
+                {
+                    var root = doc.RootElement;
+                    if (root.TryGetProperty("ok", out var okEl))
+                        ok = okEl.ValueKind == System.Text.Json.JsonValueKind.True;
+                    if (root.TryGetProperty("url", out var uEl)) real = uEl.GetString();
+                    if (root.TryGetProperty("msg", out var mEl)) msg = mEl.GetString();
+                    if (root.TryGetProperty("parse", out var pEl)) parse = pEl.GetString();
+                }
+                if (!ok || string.IsNullOrWhiteSpace(real))
+                {
+                    P?.Logger.Info("[play] 解析失败 site=" + req.Site + " id=" + req.Id + " msg=" + msg);
+                    return PlainText(502, "解析失败: " + (msg ?? "hub 没给出地址"));
+                }
+                P?.Logger.Info("[play] " + req.Site + " " + req.Id + " → " + real + " (parse=" + parse + ")");
+
+                // 不走 302：Emby 的 IHttpResult.StatusCode 实测设不进响应（客户端拿到的是 200 + Location），
+                // 播放器和校验都会把空 body 当成 text/plain 判死。直接复用 Stream 的代理逻辑，
+                // 顺带还能补 Referer、重写 HLS 分片地址。
+                var proxyReq = new StreamProxy
+                {
+                    U = SyncService.Base64UrlEncode(real),
+                    R = SyncService.Base64UrlEncode(_lastPlayReferer),
+                };
+                return GetCore(proxyReq);
+            }
+            catch (Exception ex)
+            {
+                try { P?.Logger.Error("[play] 异常: " + ex.Message); } catch { }
+                return PlainText(500, "解析异常: " + ex.Message);
+            }
+        }
+
         public object Any(StreamProxy req)
         {
             try
@@ -1107,7 +1180,15 @@ namespace TvBox.Plugin.Api
                     url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
                     return url;
                 if (baseUri == null) return null;
-                return new Uri(baseUri, url).ToString();
+                var abs = new Uri(baseUri, url).ToString();
+
+                // 分片是相对路径时，播放列表上的鉴权查询串要带着走。
+                // 实测 ppvod 这类 CDN：m3u8 是 .../index.m3u8?auth_key=xxx，
+                // 分片写成 index0.ts（不带 query）。按 RFC 解析出来的分片 URL 没有
+                // auth_key，代理去拉就 401 —— 表现为「首个分片返回 401」整条判死。
+                if (!abs.Contains("?") && !string.IsNullOrEmpty(baseUri.Query) && baseUri.Query.Length > 1)
+                    abs = abs + baseUri.Query;
+                return abs;
             }
             catch { return null; }
         }

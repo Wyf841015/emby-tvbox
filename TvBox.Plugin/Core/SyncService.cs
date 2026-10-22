@@ -50,6 +50,9 @@ namespace TvBox.Plugin.Core
     public class SyncService
     {
         private readonly Action<string> _log;
+
+        /// <summary>Emby 的局域网访问地址：私有分集 id 改写成 /TvBox/Play 时用。</summary>
+        private string _embyBase = string.Empty;
         /// <summary>本轮增量状态（RunAsync 里创建）。</summary>
         private SyncState _state;
         private readonly SemaphoreSlim _gate = new SemaphoreSlim(1, 1);
@@ -122,6 +125,48 @@ namespace TvBox.Plugin.Core
         /// 先交给 PlayUrlResolver 解一次，解出来的真地址同时回写到分集上，
         /// 这样写进 strm 的就是能播的那个。
         /// </summary>
+        /// <summary>
+        /// 把 spider 的私有分集 id 换成 hub 的 /play/ 地址（hub 侧走 Spider.playerContent 解析）。
+        ///
+        /// 有些源 vod_play_url 里是 `146660@1314815`、`CO4K_…@CO4K@重生@1`、`/play/50375-1-1.html`
+        /// 这类私有格式，以前要么被 PlayUrlParser 丢掉整站为空，要么被当成地址写进 strm 播不了。
+        /// </summary>
+        private VodLine ResolvePrivateIds(VodLine line, TvBoxSite site, PluginConfiguration cfg)
+        {
+            if (line?.Episodes == null || line.Episodes.Count == 0) return line;
+            // 注意：不能直接写 hub 的 /play/ 地址 —— hub 的 TCP 只监听回环（安全审计结论），
+            // 局域网播放器连不上。改成指向 Emby 自己的 /TvBox/Play，由插件内部再问 hub。
+            var baseUrl = (_embyBase ?? string.Empty).Trim().TrimEnd('/');
+            if (baseUrl.Length == 0) return line;
+
+            var head = baseUrl + "/TvBox/Play?site=" + Uri.EscapeDataString(site?.Key ?? string.Empty)
+                     + "&flag=" + Uri.EscapeDataString(line.Name ?? string.Empty) + "&id=";
+            bool changed = false;
+            var eps = new List<VodEpisode>(line.Episodes.Count);
+            foreach (var ep in line.Episodes)
+            {
+                if (ep == null) continue;
+                var u = (ep.Url ?? string.Empty).Trim();
+                if (u.Length == 0) continue;
+                bool isHttp = u.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                           || u.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+                if (isHttp) { eps.Add(ep); continue; }
+                changed = true;
+                eps.Add(new VodEpisode { Name = ep.Name, Url = head + Uri.EscapeDataString(u), Resolved = true });
+            }
+            if (!changed) return line;
+            _logOnce("[私有格式] " + (site?.Name ?? site?.Key) + " 的 " + line.Name
+                     + " 线路走 playerContent 解析（" + eps.Count + " 集）");
+            return new VodLine { Name = line.Name, Episodes = eps };
+        }
+
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _logged
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, byte>();
+        private void _logOnce(string msg)
+        {
+            if (_logged.TryAdd(msg, 0)) _log(msg);
+        }
+
         private static async Task<List<VodEpisode>> FilterPlayableEpisodesAsync(
             CmsClient client, List<VodEpisode> episodes, TvBoxSite site, PluginConfiguration cfg,
             CancellationToken ct, Action<string> onDead, Action<string> onNote)
@@ -177,7 +222,8 @@ namespace TvBox.Plugin.Core
                     try
                     {
                         var url = episodes[idx]?.Url;
-                        if (cfg.ResolveIndirectUrl && !PlayUrlResolver.LooksLikeDirectMedia(url))
+                        bool alreadyResolved = episodes[idx]?.Resolved == true;
+                        if (!alreadyResolved && cfg.ResolveIndirectUrl && !PlayUrlResolver.LooksLikeDirectMedia(url))
                         {
                             Interlocked.Increment(ref attempted);
                             var real = await PlayUrlResolver.ResolveAsync(client.Http, url, site?.Referer, ct)
@@ -329,6 +375,7 @@ namespace TvBox.Plugin.Core
                     }
                     // 站点级 Referer：每个站点单独取，写进代理地址里，播放时才会带对 Referer
                     string siteReferer = null;
+                    _embyBase = (embyBaseUrlForProxy ?? string.Empty).Trim().TrimEnd('/');
                     if (cfg.UseProxy && !string.IsNullOrWhiteSpace(embyBaseUrlForProxy))
                     {
                         var baseUrl = embyBaseUrlForProxy.TrimEnd('/');
@@ -584,6 +631,12 @@ namespace TvBox.Plugin.Core
                             summary.Skipped++; Update(p => p.ItemsSkipped++);
                             continue;
                         }
+
+                        // 大量 spider 的 vod_play_url 不是 URL，而是它自己的分集 id
+                        // （金牌影视 146660@1314815 / 半日99 CO4K_… / Sao火 /play/x.html）。
+                        // TVBox 客户端播之前都会调 playerContent 换真地址，
+                        // 这里同样交给 hub 的 /play/ 端点，校验和写 strm 都用换出来的地址。
+                        line = ResolvePrivateIds(line, site, cfg);
 
                         if (line.Episodes.Count > 1)
                         {
@@ -978,6 +1031,9 @@ namespace TvBox.Plugin.Core
                         {
                             var line = PlayUrlParser.PickBestLine(item);
                             if (line == null) continue;
+                            // 有分类的主路径之前漏了这一步：私有分集 id（146660@1314815 这类）
+                            // 在这里没换成 hub /play/ 地址，就被当成死链 404 全跳过。
+                            line = ResolvePrivateIds(line, site, cfg);
 
                             if (item.IsSeries)
                             {

@@ -65,7 +65,11 @@ namespace TvBox.Plugin.Core
                     url = seg.Substring(dollar + 1).Trim();
                 }
 
-                if (!IsPlayableUrl(url)) continue;
+                // 以前这里直接丢掉非 http 的地址，结果把「金牌影视/半日99/Sao火」这类
+                // 把分集 id 当播放地址的源整站丢空。私有 id 留着，同步时经 hub
+                // 的 /play/ 端点走 Spider.playerContent 换成真地址。
+                if (string.IsNullOrWhiteSpace(url)) continue;
+                if (!IsPlayableUrl(url) && LooksLikeCloudShare(url)) continue;
                 autoIndex++;
                 list.Add(new VodEpisode
                 {
@@ -105,6 +109,15 @@ namespace TvBox.Plugin.Core
         /// 判断地址是否真的能播。TVBox 的源里混着大量 magnet:、ed2k:、
         /// 网盘分享页、甚至空串，这些进了 Emby 只会变成一堆报错的条目。
         /// </summary>
+        /// <summary>网盘分享页：这类即使能拿到地址也播不了，直接跳过。</summary>
+        public static bool LooksLikeCloudShare(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url)) return false;
+            var u = url.Trim();
+            return u.Contains("pan.baidu.com") || u.Contains("aliyundrive.com")
+                || u.Contains("alipan.com") || u.Contains("115.com") || u.Contains("夸克");
+        }
+
         public static bool IsPlayableUrl(string url)
         {
             if (string.IsNullOrWhiteSpace(url)) return false;

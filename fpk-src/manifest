@@ -1,5 +1,5 @@
 appname               = tvboxhub
-version               = 0.11.0
+version               = 0.12.0
 display_name          = TVBox 中转
 desc                  = 把 TVBox 的点播源接入 Emby：spider 中转服务 + Emby 插件一键安装
 platform              = all

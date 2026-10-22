@@ -1,5 +1,39 @@
 # emby-tvbox
 
+## v0.12.0 — 补上 Spider.playerContent 这一层（私有分集 id 现在能播）
+
+上一版探测发现 152 个源里只有 2 个「直接可播」，其余大量源的 `vod_play_url` 根本不是地址：
+
+```
+金牌影视  146660@1314815
+半日99    CO4K_…@CO4K@重生@1
+Sao火     /play/50375-1-1.html
+```
+
+这些是 spider 的私有分集 id。TVBox 客户端播之前都会先调 `Spider.playerContent(flag, id)` 换成真地址，
+我们之前直接把 id 当 URL 用，所以整站同步不到。这一版把这一层补上了：
+
+- hub 新增 `GET /play/<key>?flag=&id=[&json=1]`：内部调 `playerContent`，`parse=0` 直接给真地址，
+  `parse=1` 再尝试解一次解析接口
+- 插件新增 `GET /TvBox/Play?site=&flag=&id=`：局域网可达，内部向 hub 解析后**代理**播放
+  （不走 302 —— Emby 的 `IHttpResult.StatusCode` 实测设不进响应，客户端拿到 200+Location 判死）
+- `PlayUrlParser` 不再丢弃非 http 地址；改为在同步时换成 `/TvBox/Play` 地址再校验/写 strm
+- 修 `CmsClient.ResolveRelativePlayUrls` 把私有 id 当相对路径的 bug（曾补成
+  `http://127.0.0.1:8098/146660@1314815` → 全站 404）；只有真像路径的才补绝对地址
+- `/TvBox/Stream` 与 `/TvBox/Play` 补 `[Unauthenticated]`：播放器拉分片不带 Emby token，
+  缺这个整条播放链 401「Access token is invalid or expired」
+- HLS 分片是相对路径时，把播放列表上的鉴权查询串（`?auth_key=…`）带下去；
+  不带就 401/403（实测 ppvod 这类 CDN 分片必须带同一份 auth_key，且**不能**带 Referer，
+  带了反而 403）
+- 两条重复的同步路径（有分类主路径 / 无分类降级路径）都接上了私有 id 转换 —— 之前只改了一条
+- 同步前 hub 先预热并常驻同步名单里的 spider 实例（LRU 不再淘汰它们），
+  解决「spider 冷启动 30~60 秒 > 插件超时」导致的整站「0 个条目」
+
+实测（金牌影视，192 个条目）：私有 id 逐个解析出真 m3u8，分片代理返回
+`200 video/mp2t 362KB`，strm 正常落盘：
+`http://192.168.1.10:8096/TvBox/Stream/Play.ts?u=…`（解码后指向 `/TvBox/Play?site=…&id=…`）。
+`Sao火`/`布布` 仍是 `parse=1`（要外部解析器），`豆瓣`/`魔方`/`jin夏听书` 各有独立故障，这几站仍不可用。
+
 ## v0.11.0 — 探测区分「有数据」和「真能播」
 
 用户实测反馈「选了几个源同步不到剧集」。查下来三个源分别栽在不同地方，而界面上它们都显示"可用"：
