@@ -882,17 +882,25 @@ function renderSites() {
   }
 
   function row(s) {
-    // 四态：失败 / 可用（真拿到内容）/ 无数据（调通了但 0 条）/ 未测
     var probed = !!s.probeTs;
     var st = s.lastError ? 'bad'
       : (probed ? (s.data ? 'ok' : 'none') : (s.ok ? 'ok' : 'unk'));
     var label = s.lastError ? '失败'
-      : (probed ? (s.data ? '可用' : '无数据') : (s.ok ? '可用' : '未测'));
+      : (probed ? (s.data ? '有数据' : '无数据') : (s.ok ? '可用' : '未测'));
     var tip = s.lastError ? ('错误：' + s.lastError)
       : (probed ? ('分类 ' + (s.classes || 0) + ' / 列表 ' + (s.list || 0) + ' · 探测于 ' + (s.probeAt || ''))
                 : '还没探测过，点上面的「批量探测当前」');
+
+    // 可播性单独一列：有数据 ≠ 能播。实测有源列表 0 条，也有源 37 个条目全返回
+    // 解析接口的 JSON（key 失效）——只看"有数据"会让人以为能用，同步完是 0 个文件。
+    var pl = s.playable;            // null=没测过 true/false
+    var pst = (pl === true) ? 'ok' : (pl === false ? 'bad' : 'unk');
+    var plabel = (pl === true) ? '可播' : (pl === false ? '不可播' : '未验');
+    var ptip = s.playMsg ? s.playMsg : '探测时会取一条详情实际拉一次分片';
+
     return '<tr>' +
       '<td title="' + esc(tip) + '"><span class="st ' + st + '"></span>' + label + '</td>' +
+      '<td title="' + esc(ptip) + '"><span class="st ' + pst + '"></span>' + plabel + '</td>' +
       '<td>' + (s.netdisk ? '<span class="pill bad">网盘</span>' : '<span class="pill ok">直连</span>') + '</td>' +
       '<td>' + esc(s.name || '') + '</td>' +
       '<td><code>' + esc(s.key) + '</code></td>' +
@@ -901,7 +909,7 @@ function renderSites() {
         : '<button class="tiny accent" onclick="setSiteSync(\'' + escJs(s.key) + '\', true)">加入</button>') + '</td>' +
       '</tr>';
   }
-  var head = '<table><thead><tr><th>测试</th><th>类型</th><th>站点</th><th>key</th><th>操作</th></tr></thead><tbody>';
+  var head = '<table><thead><tr><th>测试</th><th>可播</th><th>类型</th><th>站点</th><th>key</th><th>操作</th></tr></thead><tbody>';
 
   var boxSync = document.getElementById('siteTableSync');
   if (boxSync) {
@@ -931,18 +939,25 @@ function setSiteSync(key, on) {
 
 // 批量：把所有「可用」站点加入同步，或全部移出
 function bulkSync(on) {
+  var cand = sites.filter(function (s) { return !s.sync && !s.netdisk && siteHasData(s); });
+  // 「可播」是更强的信号：探测时已经取一条详情实际拉过分片。
+  // 有可播数据就只用可播的，避免把「有列表但全是解析接口 JSON」的源也拉进同步。
+  var playableOnes = cand.filter(function (s) { return s.playable === true; });
   var targets = on
-    ? sites.filter(function (s) { return !s.sync && !s.netdisk && siteHasData(s); }).map(function (s) { return s.key; })
+    ? (playableOnes.length ? playableOnes : cand).map(function (s) { return s.key; })
     : sites.filter(function (s) { return s.sync; }).map(function (s) { return s.key; });
+  var usePlayable = on && playableOnes.length > 0;
   if (!targets.length) { toast(on ? '没有「探测有数据且尚未加入」的站点（先跑一遍批量探测）' : '当前没有加入同步的站点', 'bad'); return; }
-  if (!confirm((on ? '把 ' : '把 ') + targets.length + ' 个站点' + (on ? '加入' : '移出') + '同步？')) return;
+  if (!confirm((on ? '加入 ' : '移出 ') + targets.length + ' 个站点到同步名单？'
+      + (usePlayable ? '\n（只加入「可播」的 ' + playableOnes.length + ' 个）' : ''))) return;
   api('api/sites/sync', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ keys: targets, sync: on })
+    body: JSON.stringify({ keys: targets, sync: on, action: (on ? '批量加入' : '批量移出') + ' ' + targets.length + ' 个' })
   }).then(function (d) {
-    toast(d.msg || '已更新', d.ok ? 'ok' : 'bad');
+    if (!d.ok) { toast(d.msg || '操作失败', 'bad'); return; }
+    toast((on ? '已加入 ' : '已移出 ') + targets.length + ' 个', 'ok');
     loadSites();
-  }).catch(function (e) { toast('失败: ' + e, 'bad'); });
+  }).catch(function (e) { toast('失败: ' + (e && e.message ? e.message : e), 'bad'); });
 }
 
 function escJs(s) {

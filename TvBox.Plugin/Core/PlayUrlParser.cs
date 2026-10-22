@@ -70,10 +70,35 @@ namespace TvBox.Plugin.Core
                 list.Add(new VodEpisode
                 {
                     Name = string.IsNullOrWhiteSpace(name) ? "第" + autoIndex + "集" : name,
-                    Url = url,
+                    Url = SanitizeUrl(url),   // 内嵌空格的解析接口地址在这里统一修好
                 });
             }
             return list;
+        }
+
+        /// <summary>
+        /// 清洗播放地址里非法字符。
+        ///
+        /// 实测大量源把 UA 直接拼进解析接口的 query 里且不编码：
+        ///   https://api.xxx:7788/api/?key=…&amp;url=@|NONCE|token|Mozilla/5.0 (iPhone; CPU iPhone OS …)
+        /// 里面有空格，ffmpeg 和多数客户端会直接判为非法 URL 拒播；
+        /// .NET 的 Uri 会自己转义、但写进 strm 的还是带空格的原串，客户端照样播不了。
+        /// 这里统一把空格换成 %20、控制字符转成 %XX，其余字符原样保留
+        /// （| : @ / 这些是源站协议的一部分，不能动）。
+        /// </summary>
+        public static string SanitizeUrl(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url)) return url;
+            var u = url.Trim();
+            var sb = new System.Text.StringBuilder(u.Length + 16);
+            foreach (var ch in u)
+            {
+                if (ch == ' ') sb.Append("%20");
+                else if (ch < 0x20 || ch == 0x7f)
+                    sb.Append('%').Append(((int)ch).ToString("X2"));
+                else sb.Append(ch);
+            }
+            return sb.ToString();
         }
 
         /// <summary>

@@ -682,10 +682,30 @@ public class Hub {
                     pool.markData(key, nClass, nList);          // 有数据才算可用
                     rememberProbe(key, nClass, nList, null);    // 落盘，重启后还在
                     clearSiteFailure(key);                      // 探测成功 → 失败计数清零
+
+                    // 有数据 ≠ 能播。实测有源「分类 8 个、列表 0 条」，
+                    // 也有源「37 个条目全部返回 application/json（解析 key 失效）」。
+                    // 只报"有数据"会让用户照着勾选，同步完是 0 个文件。
+                    Boolean playable = null;
+                    String playMsg = null;
+                    if (nList > 0 || nClass > 0) {
+                        try {
+                            String[] pr = probePlayable(key, parsed);
+                            playable = "1".equals(pr[0]);
+                            playMsg = pr[1];
+                            pool.markPlayable(key, playable, playMsg);
+                            rememberPlayable(key, playable, playMsg);
+                        } catch (Exception pe) {
+                            playMsg = "可播性检测失败: " + explain(pe);
+                            pool.markPlayable(key, null, playMsg);
+                        }
+                    }
                     Map<String, Object> m = new LinkedHashMap<>();
                     m.put("ok", true);
                     m.put("classes", nClass);
                     m.put("list", nList);
+                    m.put("playable", playable);
+                    m.put("playMsg", playMsg);
                     m.put("ms", ms);
                     m.put("parsed", parsed);
                     sendJson(ex, 200, m);
@@ -1257,6 +1277,137 @@ public class Hub {
             .connectTimeout(Duration.ofSeconds(4))
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build();
+
+    /** 探测可播性用的 HttpClient（短超时，带 UA）。 */
+    static final HttpClient PROBE_HTTP = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(10))
+            .followRedirects(HttpClient.Redirect.NORMAL)
+            .build();
+
+    /** 记录可播性检测结果（落盘到 probe 同一行里）。 */
+    static synchronized void rememberPlayable(String key, Boolean playable, String msg) {
+        if (key == null || key.isBlank()) return;
+        try {
+            Object cur = settings.get("probe");
+            Map<String, Object> probe = (cur instanceof Map)
+                    ? (Map<String, Object>) cur : new LinkedHashMap<String, Object>();
+            Object old = probe.get(key);
+            Map<String, Object> row = (old instanceof Map)
+                    ? (Map<String, Object>) old : new LinkedHashMap<String, Object>();
+            row.put("p", playable == null ? null : (playable ? "1" : "0"));
+            row.put("pm", msg == null ? null
+                    : (msg.length() > 200 ? msg.substring(0, 200) : msg));
+            row.put("pat", System.currentTimeMillis());
+            probe.put(key, row);
+            settings.put("probe", probe);
+            saveSettings();
+        } catch (Exception ignore) {
+        }
+    }
+
+    /** 取一条详情，把第一条分集地址实际拉一次，判断这个源能不能播。 */
+    static String[] probePlayable(String key, Object homeParsed) throws Exception {
+        String vid = firstVodId(homeParsed);
+        if (vid == null) {
+            try {
+                String raw = call(key, () -> pool.get(key).categoryContent("", "1", false, null), 45);
+                vid = firstVodId(tryParse(raw));
+            } catch (Exception ignore) {
+            }
+        }
+        if (vid == null) return new String[]{"0", "列表里一条都没有，取不到详情"};
+
+        final String oneId = vid;
+        String raw = call(key, () -> pool.get(key).detailContent(new ArrayList<>(List.of(oneId))), 60);
+        String playUrl = firstPlayUrl(tryParse(raw));
+        if (playUrl == null || playUrl.isBlank()) return new String[]{"0", "详情里没有播放地址"};
+        return fetchOnce(playUrl);
+    }
+
+    private static String firstVodId(Object parsed) {
+        if (!(parsed instanceof Map)) return null;
+        Object l = ((Map<?, ?>) parsed).get("list");
+        if (!(l instanceof List)) return null;
+        for (Object o : (List<?>) l) {
+            if (o instanceof Map) {
+                Object id = ((Map<?, ?>) o).get("vod_id");
+                if (id != null) return String.valueOf(id);
+            }
+        }
+        return null;
+    }
+
+    private static String firstPlayUrl(Object parsed) {
+        if (!(parsed instanceof Map)) return null;
+        Object l = ((Map<?, ?>) parsed).get("list");
+        if (!(l instanceof List) || ((List<?>) l).isEmpty()) return null;
+        Object first = ((List<?>) l).get(0);
+        if (!(first instanceof Map)) return null;
+        Object pu = ((Map<?, ?>) first).get("vod_play_url");
+        if (pu == null) return null;
+        String first1 = String.valueOf(pu).split("#")[0];
+        int d = first1.indexOf('$');
+        return d >= 0 ? first1.substring(d + 1) : first1;
+    }
+
+    /**
+     * 把源给的地址修成 java.net.URI 能接受的形式。
+     * 这些源经常把 UA 直接拼进 query（含空格），还有用 | 当分隔符的（Java 的 URI 认为非法）。
+     * 空格→%20，|→%7C，其余原样（已编码的 %XX 不要二次编码）。
+     */
+    static String sanitizeForUri(String url) {
+        if (url == null) return "";
+        StringBuilder sb = new StringBuilder(url.length() + 24);
+        for (char ch : url.trim().toCharArray()) {
+            switch (ch) {
+                case ' ': sb.append("%20"); break;
+                case '|': sb.append("%7C"); break;
+                case '"': sb.append("%22"); break;
+                case '<': sb.append("%3C"); break;
+                case '>': sb.append("%3E"); break;
+                case '{': sb.append("%7B"); break;
+                case '}': sb.append("%7D"); break;
+                case '\\': sb.append("%5C"); break;
+                case '^': sb.append("%5E"); break;
+                case '`': sb.append("%60"); break;
+                default:
+                    if (ch < 0x20 || ch == 0x7f) sb.append(String.format("%%%02X", (int) ch));
+                    else sb.append(ch);
+            }
+        }
+        return sb.toString();
+    }
+
+    /** 拉一次地址，返回 {ok(1/0), 说明}。 */
+    static String[] fetchOnce(String url) {
+        String u = sanitizeForUri(url);
+        if (!(u.startsWith("http://") || u.startsWith("https://")))
+            return new String[]{"0", "不是 http(s) 地址"};
+        try {
+            java.net.URI uri = java.net.URI.create(u);
+            String host = uri.getHost() == null ? "" : uri.getHost();
+            if (host.equals("127.0.0.1") || host.equalsIgnoreCase("localhost"))
+                return new String[]{"0", "本机地址，跳过"};
+            HttpRequest req = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(20))
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                    .header("Range", "bytes=0-65535")
+                    .GET().build();
+            HttpResponse<byte[]> resp = PROBE_HTTP.send(req, HttpResponse.BodyHandlers.ofByteArray());
+            int code = resp.statusCode();
+            String ct = resp.headers().firstValue("content-type").orElse("").toLowerCase();
+            String body = new String(resp.body(), StandardCharsets.UTF_8);
+            if (code >= 400) return new String[]{"0", "源返回 " + code};
+            if (body.startsWith("#EXTM3U") || ct.contains("mpegurl")) return new String[]{"1", "m3u8 可播"};
+            if (ct.contains("json")) return new String[]{"0", "返回 JSON（解析接口，需二次解析）"};
+            if (ct.contains("html") || ct.contains("xml"))
+                return new String[]{"0", "返回 " + ct.split(";")[0] + "（网页播放页，不是媒体流）"};
+            if (ct.startsWith("video/") || ct.startsWith("audio/") || ct.contains("octet-stream") || ct.isEmpty())
+                return new String[]{"1", "直链可播" + (ct.isEmpty() ? "" : "（" + ct + "）")};
+            return new String[]{"0", "content-type=" + ct};
+        } catch (Exception e) {
+            return new String[]{"0", "请求失败: " + (e.getMessage() == null ? e.toString() : e.getMessage())};
+        }
+    }
 
     /** 给 hub 用的共享令牌：装插件时写进 TvBox.xml，之后调免登录路由都要带上。 */
     static synchronized String embyToken() {
@@ -2041,7 +2192,15 @@ public class Hub {
         Object cur = settings.get("probe");
         Map<String, Object> probe = (cur instanceof Map)
                 ? (Map<String, Object>) cur : new LinkedHashMap<String, Object>();
-        Map<String, Object> row = new LinkedHashMap<>();
+        // 复用已有那一行：可播性检测是紧接着 markData 之后做的，
+        // 重新造一个 row 会把刚写进去的 p/pm 覆盖掉。
+        Map<String, Object> row;
+        Object old = probe.get(key);
+        if (old instanceof Map) {
+            row = (Map<String, Object>) old;
+        } else {
+            row = new LinkedHashMap<>();
+        }
         row.put("c", classes);
         row.put("l", list);
         row.put("at", System.currentTimeMillis());
@@ -2067,6 +2226,12 @@ public class Hub {
             String err = errObj == null ? null : String.valueOf(errObj);
             if (at <= 0) continue;
             pool.restoreProbe(String.valueOf(e.getKey()), c, l, at, err);
+            Object p = row.get("p");
+            if (p != null) {
+                Boolean pl = "1".equals(String.valueOf(p));
+                Object pm = row.get("pm");
+                pool.markPlayable(String.valueOf(e.getKey()), pl, pm == null ? null : String.valueOf(pm));
+            }
             n++;
         }
         if (n > 0) System.out.println("恢复上次探测结果: " + n + " 个站点");

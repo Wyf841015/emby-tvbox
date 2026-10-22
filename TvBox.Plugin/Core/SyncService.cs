@@ -401,11 +401,19 @@ namespace TvBox.Plugin.Core
                                + $"（写入 {written}，跳过 {summary.Skipped}），分集 {summary.Episodes}，"
                                + (summary.Unchanged > 0 ? $"（其中 {summary.Unchanged} 个内容未变）" : "")
                                + $"清理 {summary.Removed}，错误 {summary.Errors}";
+                // 区分两种情况：真的写不进磁盘，还是所有条目本来就没法播。
+                // 之前一律提示"检查输出目录"，实测有源 37 个条目全是解析接口失效，
+                // 用户照着提示去查目录权限，方向完全错了。
                 if (summary.Items > 0 && written == 0 && summary.Unchanged == 0)
-                    summary.Detail += "  ⚠️ 全部条目都没写进磁盘"
-                                    + (string.IsNullOrEmpty(_lastWriteError)
-                                        ? "（检查输出目录是否存在且 Emby 用户可写）"
-                                        : "：" + _lastWriteError);
+                {
+                    if (!string.IsNullOrEmpty(_lastWriteError))
+                        summary.Detail += "  ⚠️ 写入失败：" + _lastWriteError;
+                    else if (summary.Skipped > 0)
+                        summary.Detail += "  ⚠️ 全部 " + summary.Skipped
+                                        + " 个条目都因播放地址不可用被跳过（原因见日志，换几个源试试）";
+                    else
+                        summary.Detail += "  ⚠️ 全部条目都没写进磁盘（检查输出目录是否存在且 Emby 用户可写）";
+                }
                 Finish(summary, cfg, saveConfig);
                 return true;
             }

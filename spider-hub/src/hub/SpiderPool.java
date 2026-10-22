@@ -49,6 +49,19 @@ public class SpiderPool {
         public volatile long lastProbeAt;
         /** 最近一次探测是否真的拿到了内容（分类>0 或 列表>0）。 */
         public volatile boolean hasData;
+        /**
+         * 拿到的内容到底能不能播。
+         *   null  = 没测过（老数据）
+         *   true  = 取一条详情，分集地址实际拉得动
+         *   false = 有列表但没有一个能播的地址（解析接口失效 / 只给网页播放页 / 图片分片）
+         *
+         * 为什么要单独一列：实测有源「分类 8 个、列表 0 条」，也有源「37 个条目全部返回
+         * application/json（解析 key 失效）」——只判断"有没有数据"会把它们标成可用，
+         * 用户照着勾选，同步结果是 0 个文件。
+         */
+        public volatile Boolean playable;
+        public volatile String playMsg;
+        public volatile long lastPlayAt;
 
         public Map<String, Object> toMap() {
             Map<String, Object> m = new LinkedHashMap<>();
@@ -65,6 +78,9 @@ public class SpiderPool {
             m.put("lastOk", lastOk == 0 ? null : new java.util.Date(lastOk).toString());
             // 测试列三态：失败(lastError) / 可用(有数据) / 无数据(调通了但 0 条) / 未测(从没探测)
             m.put("data", hasData);
+        m.put("playable", playable);          // null = 没测过
+        m.put("playMsg", playMsg);
+        m.put("lastPlayAt", lastPlayAt);
             m.put("classes", lastClasses);
             m.put("list", lastList);
             m.put("probeAt", lastProbeAt == 0 ? null : new java.util.Date(lastProbeAt).toString());
@@ -446,6 +462,15 @@ public class SpiderPool {
      * 从磁盘恢复一次探测结果（hub 重启后测试列不清空）。
      * err 非空表示上次是失败，此时 data 一律 false。
      */
+    /** 记录「能不能播」的检测结果。 */
+    public void markPlayable(String key, Boolean ok, String msg) {
+        Site s = sites.get(key);
+        if (s == null) return;
+        s.playable = ok;
+        s.playMsg = msg;
+        s.lastPlayAt = System.currentTimeMillis();
+    }
+
     public void restoreProbe(String key, int classes, int list, long at, String err) {
         Site s = sites.get(key);
         if (s == null || at <= 0) return;
@@ -500,12 +525,22 @@ public class SpiderPool {
             if (usable) ok++;
             else bad++;
         }
+        int playableYes = 0, playableNo = 0, playableUnknown = 0;
+        for (Site s : sites.values()) {
+            if (s.netdisk) continue;
+            if (s.playable == null) playableUnknown++;
+            else if (s.playable) playableYes++;
+            else playableNo++;
+        }
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("total", sites.size());
         m.put("ok", ok);
         m.put("unknown", bad);
         m.put("netdisk", netdiskCount);
         m.put("syncable", sites.size() - netdiskCount);
+        m.put("playable", playableYes);
+        m.put("unplayable", playableNo);
+        m.put("playUnknown", playableUnknown);
         return m;
     }
 
