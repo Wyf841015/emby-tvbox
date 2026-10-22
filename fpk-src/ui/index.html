@@ -348,6 +348,26 @@
     box-shadow:0 4px 14px rgba(46,204,113,.3);
   }
   .kv{display:grid;grid-template-columns:104px 1fr;gap:7px 14px;font-size:13px}
+  /* 使用说明的进度清单 */
+  .guide-step{display:flex;gap:10px;align-items:flex-start;padding:11px 0;border-top:1px solid var(--line-soft)}
+  .guide-step:first-child{border-top:0}
+  .guide-step .gi{width:18px;flex:0 0 auto;text-align:center;font-weight:800;font-size:14px;line-height:1.5}
+  .guide-step.ok .gi{color:var(--ok-text)}
+  .guide-step.no .gi{color:var(--dim)}
+  .guide-step .gt{flex:1;min-width:0}
+  .guide-step .gt b{font-size:13.5px;font-weight:650}
+  .guide-step .gt .hint{margin-top:3px}
+  .guide-step .ga{flex:0 0 auto}
+  .wz-list{margin:8px 0 0;padding-left:18px}
+  .wz-list li{margin:6px 0}
+  /* 长 URL / 站点名不能把清单撑出横向滚动条 */
+  .guide-step .gt .hint{overflow-wrap:anywhere;word-break:break-word}
+  @media (max-width:520px){
+    #wizardMask{padding:12px}
+    #wizardMask .dlg{width:100%;max-width:100%}
+    .guide-step{flex-wrap:wrap}
+    .guide-step .ga{width:calc(100% - 28px);margin:6px 0 0 28px}
+  }
   .kv .k{color:var(--dim)} .kv .v{word-break:break-all;color:var(--text-2)}
   .form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px 14px;margin-bottom:6px}
   .form-grid label{display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--dim);font-weight:550}
@@ -471,7 +491,7 @@
       <div class="brand-text">
         <div class="brand-line">
           <h1>TvBox For Emby</h1>
-          <span class="ver">v0.4.5</span>
+          <span class="ver">v0.5.0</span>
         </div>
         <div class="sub">点播源 → Emby</div>
       </div>
@@ -479,6 +499,7 @@
 
     <div class="tabs">
       <div class="tab active" data-pane="overview" onclick="switchTab('overview',this)">概览</div>
+      <div class="tab" data-pane="guide" onclick="switchTab('guide',this)">使用说明</div>
       <div class="tab" data-pane="sites" onclick="switchTab('sites',this)">站点<span class="n" id="tabSiteCount">0</span></div>
       <div class="tab" data-pane="search" onclick="switchTab('search',this)">搜索</div>
       <div class="tab" data-pane="sync" onclick="switchTab('sync',this)">同步<span class="n" id="tabSyncDot" style="display:none">●</span></div>
@@ -553,6 +574,51 @@
   </div>
 
   <!-- ══════════ 站点 ══════════ -->
+  <!-- ══════════ 使用说明 ══════════ -->
+  <div class="pane" id="pane-guide">
+    <div class="panel">
+      <div class="cfg-head">
+        <h2 style="margin:0">首次使用向导</h2>
+        <span class="cfg-ts" id="guideTs"></span>
+        <button class="tiny" onclick="guideCheck(true)">刷新检测</button>
+      </div>
+      <div class="hint">按下面几步走完，就能在 Emby 里看到片子了。每步都会自动检测是否完成；卡住时点「去处理」直接跳到对应页面。</div>
+      <div class="row" style="margin-top:12px">
+        <button class="primary" onclick="guideOpen()">重新打开使用向导</button>
+        <button onclick="goto('config')">填配置</button>
+        <button onclick="goto('emby')">装插件</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>进度清单</h2>
+      <div id="guideSteps"><div class="empty" style="padding:12px 0">正在检测…</div></div>
+    </div>
+
+    <div class="panel">
+      <h2>它是怎么工作的</h2>
+      <div class="kv">
+        <div class="k">① 采集</div><div class="v">读你的 TVBox 配置，把每个站点当成采集源（苹果 CMS 接口）。</div>
+        <div class="k">② 同步</div><div class="v">按站点抓列表 + 详情，生成 <code>.strm</code> 文件（每部一个文件，内容是一行播放地址）。</div>
+        <div class="k">③ 扫描</div><div class="v">Emby 扫描输出目录的 <code>movies/</code> 和 <code>tv/</code>，把它们当成普通媒体库。</div>
+        <div class="k">④ 播放</div><div class="v">Emby 播放时，插件按需补 Referer/UA、重写 HLS 分片地址，跳过防盗链。</div>
+        <div class="k">不影响原库</div><div class="v">只在输出目录里写文件，不会改你已有的影视文件。</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>常见问题</h2>
+      <div class="kv">
+        <div class="k">同步很慢</div><div class="v">源多就慢。先只勾 3-5 个 ✅ 站点试水，把「每分类抓取页数」调成 1-2。</div>
+        <div class="k">Emby 里没有片</div><div class="v">先确认同步跑完，再在 Emby 里给 <code>movies/</code>、<code>tv/</code> 分别加媒体库并「扫描媒体库」。</div>
+        <div class="k">播放 403 / 播不了</div><div class="v">该源要 Referer 或防盗链：在「配置」里填播放 Referer，并保持「播放走本机代理」打开。</div>
+        <div class="k">站点变 ⛔</div><div class="v">源站挂了或改了接口。跳过它就行，别一个人折腾——站点是第三方提供的。</div>
+        <div class="k">改了配置不生效</div><div class="v">插件配置改完要重启 Emby；hub 页面里的「保存」会直接写插件 XML。</div>
+        <div class="k">想从头再来</div><div class="v">点上面「重新打开使用向导」。</div>
+      </div>
+    </div>
+  </div>
+
   <div class="pane" id="pane-sites">
     <div class="panel">
       <h2>站点列表</h2>
@@ -1628,6 +1694,165 @@ function pushAll() {
   pushMany(list, document.getElementById('btnPushAll'));
 }
 
+
+// ══════════ 使用说明 / 首次使用向导 ══════════
+// 向导进度存在服务端 prefs（fnOS WebView 常禁 localStorage，不能只靠本地）
+var GUIDE_PREF = 'guideDone';
+var _gs = { cfg: null, source: '', syncCount: 0, pluginInstalled: false };
+var _wz = 0;
+
+var WZ_STEPS = [
+  { t: '欢迎使用 TvBox For Emby',
+    l: ['这个应用把 TVBox 的点播源接进 Emby：同步成 <code>.strm</code> 文件，Emby 扫描后就能浏览、搜索、播放。',
+        '它只往输出目录里写文件，<b>不会改动你已有的影视文件</b>。',
+        '下面 5 步走完就能看片了。随时可以跳过，之后在「使用说明」里能重新打开。'],
+    go: null },
+  { t: '第 1 步 · 填写点播源',
+    l: ['到「配置」里填 <b>TVBox 配置地址</b>：单仓 JSON、多仓 urls、base64 都支持，也可以填本机绝对路径。',
+        '保存后 hub 会把里面的站点抓出来。'],
+    go: 'config' },
+  { t: '第 2 步 · 选要同步的站点',
+    l: ['到「站点」里勾选站点：<b>先勾 3-5 个标 ✅ 的试水</b>，源越多越慢。',
+        '⛔ 是当前不可用的源，跳过即可。'],
+    go: 'sites' },
+  { t: '第 3 步 · 设置输出目录',
+    l: ['在「配置」里指定 strm 输出目录，会生成 <code>movies/</code> 和 <code>tv/</code> 两个子目录。',
+        '默认放在 Emby 数据目录下的 <code>tvbox/</code>，也可以指到你自己的媒体盘。'],
+    go: 'config' },
+  { t: '第 4 步 · 安装 Emby 插件',
+    l: ['到「Emby 插件」点安装：会自动找到 Emby 数据目录，装完<b>自动重启 Emby</b>。',
+        '插件负责补 Referer/UA、重写 HLS 分片，解决防盗链播放问题。'],
+    go: 'emby' },
+  { t: '第 5 步 · 跑一次同步',
+    l: ['到「同步」点开始，等它跑完（第一次比较慢）。',
+        '跑完后在 Emby 里把输出目录的 <code>movies/</code> 和 <code>tv/</code> 分别添加为媒体库，再「扫描媒体库」就能看到片子。'],
+    go: 'sync' },
+  { t: '完成',
+    l: ['配置好了。以后不会再自动弹这个向导。',
+        '想再看：进「使用说明」→「重新打开使用向导」；有问题那里还有常见问题。'],
+    go: null }
+];
+
+function guidePrefSaveDone() {
+  try { localStorage.setItem('tvboxhub.' + GUIDE_PREF, '1'); } catch (e) { }
+  try {
+    api('/api/prefs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ guideDone: true }) }).catch(function () { });
+  } catch (e) { }
+}
+
+// 检测各步完成情况
+function guideCheck(manual) {
+  var box = document.getElementById('guideSteps');
+  if (!box) return;
+  if (manual) box.innerHTML = '<div class="empty" style="padding:12px 0">正在检测…</div>';
+  var jobs = [
+    api('api/config').catch(function () { return null; }),
+    api('api/sync-sites').catch(function () { return null; }),
+    api('api/emby/status').catch(function () { return null; })
+  ];
+  Promise.all(jobs).then(function (r) {
+    var wrap = r[0] || {};
+    _gs.cfg = wrap.config || {};
+    _gs.source = wrap.source || '';
+    var ss = r[1] || {};
+    var sites = ss.sites || [];
+    _gs.syncCount = (typeof ss.count === 'number') ? ss.count : (Array.isArray(sites) ? sites.length : 0);
+    _gs.pluginInstalled = !!(r[2] && r[2].installed);
+    guideRender();
+    var ts = document.getElementById('guideTs');
+    if (ts) ts.textContent = '检测于 ' + new Date().toLocaleTimeString();
+  }).catch(function (e) {
+    box.innerHTML = '<div class="empty" style="padding:12px 0">检测失败：' + esc(String(e && e.message ? e.message : e)) + '</div>';
+  });
+}
+
+function guideRender() {
+  var box = document.getElementById('guideSteps');
+  if (!box) return;
+  var cfg = _gs.cfg || {};
+  var done = {
+    config: !!String(cfg.ConfigUrl || '').trim(),
+    sites: _gs.syncCount > 0,
+    output: !!String(cfg.OutputRoot || '').trim(),
+    plugin: !!_gs.pluginInstalled,
+    sync: !!(cfg.LastSyncSummary || cfg.LastSyncUtc)
+  };
+  var items = [
+    { ok: done.config, name: '填写点播源', desc: done.config ? ('已填：' + String(cfg.ConfigUrl).slice(0, 60)) : '还没填 TVBox 配置地址', go: 'config' },
+    { ok: done.sites, name: '选择要同步的站点', desc: done.sites ? ('已选 ' + _gs.syncCount + ' 个站点') : '一个站点都没勾 —— 同步不会产出任何内容', go: 'sites' },
+    { ok: done.output, name: '设置输出目录', desc: done.output ? ('输出到：' + cfg.OutputRoot) : '还没设输出目录（留空会用 Emby 数据目录下的 tvbox/）', go: 'config' },
+    { ok: done.plugin, name: '安装 Emby 插件', desc: done.plugin ? '插件已安装' : '没装插件：播放会被防盗链挡住', go: 'emby' },
+    { ok: done.sync, name: '跑一次同步', desc: done.sync ? ('上次同步：' + String(cfg.LastSyncSummary || cfg.LastSyncUtc).slice(0, 60)) : '还没同步过', go: 'sync' },
+    { ok: false, name: '在 Emby 里添加媒体库并播放', desc: '把输出目录的 movies/ 和 tv/ 加成媒体库 → 扫描媒体库 → 在首页就能看到片子（这步只能在 Emby 里做）', go: 'emby' }
+  ];
+  var alarm = [];
+  if (!done.config) alarm.push('配置地址');
+  if (!done.sites) alarm.push('站点勾选');
+  var head = alarm.length
+    ? '<div class="hint" style="color:var(--warn-text);padding:0 0 10px">还差：' + alarm.join(' / ') + '，否则同步不会有任何产出。</div>'
+    : '<div class="hint" style="color:var(--ok-text);padding:0 0 10px">关键配置都齐了。</div>';
+  box.innerHTML = head + items.map(function (it) {
+    return '<div class="guide-step ' + (it.ok ? 'ok' : 'no') + '">'
+      + '<div class="gi">' + (it.ok ? '✓' : '○') + '</div>'
+      + '<div class="gt"><b>' + esc(it.name) + '</b><div class="hint">' + esc(it.desc) + '</div></div>'
+      + (it.go ? '<div class="ga"><button class="tiny" onclick="guideGo(\'' + it.go + '\')">去处理</button></div>' : '')
+      + '</div>';
+  }).join('');
+}
+
+// 从清单直接跳到对应页
+function guideGo(tab) {
+  guideHide();
+  goto(tab);
+}
+
+function guideHide() {
+  var m = document.getElementById('wizardMask');
+  if (m) m.classList.remove('show');
+}
+
+function guideWzRender() {
+  var s = WZ_STEPS[_wz] || WZ_STEPS[0];
+  var t = document.getElementById('wzTitle');
+  var b = document.getElementById('wzBody');
+  var f = document.getElementById('wzFoot');
+  var prev = document.getElementById('wzPrev');
+  var next = document.getElementById('wzNext');
+  if (t) t.textContent = s.t;
+  if (b) {
+    b.innerHTML = '<ul class="wz-list">' + s.l.map(function (x) { return '<li>' + x + '</li>'; }).join('') + '</ul>'
+      + (s.go ? '<div style="margin-top:14px"><button class="primary" type="button" onclick="guideGo(\'' + s.go + '\')">现在就去 →</button></div>' : '');
+  }
+  if (f) f.textContent = '第 ' + (_wz + 1) + ' / ' + WZ_STEPS.length + ' 步';
+  if (prev) prev.style.visibility = _wz === 0 ? 'hidden' : 'visible';
+  if (next) next.textContent = (_wz === WZ_STEPS.length - 1) ? '开始使用' : '下一步';
+}
+
+function guideOpen() {
+  _wz = 0;
+  guideWzRender();
+  var m = document.getElementById('wizardMask');
+  if (m) m.classList.add('show');
+  guideCheck();
+}
+
+function guidePrev() {
+  if (_wz > 0) { _wz--; guideWzRender(); }
+}
+
+function guideNext() {
+  if (_wz < WZ_STEPS.length - 1) { _wz++; guideWzRender(); return; }
+  guideClose(true);
+  toast('向导已关闭，按「使用说明」里的清单继续就行', 'ok');
+}
+
+// 关闭；saveDone=true 表示「以后别再自动弹」
+function guideClose(saveDone) {
+  guideHide();
+  if (saveDone) guidePrefSaveDone();
+}
+
 function switchTab(name, el) {
   // 这三个页都显示「输出目录 / 配置源」，一律从 Emby 插件读，避免各显示各的
   if (name === 'config' || name === 'sync' || name === 'emby') pcLoad();
@@ -1640,6 +1865,7 @@ function switchTab(name, el) {
   }
   var pane = document.getElementById('pane-' + name);
   if (pane) pane.classList.add('active');
+  if (name === 'guide') guideCheck();
   if (name === 'logs') loadLogs();
   if (name === 'overview') loadRecent();
   if (name === 'emby' && !document.getElementById('embyList').dataset.loaded) detectEmby();
@@ -2640,7 +2866,7 @@ try {
 
 // ══════════ 外壳：顶栏标题 + 主题切换 ══════════
 (function () {
-  var TITLES = {overview:'概览', sites:'站点', search:'搜索', sync:'同步', config:'配置', emby:'Emby 插件', logs:'操作记录'};
+  var TITLES = {overview:'概览', guide:'使用说明', sites:'站点', search:'搜索', sync:'同步', config:'配置', emby:'Emby 插件', logs:'操作记录'};
 
   function setPaneTitle(name) {
     var el = document.getElementById('paneTitle');
@@ -2657,6 +2883,12 @@ try {
     }, 60);
   };
   window.switchTab = switchTab;
+  window.guideOpen = guideOpen;
+  window.guideClose = guideClose;
+  window.guidePrev = guidePrev;
+  window.guideNext = guideNext;
+  window.guideCheck = guideCheck;
+  window.guideGo = guideGo;
 
   // ── 主题 ──
   function applyTheme(theme) {
@@ -2698,9 +2930,17 @@ try {
     // 只靠它会出现「切了主题一刷新就回去」。
     api('/api/prefs').then(function (r) {
       var t = r && r.prefs && r.prefs.theme;
-      if (!t || _themeTouched) return;
-      if (t !== (document.documentElement.getAttribute('data-theme') || 'dark')) applyTheme(t);
-    }).catch(function () { });
+      if (t && !_themeTouched && t !== (document.documentElement.getAttribute('data-theme') || 'dark')) applyTheme(t);
+      // 首次使用：没走过向导就自动弹（服务端为准，localStorage 兜底）
+      var p = (r && r.prefs) || {};
+      var localDone = false;
+      try { localDone = localStorage.getItem('tvboxhub.' + GUIDE_PREF) === '1'; } catch (e) { }
+      if (!p[GUIDE_PREF] && !localDone) setTimeout(function () { guideOpen(); }, 700);
+    }).catch(function () {
+      var localDone = false;
+      try { localDone = localStorage.getItem('tvboxhub.' + GUIDE_PREF) === '1'; } catch (e) { }
+      if (!localDone) setTimeout(function () { guideOpen(); }, 900);
+    });
 
     var act = document.querySelector('.tab.active');
     setPaneTitle(act ? act.getAttribute('data-pane') : 'overview');
@@ -2726,5 +2966,24 @@ try {
 
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", bindSponsorImgs); else bindSponsorImgs();
 </script>
+
+<!-- ══════════ 首次使用向导（弹窗） ══════════ -->
+<div class="mask" id="wizardMask" style="z-index:1300">
+  <div class="dlg" style="width:min(580px,100%)">
+    <div class="dlg-head">
+      <h3 id="wzTitle">开始使用 TvBox For Emby</h3>
+      <button class="x" type="button" onclick="guideClose(true)" title="关闭">×</button>
+    </div>
+    <div class="dlg-body" style="display:block">
+      <div id="wzBody" style="font-size:13.5px;line-height:1.85"></div>
+      <div id="wzFoot" class="hint" style="margin-top:12px"></div>
+    </div>
+    <div class="dlg-foot">
+      <button type="button" id="wzPrev" onclick="guidePrev()">上一步</button>
+      <button type="button" class="primary" id="wzNext" onclick="guideNext()">下一步</button>
+      <button type="button" onclick="guideClose(true)">跳过</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>
