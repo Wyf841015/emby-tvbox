@@ -1,5 +1,23 @@
 # emby-tvbox
 
+## v0.10.2 — 插件自更新（一键升级，Docker 也能用）
+
+装好一次之后，以后升级不再需要碰任何目录或容器。
+
+- 插件新增 `GET /TvBox/SelfUpdate`：从 hub 的 `GET /api/plugin/dll` 拉新 DLL，
+  先写 `<plugins>/TvBox.dll.tmp-<ts>` 再 **原子 rename 覆盖自己**（运行中的 Emby 映射着老 inode，
+  直接覆盖会 SIGBUS），写完校验 sha256，最后调 `IApplicationHost.Restart()` 让 Emby 自己重启加载。
+- 定位自己的路径靠 `IApplicationPaths.PluginsPath`：Emby 用 `Assembly.Load(byte[])` 加载插件，
+  `Assembly.Location` 是空串，不能靠它。
+- hub 新增 `GET /api/plugin/info`（路径/大小/sha256/mtime）与 `GET /api/plugin/dll`（带头 `X-Plugin-Sha256`），
+  以及 `POST /api/emby/self-update`（代调插件路由；旧版插件没这条路由时返回 `needInstall` 提示先装一次）。
+- Web UI 安装区新增「升级插件（自更新）」按钮，结果写明是「已是最新」还是「已更新 + 正在重启」。
+
+实测（生产 Emby 4.9）：
+- 哈希一致 → `已是最新版本（c003d07c5f23）`，不动文件
+- `force=1` → 文件 mtime 更新、sha256 与 hub 一致、Emby 进程未被打挂
+- `restart=1` → 插件替换后调 `Restart()`，**Emby 72 秒后自动恢复**，`/api/emby/status` 正常读到新 DLL（180736 B）
+
 ## v0.10.1 — 插件安装：本地优先，失败自动转 Docker
 
 Emby 跑在 Docker 里时，hub 往往看不到容器的 `/config`，原来的「复制 DLL 到 programdata」就装不上。

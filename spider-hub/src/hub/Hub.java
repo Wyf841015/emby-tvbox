@@ -778,6 +778,73 @@ public class Hub {
                 sendJson(ex, 200, m);
                 return;
             }
+            case "/api/plugin/dll": {
+                if (pluginDll == null || !Files.isRegularFile(pluginDll)) {
+                    sendJson(ex, 200, fail("安装包里没有 TvBox.dll")); return;
+                }
+                byte[] bytes = Files.readAllBytes(pluginDll);
+                ex.getResponseHeaders().set("X-Plugin-Sha256", sha256Hex(bytes));
+                ex.getResponseHeaders().set("X-Plugin-Bytes", String.valueOf(bytes.length));
+                ex.getResponseHeaders().set("Content-Type", "application/octet-stream");
+                ex.sendResponseHeaders(200, bytes.length);
+                try (java.io.OutputStream os = ex.getResponseBody()) { os.write(bytes); }
+                return;
+            }
+            case "/api/plugin/info": {
+                Map<String, Object> m = new LinkedHashMap<>();
+                if (pluginDll == null || !Files.isRegularFile(pluginDll)) {
+                    m.put("ok", false);
+                    m.put("msg", "安装包里没有 TvBox.dll");
+                } else {
+                    byte[] bytes = Files.readAllBytes(pluginDll);
+                    m.put("ok", true);
+                    m.put("path", pluginDll.toString());
+                    m.put("bytes", bytes.length);
+                    m.put("sha256", sha256Hex(bytes));
+                    m.put("mtime", Files.getLastModifiedTime(pluginDll).toMillis());
+                }
+                sendJson(ex, 200, m);
+                return;
+            }
+            case "/api/emby/self-update": {
+                // 让插件自己下载→替换→重启。容器部署时这是唯一不用碰目录的升级方式。
+                String base = embyBase();
+                if (base == null) { sendJson(ex, 200, fail("还没连上 Emby")); return; }
+                Map<String, String> req = parseForm(readBody(ex));
+                String restart = firstNonEmpty(req.get("restart"), "1");
+                String force = firstNonEmpty(req.get("force"), "0");
+                String url = base + "/TvBox/SelfUpdate?token=" + embyToken()
+                        + "&Restart=" + URLEncoder.encode(restart, StandardCharsets.UTF_8)
+                        + "&Force=" + URLEncoder.encode(force, StandardCharsets.UTF_8);
+                long t0 = System.currentTimeMillis();
+                try {
+                    String body = embyHttp("GET", url);
+                    Object parsed = SpiderPool.Json.parse(body);
+                    if (parsed instanceof Map) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> m = (Map<String, Object>) parsed;
+                        // 插件返回的是 C# 命名（Ok/Msg），这里统一补一个小写 ok 给前端用，
+                        // 否则 putIfAbsent 会因为键名不同而塞进 ok=false（看起来像失败）
+                        Object okv = m.get("Ok") != null ? m.get("Ok") : m.get("ok");
+                        m.put("ok", Boolean.TRUE.equals(okv) || "true".equalsIgnoreCase(String.valueOf(okv)));
+                        record("插件自更新", "via plugin", Boolean.TRUE.equals(m.get("ok")),
+                                String.valueOf(m.get("msg")), System.currentTimeMillis() - t0);
+                        sendJson(ex, 200, m);
+                    } else {
+                        sendJson(ex, 200, fail("插件返回了非 JSON: " + (body == null ? "" : body.length() > 200 ? body.substring(0, 200) : body)));
+                    }
+                } catch (Exception e) {
+                    // 旧版插件没有这条路由 → 明确让用户先「安装插件」升级一次
+                    record("插件自更新", "via plugin", false, e.getMessage(), System.currentTimeMillis() - t0);
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("ok", false);
+                    m.put("needInstall", true);
+                    m.put("msg", "当前插件还没有自更新能力（或 Emby 未重启加载新版）：" + explain(e)
+                            + "。请先用上面的「安装插件」升级一次，之后就都能自更新了。");
+                    sendJson(ex, 200, m);
+                }
+                return;
+            }
             case "/api/emby/docker": {
                 Map<String, Object> m = new LinkedHashMap<>();
                 boolean av = DockerInstaller.available();
@@ -2141,6 +2208,19 @@ public class Hub {
             try { sendBytes(ex, 500, "text/plain", String.valueOf(e).getBytes(StandardCharsets.UTF_8)); } catch (Exception ignore) { }
         } finally {
             try { ex.close(); } catch (Exception ignore) { }
+        }
+    }
+
+    /** 文件/字节的 sha256（自更新用它比对版本，比版本号可靠）。 */
+    static String sha256Hex(byte[] bytes) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] d = md.digest(bytes);
+            StringBuilder sb = new StringBuilder(d.length * 2);
+            for (byte b : d) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
         }
     }
 

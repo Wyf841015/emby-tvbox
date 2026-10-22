@@ -49,6 +49,13 @@ namespace TvBox.Plugin
 
         public IApplicationHost ApplicationHost => _host;
 
+        /// <summary>
+        /// plugins 目录的真实路径。插件自更新要用它定位自己的 DLL：
+        /// Emby 是用 Assembly.Load(byte[]) 加载插件的，所以 Assembly.Location 是空串，
+        /// 只能从宿主这里拿（IApplicationPaths.PluginsPath）。
+        /// </summary>
+        public string PluginsPath => _paths?.PluginsPath;
+
         public SyncService SyncService { get; }
 
         public ILogger Logger => _logger;

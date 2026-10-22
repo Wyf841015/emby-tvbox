@@ -645,6 +645,7 @@
       </div>
       <div class="row" style="margin-top:10px">
         <button class="primary" onclick="installPlugin()" id="btnInstall">安装插件到 Emby</button>
+        <button onclick="selfUpdatePlugin()" id="btnSelfUpdate">升级插件（自更新）</button>
         <button class="danger" onclick="uninstallPlugin()">卸载插件</button>
         <span class="hint" id="pluginHint" style="margin:0"></span>
       </div>
@@ -656,6 +657,10 @@
         装不上或发现运行中的 Emby 用的是另一份数据，就<b>自动转 Docker</b>
         （<code>docker cp</code> 进容器 <code>/config/plugins/</code> 再重启容器）。
         旧版会自动备份成 <code>TvBox.dll.bak-时间戳</code>。
+      </div>
+      <div class="hint">
+        <b>装好一次之后，升级用「升级插件（自更新）」就行</b>：插件自己从 hub 下载新 DLL、
+        原子替换掉自己，再让 Emby 自动重启加载 —— 不再需要碰任何目录或容器（Docker 也能用）。
       </div>
       <div class="hint">
         Emby 4.9 没有「从 URL 安装 DLL」的 API（<code>POST /Packages/Installed/{Name}</code>
@@ -1248,6 +1253,38 @@ function embyStatus() {
     api('api/save', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ embyPath: pd }) });
   }).catch(function (e) { toast('查询失败: ' + e, 'bad'); });
+}
+
+function selfUpdatePlugin() {
+  var btn = document.getElementById('btnSelfUpdate');
+  var hint = document.getElementById('pluginHint');
+  btn.disabled = true;
+  hint.textContent = '正在让插件自更新（下载 → 替换 → 重启 Emby）…';
+  hint.style.color = '';
+  api('api/emby/self-update', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ restart: '1', force: '0' }) })
+    .then(function (d) {
+      if (d.ok) {
+        toast(d.updated ? '插件已更新' : '已是最新', 'ok');
+        hint.textContent = '✅ ' + (d.msg || '');
+        hint.style.color = 'var(--ok)';
+        if (d.restarting) {
+          hint.textContent += ' ｜ Emby 正在重启，稍等 30 秒后刷新本页';
+          setTimeout(function () { embyStatus(); }, 30000);
+        }
+      } else {
+        toast(d.msg || '自更新失败', 'bad');
+        hint.textContent = '❌ ' + (d.msg || '失败');
+        hint.style.color = 'var(--bad)';
+      }
+      loadLogs();
+    })
+    .catch(function (e) {
+      // Emby 重启会让请求直接断开，这属于正常现象
+      hint.textContent = '⚠️ 请求中断（可能是 Emby 正在重启）：' + e;
+      hint.style.color = 'var(--warn)';
+    })
+    .then(function () { btn.disabled = false; });
 }
 
 function detectDocker() {

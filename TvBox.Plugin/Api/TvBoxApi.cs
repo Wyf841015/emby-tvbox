@@ -43,6 +43,38 @@ namespace TvBox.Plugin.Api
         public string Token { get; set; }
     }
 
+    /// <summary>
+    /// 插件自更新：从 hub 拉一份新的 TvBox.dll，原子替换磁盘上的自己，再让 Emby 重启加载。
+    ///
+    /// 为什么要有这条：容器部署时 hub 看不到 /config，Emby 4.9 又没有「从 URL 装 DLL」的 API
+    /// （PackageService 只能装官方插件目录里的包，且不支持自定义仓库），
+    /// 所以升级只能靠插件自己——它以 Emby 用户身份运行，对 plugins/ 本来就有写权限。
+    /// </summary>
+    [Unauthenticated]
+    [Route("/TvBox/SelfUpdate", "GET", Summary = "从 hub 拉取新插件并自我更新")]
+    public class SelfUpdate : IReturn<SelfUpdateResult>
+    {
+        public string Token { get; set; }
+        /// <summary>是否让 Emby 自己重启（默认 true）。测试时传 0 可只替换不重启。</summary>
+        public int Restart { get; set; } = 1;
+        /// <summary>哈希相同也强制重写一遍（验证写入链路用）。</summary>
+        public int Force { get; set; }
+    }
+
+    public class SelfUpdateResult
+    {
+        public bool Ok { get; set; }
+        public string Stage { get; set; }
+        public string Msg { get; set; }
+        public bool Updated { get; set; }
+        public string LocalPath { get; set; }
+        public string LocalSha { get; set; }
+        public string RemoteSha { get; set; }
+        public long RemoteBytes { get; set; }
+        public bool Restarting { get; set; }
+        public bool CanSelfRestart { get; set; }
+    }
+
     /// <summary>以 Emby 进程身份测试目录是否可写（只有真跑一下才知道，看权限位不可靠）。</summary>
     [Unauthenticated]
     [Route("/TvBox/ProbeWrite", "GET", Summary = "测试目录对 Emby 是否可写")]
@@ -260,6 +292,131 @@ namespace TvBox.Plugin.Api
             if (string.IsNullOrWhiteSpace(cfg.HubToken)) return true;
             var expect = cfg.HubToken.Trim();
             return !string.IsNullOrEmpty(token) && string.Equals(token.Trim(), expect, StringComparison.Ordinal);
+        }
+
+        // ── 插件自更新 ──
+        public SelfUpdateResult Get(SelfUpdate req)
+        {
+            var r = new SelfUpdateResult { Stage = "检查" };
+            if (!HubOk(req?.Token)) { r.Msg = "token 无效"; return r; }
+            var cfg = P?.Configuration;
+            var hub = (cfg?.SpiderHubUrl ?? "").Trim().TrimEnd('/');
+            if (string.IsNullOrWhiteSpace(hub)) { r.Msg = "插件里没配 hub 地址"; return r; }
+
+            // Emby 用 Assembly.Load(byte[]) 加载插件，Assembly.Location 是空串，
+            // 所以只能从宿主的 IApplicationPaths.PluginsPath 拼出自己的 DLL 路径。
+            string localPath = ResolvePluginDllPath();
+            if (localPath == null)
+            { r.Msg = "定位不到插件自身的 TvBox.dll（plugins 目录里没找到）"; return r; }
+            r.LocalPath = localPath;
+            r.LocalSha = Sha256OfFile(localPath);
+
+            byte[] bytes;
+            string remoteSha;
+            try
+            {
+                using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(3) };
+                using var resp = http.GetAsync(hub + "/api/plugin/dll").GetAwaiter().GetResult();
+                if (!resp.IsSuccessStatusCode)
+                { r.Msg = "hub 返回 " + (int)resp.StatusCode + "，拿不到新插件"; return r; }
+                bytes = resp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
+                remoteSha = resp.Headers.TryGetValues("X-Plugin-Sha256", out var vs) ? vs.FirstOrDefault() : null;
+            }
+            catch (Exception ex) { r.Msg = "下载失败: " + ex.Message; return r; }
+
+            if (bytes == null || bytes.Length < 10240)
+            { r.Msg = "hub 给的文件不像插件（" + (bytes?.Length ?? 0) + " 字节）"; return r; }
+            r.RemoteBytes = bytes.Length;
+            r.RemoteSha = remoteSha ?? Sha256OfBytes(bytes);
+
+            if (req.Force == 0 && string.Equals(r.RemoteSha, r.LocalSha, StringComparison.OrdinalIgnoreCase))
+            {
+                r.Ok = true;
+                r.Stage = "完成";
+                r.Msg = "已是最新版本（" + r.LocalSha.Substring(0, Math.Min(12, r.LocalSha.Length)) + "）";
+                return r;
+            }
+
+            try
+            {
+                r.Stage = "写入";
+                var dir = Path.GetDirectoryName(localPath);
+                var tmp = Path.Combine(dir, Path.GetFileName(localPath) + ".tmp-" + DateTime.UtcNow.Ticks);
+                File.WriteAllBytes(tmp, bytes);
+                // 原子替换：正在跑的 Emby 映射着老 inode，直接覆盖会 SIGBUS。
+                File.Move(tmp, localPath, true);
+                var after = Sha256OfFile(localPath);
+                if (!string.Equals(after, r.RemoteSha, StringComparison.OrdinalIgnoreCase))
+                { r.Msg = "写入后校验不一致（" + after + " ≠ " + r.RemoteSha + "）"; return r; }
+                r.Updated = true;
+                r.LocalSha = after;
+            }
+            catch (Exception ex) { r.Msg = "写入失败: " + ex.Message; return r; }
+
+            var host = P?.ApplicationHost;
+            r.CanSelfRestart = host != null && host.CanSelfRestart;
+            if (req.Restart != 0 && host != null)
+            {
+                try
+                {
+                    if (host.CanSelfRestart)
+                    {
+                        r.Restarting = true;
+                        r.Ok = true;
+                        r.Stage = "重启";
+                        r.Msg = "已更新到 " + r.RemoteSha.Substring(0, Math.Min(12, r.RemoteSha.Length))
+                                + "，正在重启 Emby 加载新版本";
+                        // 先把响应回出去再重启：重启会让本次请求断开，客户端会以为是失败
+                        Task.Run(async () =>
+                        {
+                            await Task.Delay(1500).ConfigureAwait(false);
+                            try { host.Restart(); } catch { }
+                        });
+                        return r;
+                    }
+                    host.NotifyPendingRestart();
+                }
+                catch { }
+            }
+            r.Ok = true;
+            r.Stage = "完成";
+            r.Msg = "已更新到 " + r.RemoteSha.Substring(0, Math.Min(12, r.RemoteSha.Length))
+                    + (req.Restart == 0 ? "（按要求未重启）" : "；Emby 不能自重启，请手动重启后生效");
+            return r;
+        }
+
+        /// <summary>在 plugins 目录里找出自己的 DLL：先用固定名，再按大小写不敏感扫一遍。</summary>
+        private static string ResolvePluginDllPath()
+        {
+            try
+            {
+                var dir = P?.PluginsPath;
+                if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir)) return null;
+                var direct = Path.Combine(dir, "TvBox.dll");
+                if (File.Exists(direct)) return direct;
+                foreach (var f in Directory.GetFiles(dir, "*.dll"))
+                    if (string.Equals(Path.GetFileName(f), "TvBox.dll", StringComparison.OrdinalIgnoreCase))
+                        return f;
+            }
+            catch { }
+            return null;
+        }
+
+        private static string Sha256OfFile(string path)
+        {
+            try
+            {
+                using var fs = File.OpenRead(path);
+                using var sha = System.Security.Cryptography.SHA256.Create();
+                return Convert.ToHexString(sha.ComputeHash(fs)).ToLowerInvariant();
+            }
+            catch { return ""; }
+        }
+
+        private static string Sha256OfBytes(byte[] b)
+        {
+            using var sha = System.Security.Cryptography.SHA256.Create();
+            return Convert.ToHexString(sha.ComputeHash(b)).ToLowerInvariant();
         }
 
         // ── 状态 ──
