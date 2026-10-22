@@ -100,6 +100,9 @@
     content:"";position:absolute;left:-12px;top:50%;transform:translateY(-50%);
     width:3px;height:18px;border-radius:0 3px 3px 0;background:var(--brand);
   }
+  .tab .ico{width:18px;flex:0 0 auto;text-align:center;font-size:14px;line-height:1;filter:saturate(.9)}
+  .tab .lb{min-width:0;overflow:hidden;text-overflow:ellipsis}
+  .tab:hover{background:var(--surface-2)}
   .tab .n{
     margin-left:auto;font-size:11px;padding:0 7px;line-height:18px;border-radius:var(--r-full);
     background:var(--accent-soft);color:var(--brand);font-weight:600;
@@ -109,14 +112,15 @@
   .main{flex:1;min-width:0;display:flex;flex-direction:column}
   .topbar{
     position:sticky;top:0;z-index:30;
-    padding:12px 0;border-bottom:1px solid var(--line-soft);
-    background:var(--bg);                                   /* 老 CEF 不支持 color-mix 时的兜底 */
-    background:color-mix(in srgb, var(--bg) 86%, transparent);
-    backdrop-filter:blur(14px) saturate(150%);-webkit-backdrop-filter:blur(14px) saturate(150%);
+    padding:12px 0;                                          /* 实色底：backdrop-filter 在 CEF 里键盘弹出时会出白块 */
+    background:var(--bg);
   }
+  /* 标题 + 版本 + 当前页 + 四个动作按钮，全在同一张卡片里 */
   .topbar-inner{
-    max-width:1180px;width:100%;margin:0 auto;padding:0 20px;
-    display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    max-width:1180px;width:100%;margin:0 auto;padding:10px 14px;
+    display:flex;align-items:center;gap:10px;flex-wrap:nowrap;
+    background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+    box-shadow:var(--sh-1);
   }
   .brand-text{min-width:0}
   .brand-line{display:flex;align-items:center;gap:6px;min-width:0}
@@ -387,25 +391,39 @@
   .toast.ok{border-left-color:var(--ok-text)} .toast.bad{border-left-color:var(--bad-text)}
 
   /* ═══════════════ 响应式 ═══════════════ */
+  /* 窄屏：侧边栏保持竖排菜单，收窄成「图标 + 小字」，不再拍平成顶部横条 */
   @media(max-width:900px){
-    .app{flex-direction:column}
+    .app{flex-direction:row}
     .sidebar{
-      width:100%;height:auto;position:sticky;top:0;z-index:40;
-      flex-direction:row;flex-wrap:wrap;align-items:center;row-gap:8px;
-      gap:10px;padding:10px 12px;border-right:0;border-bottom:1px solid var(--line-soft);
-      background:var(--surface);overflow:visible;
+      width:86px;height:100vh;position:sticky;top:0;z-index:40;
+      padding:10px 6px;gap:8px;overflow-y:auto;overflow-x:visible;
+      border-right:1px solid var(--line-soft);border-bottom:0;
     }
-    .brand{padding:0;flex:1 1 auto;min-width:0}
-    .brand .sub{display:none}
-    .sidebar .spacer{display:none}
-    .sidebar-foot{padding:0;flex:0 0 auto;margin-left:auto}
-    /* 导航独占一整行，横向滚动 */
-    .tabs{flex:1 1 100%;order:3;flex-direction:row;gap:6px;overflow-x:auto;min-width:0;padding-bottom:1px}
+    .tabs{gap:3px}
+    .tab{
+      flex-direction:column;gap:3px;padding:9px 2px;font-size:10.5px;
+      text-align:center;white-space:normal;line-height:1.15;position:relative;
+    }
+    .tab .ico{width:auto;font-size:17px}
+    .tab .lb{font-size:10.5px;line-height:1.2;word-break:break-all}
+    .tab .n{position:absolute;top:2px;right:2px;margin:0;font-size:9px;padding:0 4px;line-height:14px}
     .tab.active::before{display:none}
-    .tab{padding:8px 12px;font-size:13px;flex:0 0 auto}
-    .tab .n{margin-left:5px}
-    .topbar{padding:10px 14px}
-    .wrap{padding:14px 12px 56px}
+    .sidebar-foot{display:none}
+    .topbar{padding:10px 0}
+    .topbar-inner{padding:8px 10px;gap:8px;border-radius:var(--r-sm)}
+    .brand-text .sub{display:none}
+    .wrap{padding:12px 10px 56px}
+  }
+  /* 更窄：按钮只留图标，保证标题和三个按钮同排不折 */
+  @media(max-width:430px){
+    .topbar-actions{gap:5px}
+    .topbar-actions .btn-text{display:none}
+    .topbar-actions button.tiny{padding:5px 7px}
+    /* 标题允许折成两行，别被省略号吃掉（版本号保留在同一块里） */
+    .topbar-inner .brand-line{flex-wrap:wrap;row-gap:2px}
+    .topbar-inner h1{font-size:13.5px;white-space:normal;line-height:1.2;overflow:visible;text-overflow:clip}
+    .topbar-inner .ver{font-size:10.5px;padding:0 6px}
+    .sidebar{width:74px}
   }
   @media(max-width:640px){
     .cards{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
@@ -486,27 +504,16 @@
 <div class="app">
 
   <aside class="sidebar">
-    <div class="brand">
-      <div class="logo">T</div>
-      <div class="brand-text">
-        <div class="brand-line">
-          <h1>TvBox For Emby</h1>
-          <span class="ver">v0.5.4</span>
-        </div>
-        <div class="sub">点播源 → Emby</div>
-      </div>
-    </div>
-
-    <div class="tabs">
-      <div class="tab active" data-pane="overview" onclick="switchTab('overview',this)">概览</div>
-      <div class="tab" data-pane="guide" onclick="switchTab('guide',this)">使用说明</div>
-      <div class="tab" data-pane="sites" onclick="switchTab('sites',this)">站点<span class="n" id="tabSiteCount">0</span></div>
-      <div class="tab" data-pane="search" onclick="switchTab('search',this)">搜索</div>
-      <div class="tab" data-pane="sync" onclick="switchTab('sync',this)">同步<span class="n" id="tabSyncDot" style="display:none">●</span></div>
-      <div class="tab" data-pane="config" onclick="switchTab('config',this)">配置</div>
-      <div class="tab" data-pane="emby" onclick="switchTab('emby',this)">Emby 插件</div>
-      <div class="tab" data-pane="logs" onclick="switchTab('logs',this)">操作记录<span class="n" id="tabLogCount">0</span></div>
-    </div>
+    <nav class="tabs" aria-label="主导航">
+      <div class="tab active" data-pane="overview" onclick="switchTab('overview',this)"><span class="ico">📊</span><span class="lb">概览</span></div>
+      <div class="tab" data-pane="guide" onclick="switchTab('guide',this)"><span class="ico">📖</span><span class="lb">使用说明</span></div>
+      <div class="tab" data-pane="sites" onclick="switchTab('sites',this)"><span class="ico">🌐</span><span class="lb">站点</span><span class="n" id="tabSiteCount">0</span></div>
+      <div class="tab" data-pane="search" onclick="switchTab('search',this)"><span class="ico">🔍</span><span class="lb">搜索</span></div>
+      <div class="tab" data-pane="sync" onclick="switchTab('sync',this)"><span class="ico">🔄</span><span class="lb">同步</span><span class="n" id="tabSyncDot" style="display:none">●</span></div>
+      <div class="tab" data-pane="config" onclick="switchTab('config',this)"><span class="ico">⚙️</span><span class="lb">配置</span></div>
+      <div class="tab" data-pane="emby" onclick="switchTab('emby',this)"><span class="ico">🧩</span><span class="lb">Emby 插件</span></div>
+      <div class="tab" data-pane="logs" onclick="switchTab('logs',this)"><span class="ico">📜</span><span class="lb">操作记录</span><span class="n" id="tabLogCount">0</span></div>
+    </nav>
 
     <div class="spacer"></div>
     <div class="sidebar-foot">
@@ -517,16 +524,20 @@
   <div class="main">
     <header class="topbar">
       <div class="topbar-inner">
-        <span class="topbar-title">
-          <span class="title" id="paneTitle">概览</span>
-        </span>
-        <span class="crumb">TVBox 点播源接入 Emby</span>
+        <div class="logo" aria-hidden="true">T</div>
+        <div class="brand-text">
+          <div class="brand-line">
+            <h1>TvBox For Emby</h1>
+            <span class="ver">v0.5.5</span>
+          </div>
+          <div class="sub"><span id="paneTitle">概览</span></div>
+        </div>
         <div class="spacer"></div>
         <div class="topbar-actions">
-          <button class="tiny" onclick="showSponsorModal()" title="赞助作者">💖 赞助</button>
-          <button class="tiny" onclick="showContactModal()" title="联系作者">💬 联系</button>
-          <button class="tiny" onclick="status()" title="刷新状态">⟳ 刷新</button>
-          <button class="tiny" id="themeBtn" title="切换主题" aria-label="切换主题"><span id="themeIcon">☀</span> 主题</button>
+          <button class="tiny" onclick="showSponsorModal()" title="赞助作者"><span class="ico">💖</span><span class="btn-text">赞助</span></button>
+          <button class="tiny" onclick="showContactModal()" title="联系作者"><span class="ico">💬</span><span class="btn-text">联系</span></button>
+          <button class="tiny" onclick="status()" title="刷新状态"><span class="ico">⟳</span><span class="btn-text">刷新</span></button>
+          <button class="tiny" id="themeBtn" title="切换主题" aria-label="切换主题"><span id="themeIcon">☀</span><span class="btn-text">主题</span></button>
         </div>
       </div>
     </header>
