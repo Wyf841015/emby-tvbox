@@ -390,8 +390,14 @@ namespace TvBox.Plugin.Core
                             return false;
                         }
                         writer.UrlRewriter = u =>
-                            baseUrl + TvBox.Plugin.Api.TvBoxApi.BuildProxyPath(
+                        {
+                            // /TvBox/Play 自己就是代理（内部向 hub 解析后再转发 m3u8），
+                            // 再包一层 /TvBox/Stream 会变成 Stream→Play 双跳，
+                            // 而 Stream 的 SSRF 防护会把内网地址判成 blocked host。
+                            if (u != null && u.Contains("/TvBox/Play?", StringComparison.Ordinal)) return u;
+                            return baseUrl + TvBox.Plugin.Api.TvBoxApi.BuildProxyPath(
                                 u, string.IsNullOrWhiteSpace(cfg.Referer) ? siteReferer : cfg.Referer);
+                        };
                         _log("播放地址将改写为本机代理: " + baseUrl + "/TvBox/Stream");
                     }
                     else if (cfg.UseProxy)
