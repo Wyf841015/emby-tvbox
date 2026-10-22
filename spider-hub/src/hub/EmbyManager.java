@@ -326,6 +326,103 @@ public class EmbyManager {
      * 不校验就等于给任何能调到这个接口的人一个「root 往任意目录写文件」的原语
      * （实测传 /tmp/evil_emby 就能落地 root:root 的文件）。
      */
+    /**
+     * 智能安装：先按「本地写文件」走，本地不行再转 Docker。
+     *
+     * 为什么要有这一步：
+     *   1) Emby 4.9 没有「从 URL 装 DLL」的 API，只有从官方插件目录按名字装
+     *      （POST /Packages/Installed/{Name}），而 4.9 又不支持自定义插件仓库，
+     *      所以容器部署时必须走 docker cp；
+     *   2) 但原生部署（fnOS 应用、deb 安装）直接写文件最简单、也不依赖 docker；
+     *   3) 还有一种坑：宿主上某目录长得像 programdata，写入也"成功"了，
+     *      但真正在跑的 Emby 在容器里用的是另一份数据 —— 装完插件根本不出现。
+     *      所以本地成功之后还要对比一次「运行中的进程实际用的 programdata」，
+     *      不一致就继续尝试 Docker，并把两条结果都报给用户。
+     */
+    public static Map<String, Object> installSmart(String programdata, byte[] dllBytes, String configXml,
+                                                   String container, boolean allowDocker) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        List<String> tried = new ArrayList<>();
+        Map<String, Object> localOk = null;
+        String localWhy;
+
+        if (programdata == null || programdata.isBlank()) {
+            localWhy = "还没填 Emby 数据目录";
+            tried.add("本地: " + localWhy);
+        } else {
+            String why = validateProgramdata(programdata);
+            if (why != null) {
+                localWhy = why;
+                tried.add("本地: " + why);
+            } else {
+                Map<String, Object> r = install(programdata, dllBytes, configXml);
+                if (Boolean.TRUE.equals(r.get("ok"))) {
+                    String running = runningProgramdata();
+                    if (running != null && !samePath(running, programdata)) {
+                        tried.add("本地写入 " + programdata + " 成功，但运行中的 Emby 用的是 " + running
+                                + "（很可能是容器部署）→ 继续尝试 Docker");
+                        localOk = r;      // 留作兜底：Docker 也失败时仍有本地结果
+                        localWhy = "本地装到的目录不是运行中的 Emby 用的那个";
+                    } else {
+                        r.put("method", "local");
+                        r.put("tried", tried);
+                        r.put("msg", String.valueOf(r.getOrDefault("msg", "已安装")));
+                        return r;
+                    }
+                } else {
+                    localWhy = String.valueOf(r.get("msg"));
+                    tried.add("本地失败: " + localWhy);
+                }
+            }
+        }
+
+        if (!allowDocker) {
+            out.put("ok", false);
+            out.put("method", "local");
+            out.put("msg", localWhy + "（未启用 Docker 兜底）");
+            out.put("tried", tried);
+            return out;
+        }
+
+        Map<String, Object> d = DockerInstaller.install(container, dllBytes, configXml, true);
+        d.put("tried", tried);
+        if (Boolean.TRUE.equals(d.get("ok"))) {
+            d.put("method", "docker");
+            if (localOk != null) d.put("localAlsoWrote", localOk.get("msg"));
+            return d;
+        }
+        // Docker 也失败：如果本地其实写成功过（装错地方那种），至少把本地结果交回去
+        if (localOk != null) {
+            localOk.put("method", "local");
+            localOk.put("tried", tried);
+            localOk.put("warning", "本地写入成功，但可能与运行中的 Emby 不是同一份数据；"
+                    + "Docker 安装也失败：" + d.get("msg"));
+            return localOk;
+        }
+        d.put("method", "docker");
+        d.put("localWhy", localWhy);
+        return d;
+    }
+
+    /** 运行中的 Emby 进程实际用的 programdata（拿不到返回 null）。 */
+    public static String runningProgramdata() {
+        try {
+            List<String> list = programdataFromProcesses();
+            return list.isEmpty() ? null : list.get(0);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static boolean samePath(String a, String b) {
+        try {
+            return Path.of(a).toAbsolutePath().normalize()
+                    .equals(Path.of(b).toAbsolutePath().normalize());
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     public static String validateProgramdata(String programdata) {
         if (programdata == null || programdata.isBlank()) return "路径为空";
         Path p;

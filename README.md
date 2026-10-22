@@ -1,5 +1,32 @@
 # emby-tvbox
 
+## v0.10.1 — 插件安装：本地优先，失败自动转 Docker
+
+Emby 跑在 Docker 里时，hub 往往看不到容器的 `/config`，原来的「复制 DLL 到 programdata」就装不上。
+这版把安装做成两级：
+
+1. **先试本地**：按 `<Emby数据目录>/plugins/` 直接写（原生部署、fnOS 应用仍然走这条，最快）。
+2. **本地不成再走 Docker**：`docker cp` 进容器 `<配置目录>/plugins/`，
+   再 `chown` 对齐容器内 plugins 目录的属主（不然容器里 Emby 保存插件设置会失败），
+   最后 `docker restart` 让插件加载。容器配置目录默认 `/config`，也从 `docker inspect` 的挂载点里识别。
+
+额外处理一个容易误判的场景：宿主上某个目录长得像 programdata、写入也"成功"了，但**运行中的 Emby 用的其实是另一份数据**
+（典型就是容器部署），这时插件永远不出现。现在会在本地写入成功后比对进程实际使用的 `-programdata`，
+不一致就继续尝试 Docker，两条结果都回给用户。
+
+关于 Emby 的插件 API（也一并写进 UI 说明）：`PackageService` 只有
+`GET /Packages`、`POST /Packages/Installed/{Name}`、`DELETE /Packages/Installing/{Id}`、`GET /Packages/Updates`，
+其中安装只能装「官方插件目录里已有的包」，**没有「给个 URL 装 DLL」的端点**，
+4.9 也不支持自定义插件仓库（`system.xml` 无相关配置键、程序集里搜不到 `PluginCatalogUrl`/`PluginRepository`、
+Web UI 里没有"添加仓库"）。所以容器场景只能走 Docker 或手动拷文件。
+
+新增接口：`GET /api/emby/docker`（探测 docker 是否可用 + 列出 emby 容器 + 不可用原因）。
+
+实测（本机 Docker 28.5.2，假容器 emby-test）：
+- 本地目录可写但运行中的 Emby 是另一份 → 正确识别并转 Docker
+- `docker cp` 落盘 175104 B、配置 XML 写入、属主对齐 `1000:1001`、容器重启
+- docker 不可用时返回明确原因（无 docker 命令 / socket 权限不足 / 守护进程没跑）
+
 ## v0.10.0 — 性能与稳定性
 
 - **逐集校验加样本上限**（`VerifyMaxEpisodes`，默认 48）：源里 200+ 集的条目原先每集 2 个请求，

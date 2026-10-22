@@ -778,6 +778,18 @@ public class Hub {
                 sendJson(ex, 200, m);
                 return;
             }
+            case "/api/emby/docker": {
+                Map<String, Object> m = new LinkedHashMap<>();
+                boolean av = DockerInstaller.available();
+                m.put("ok", true);
+                m.put("available", av);
+                m.put("containers", av ? DockerInstaller.containers() : new ArrayList<>());
+                m.put("hint", av ? "" : (DockerInstaller.unavailableWhy()
+                        + "。容器部署时请把 TvBox.dll 手动拷进容器的 /config/plugins/，"
+                        + "或让 hub 以 root 运行后重试"));
+                sendJson(ex, 200, m);
+                return;
+            }
             case "/api/cache/clear": {
                 int n = detailCache.size();
                 detailCache.clear();
@@ -891,23 +903,35 @@ public class Hub {
             case "/api/emby/install": {
                 Map<String, String> req = parseForm(readBody(ex));
                 String pd = firstNonEmpty(req.get("programdata"), str(settings.get("embyPath")));
-                if (pd == null || pd.isEmpty()) { sendJson(ex, 200, fail("还没选 Emby 目录")); return; }
-                // 必须是真的 Emby programdata：本进程以 root 跑，不校验就等于
-                // 给任何调用者一个「往任意目录写文件」的原语。
-                String why = EmbyManager.validateProgramdata(pd);
-                if (why != null) {
-                    record("安装插件", pd, false, why, 0);
-                    sendJson(ex, 200, fail("拒绝安装: " + why));
+                // 本地优先、失败自动转 Docker。pd 允许为空：容器部署时压根没有宿主 programdata。
+                String container = firstNonEmpty(req.get("container"), str(settings.get("dockerContainer")));
+                String useDocker = req.get("docker");
+                boolean allowDocker = useDocker == null || !("0".equals(useDocker) || "false".equalsIgnoreCase(useDocker));
+                if (pd != null && !pd.isEmpty()) {
+                    // 必须是真的 Emby programdata：本进程以 root 跑，不校验就等于
+                    // 给任何调用者一个「往任意目录写文件」的原语。
+                    String why = EmbyManager.validateProgramdata(pd);
+                    if (why != null && !allowDocker) {
+                        record("安装插件", pd, false, why, 0);
+                        sendJson(ex, 200, fail("拒绝安装: " + why));
+                        return;
+                    }
+                } else if (!allowDocker) {
+                    sendJson(ex, 200, fail("还没选 Emby 目录"));
                     return;
                 }
                 if (pluginDll == null || !Files.isRegularFile(pluginDll)) {
                     sendJson(ex, 200, fail("安装包里没有 TvBox.dll")); return;
                 }
                 long t0 = System.currentTimeMillis();
-                Map<String, Object> r = EmbyManager.install(pd, Files.readAllBytes(pluginDll), buildPluginXml(req));
+                Map<String, Object> r = EmbyManager.installSmart(
+                        pd, Files.readAllBytes(pluginDll), buildPluginXml(req), container, allowDocker);
                 long ms = System.currentTimeMillis() - t0;
                 if (Boolean.TRUE.equals(r.get("ok"))) {
-                    settings.put("embyPath", pd);
+                    if (!"docker".equals(String.valueOf(r.get("method"))) && pd != null && !pd.isEmpty())
+                        settings.put("embyPath", pd);
+                    if ("docker".equals(String.valueOf(r.get("method"))))
+                        settings.put("dockerContainer", r.get("container"));
                     settings.remove("embyBaseUrl");   // 让下次 embyBase() 重新探测
                     saveSettings();
                     embyBase();                        // 装完立刻探一次，后面的同步按钮就能用
