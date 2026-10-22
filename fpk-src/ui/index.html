@@ -107,7 +107,10 @@
     max-width:1180px;width:100%;margin:0 auto;padding:0 20px;
     display:flex;align-items:center;gap:10px;flex-wrap:wrap;
   }
-  /* 标题 + 版本号必须同一行：放进一个 nowrap 的 flex 组里，换行只可能发生在组与按钮之间 */
+  .brand-text{min-width:0}
+  .brand-line{display:flex;align-items:center;gap:6px;min-width:0}
+  .brand-line h1{min-width:0;overflow:hidden;text-overflow:ellipsis}
+  /* 顶栏动作区：四个按钮同款、一行不折行 */
   .topbar-title{display:inline-flex;align-items:center;gap:8px;white-space:nowrap;flex:0 0 auto}
   .topbar .title{font-size:14px;font-weight:650;letter-spacing:.2px;color:var(--text);white-space:nowrap}
   .topbar .crumb{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -426,8 +429,11 @@
   <aside class="sidebar">
     <div class="brand">
       <div class="logo">T</div>
-      <div>
-        <h1>TvBox For Emby</h1>
+      <div class="brand-text">
+        <div class="brand-line">
+          <h1>TvBox For Emby</h1>
+          <span class="ver">v0.1.3</span>
+        </div>
         <div class="sub">点播源 → Emby</div>
       </div>
     </div>
@@ -445,7 +451,6 @@
     <div class="spacer"></div>
     <div class="sidebar-foot">
       <span class="badge" id="badgeStatus">连接中…</span>
-      <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">☀</button>
     </div>
   </aside>
 
@@ -454,7 +459,6 @@
       <div class="topbar-inner">
         <span class="topbar-title">
           <span class="title" id="paneTitle">概览</span>
-          <span class="ver">v0.1.2</span>
         </span>
         <span class="crumb">TVBox 点播源接入 Emby</span>
         <div class="spacer"></div>
@@ -462,6 +466,7 @@
           <button class="tiny" onclick="showSponsorModal()" title="赞助作者">💖 赞助</button>
           <button class="tiny" onclick="showContactModal()" title="联系作者">💬 联系</button>
           <button class="tiny" onclick="status()" title="刷新状态">⟳ 刷新</button>
+          <button class="tiny" id="themeBtn" title="切换主题" aria-label="切换主题"><span id="themeIcon">☀</span> 主题</button>
         </div>
       </div>
     </header>
@@ -2305,11 +2310,10 @@ try {
   function applyTheme(theme) {
     document.documentElement.setAttribute('data-theme', theme);
     try { localStorage.setItem('tvboxhub.theme', theme); } catch (e) {}   // 可能被 WebView 禁掉，别当唯一来源
+    var icon = document.getElementById('themeIcon');
+    if (icon) icon.textContent = theme === 'light' ? '☾' : '☀';
     var btn = document.getElementById('themeBtn');
-    if (btn) {
-      btn.textContent = theme === 'light' ? '☾' : '☀';
-      btn.title = theme === 'light' ? '切换到深色' : '切换到浅色';
-    }
+    if (btn) btn.title = theme === 'light' ? '切换到深色' : '切换到浅色';
   }
   var _themeTouched = false;      // 用户本次会话手动改过，就别再被服务端值盖回去
   function saveThemePref(theme) {
