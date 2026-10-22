@@ -1,5 +1,22 @@
 # emby-tvbox
 
+## v0.4.1 — Emby 插件页配置：读取正常，但只显示了三分之一
+
+检查了插件配置的读取 / 加载 / 显示三段：
+
+**读取 ✅**：Emby 的 `GET /Plugins/{id}/Configuration` 返回全部 36 个字段且值正确（`ConfigUrl` / `SpiderHubUrl` / `HubToken` / `OutputRoot` / `MaxPagesPerCategory=1` / `TimeoutSeconds=45` / `StreamMode=proxy`…）。
+
+**加载 ✅**：页面用 `ApiClient.getPluginConfiguration()` 拿到配置对象，`fill()` 12 个输入框 + 3 个复选框都能正确回填；`collect()` 从原对象起手，所以没显示在页面上的字段也不会被清空。
+
+**显示 ❌ 只显示了 15 / 36 个字段**：网盘源排除、可播性探测、并发、超时、User-Agent、允许内网、写 NFO、下载海报、海报上限、增量同步与窗口、流模式、302 域名白名单、单次删除上限、详情批处理、分集探测数、二次跳转解析 —— 这 17 项在插件页上根本看不到，也就改不了。
+
+补齐后插件页从 15 个控件扩到 **32 个**，分成四段：TVBox 源接入 / 同步行为 / 输出内容 / 探测与网络（+ 操作）。每项都带一句说明，说明来自代码里的实际行为（例如流模式三档 proxy/redirect/auto 的真实差别）。
+
+验证：
+- Emby 实际下发的配置页 HTML `HTTP 200 / 27264 字节 / 32 个控件 / 5 个分区`，新字段全部在
+- 原样回写配置（`POST /Plugins/{id}/Configuration`）→ 200，回读与写入前**逐字段完全一致**
+- 页面依赖的三条免登录路由用配置里的 `HubToken` 调用：`/TvBox/Status`、`/TvBox/Sources`、`/TvBox/Config` 均正常返回
+
 ## v0.4.0 — 装完 / 更新完插件自动重启 Emby
 
 以前装完插件只提示「重启 Emby 生效」，得用户自己去 fnOS 应用中心点一次 —— 插件 DLL 不重启根本不加载，很容易以为装失败。

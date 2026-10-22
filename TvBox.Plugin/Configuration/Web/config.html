@@ -125,6 +125,129 @@
                     <button is="emby-button" type="submit" class="raised button-submit block">
                         <span>保存</span>
                     </button>
+                <div class="verticalSection" style="margin-top:1.4em">
+                    <h2 class="sectionTitle">同步行为</h2>
+                </div>
+
+                <div class="checkboxContainer">
+                    <label>
+                        <input id="excludeCloudDrive" type="checkbox" is="emby-checkbox" />
+                        <span>排除网盘源（阿里/夸克/115 等）</span>
+                    </label>
+                    <div class="fieldDescription">这些源只能在其自家 App 里播，同步进来也播不了，默认排除。</div>
+                </div>
+
+                <div class="checkboxContainer">
+                    <label>
+                        <input id="incrementalSync" type="checkbox" is="emby-checkbox" />
+                        <span>增量同步（N 小时内没更新的站点跳过）</span>
+                    </label>
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="incrementalHours">增量窗口(小时)</label>
+                    <input id="incrementalHours" type="number" min="0" is="emby-input" />
+                    <div class="fieldDescription">只对开了增量同步生效；填 0 = 每次全量。</div>
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="maxDeletePerRun">单次最多删除条目数</label>
+                    <input id="maxDeletePerRun" type="number" min="0" is="emby-input" />
+                    <div class="fieldDescription">开着「清理已失效的 strm」时，一次最多删多少，防止源抽风把库删空。</div>
+                </div>
+
+                <div class="verticalSection" style="margin-top:1.4em">
+                    <h2 class="sectionTitle">输出内容</h2>
+                </div>
+
+                <div class="checkboxContainer">
+                    <label>
+                        <input id="writeNfo" type="checkbox" is="emby-checkbox" />
+                        <span>为条目写 .nfo 元数据</span>
+                    </label>
+                    <div class="fieldDescription">写了 Emby 刮削更快，但条目多时文件数会翻倍。</div>
+                </div>
+
+                <div class="checkboxContainer">
+                    <label>
+                        <input id="downloadPoster" type="checkbox" is="emby-checkbox" />
+                        <span>下载海报</span>
+                    </label>
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="posterMaxMb">海报大小上限(MB)</label>
+                    <input id="posterMaxMb" type="number" min="1" max="50" is="emby-input" />
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="streamMode">播放流模式</label>
+                    <select id="streamMode" is="emby-select">
+                        <option value="proxy">proxy — 全部经 NAS 中转（能补 Referer/UA、能重写 HLS 分片）</option>
+                        <option value="redirect">redirect — 直接 302 到源站（省带宽，但带防盗链的会失败）</option>
+                        <option value="auto">auto — 按「允许 302 的域名」决定，m3u8 仍走代理</option>
+                    </select>
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="redirectHosts">允许 302 的域名</label>
+                    <input id="redirectHosts" type="text" is="emby-input" placeholder="cdn.example.com, *.foo.com" />
+                    <div class="fieldDescription">只在 auto 模式下生效，逗号分隔。</div>
+                </div>
+
+                <div class="verticalSection" style="margin-top:1.4em">
+                    <h2 class="sectionTitle">探测与网络</h2>
+                </div>
+
+                <div class="checkboxContainer">
+                    <label>
+                        <input id="verifyPlayUrl" type="checkbox" is="emby-checkbox" />
+                        <span>同步前先探测播放地址是否可用</span>
+                    </label>
+                    <div class="fieldDescription">能大幅减少写进库里的坏条目，代价是每集多一次请求。</div>
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="verifyMaxEpisodes">每部最多探测分集数</label>
+                    <input id="verifyMaxEpisodes" type="number" min="1" is="emby-input" />
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="detailBatchSize">详情批处理条数</label>
+                    <input id="detailBatchSize" type="number" min="1" is="emby-input" />
+                </div>
+
+                <div class="checkboxContainer">
+                    <label>
+                        <input id="resolveIndirectUrl" type="checkbox" is="emby-checkbox" />
+                        <span>解析二次跳转（播放页 → 真实地址）</span>
+                    </label>
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="concurrency">站点并发数</label>
+                    <input id="concurrency" type="number" min="1" max="16" is="emby-input" />
+                    <div class="fieldDescription">2 核机器建议 2-4，源脆弱时调小。</div>
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="timeoutSeconds">单请求超时(秒)</label>
+                    <input id="timeoutSeconds" type="number" min="5" max="180" is="emby-input" />
+                </div>
+
+                <div class="inputContainer">
+                    <label class="inputLabel inputLabelUnfocused" for="userAgent">请求 User-Agent</label>
+                    <input id="userAgent" type="text" is="emby-input" />
+                </div>
+
+                <div class="checkboxContainer">
+                    <label>
+                        <input id="allowPrivateHosts" type="checkbox" is="emby-checkbox" />
+                        <span>允许访问内网地址（SSRF 风险）</span>
+                    </label>
+                    <div class="fieldDescription">只有把点播源放在自己内网时才需要打开。</div>
+                </div>
+
                 </div>
             </form>
 
@@ -187,13 +310,19 @@
                     referer: 'Referer', siteWhitelist: 'SiteWhitelist', siteBlacklist: 'SiteBlacklist',
                     siteNameFilter: 'SiteNameFilter', maxPagesPerCategory: 'MaxPagesPerCategory',
                     maxItemsPerRun: 'MaxItemsPerRun', requestDelayMs: 'RequestDelayMs',
-                    syncIntervalHours: 'SyncIntervalHours'
+                    syncIntervalHours: 'SyncIntervalHours',
+                    incrementalHours: 'IncrementalHours', maxDeletePerRun: 'MaxDeletePerRun',
+                    posterMaxMb: 'PosterMaxMb', streamMode: 'StreamMode', redirectHosts: 'RedirectHosts',
+                    verifyMaxEpisodes: 'VerifyMaxEpisodes', detailBatchSize: 'DetailBatchSize',
+                    concurrency: 'Concurrency', timeoutSeconds: 'TimeoutSeconds', userAgent: 'UserAgent'
                 };
                 Object.keys(map).forEach(function (id) {
                     var el = document.getElementById(id);
                     if (el) el.value = cfg[map[id]] !== undefined && cfg[map[id]] !== null ? cfg[map[id]] : '';
                 });
-                ['useProxy', 'cleanupOrphans', 'enableScheduledSync'].forEach(function (id) {
+                ['useProxy', 'cleanupOrphans', 'enableScheduledSync', 'excludeCloudDrive',
+                 'incrementalSync', 'writeNfo', 'downloadPoster', 'verifyPlayUrl',
+                 'resolveIndirectUrl', 'allowPrivateHosts'].forEach(function (id) {
                     var el = document.getElementById(id);
                     var key = id.charAt(0).toUpperCase() + id.slice(1);
                     if (el) el.checked = !!cfg[key];
@@ -220,6 +349,23 @@
                 cfg.UseProxy = c('useProxy');
                 cfg.CleanupOrphans = c('cleanupOrphans');
                 cfg.EnableScheduledSync = c('enableScheduledSync');
+                cfg.IncrementalHours = n('incrementalHours', 12);
+                cfg.MaxDeletePerRun = n('maxDeletePerRun', 300);
+                cfg.PosterMaxMb = n('posterMaxMb', 4);
+                cfg.StreamMode = v('streamMode').trim() || 'proxy';
+                cfg.RedirectHosts = v('redirectHosts').trim();
+                cfg.VerifyMaxEpisodes = n('verifyMaxEpisodes', 48);
+                cfg.DetailBatchSize = n('detailBatchSize', 16);
+                cfg.Concurrency = n('concurrency', 3);
+                cfg.TimeoutSeconds = n('timeoutSeconds', 15);
+                cfg.UserAgent = v('userAgent').trim();
+                cfg.ExcludeCloudDrive = c('excludeCloudDrive');
+                cfg.IncrementalSync = c('incrementalSync');
+                cfg.WriteNfo = c('writeNfo');
+                cfg.DownloadPoster = c('downloadPoster');
+                cfg.VerifyPlayUrl = c('verifyPlayUrl');
+                cfg.ResolveIndirectUrl = c('resolveIndirectUrl');
+                cfg.AllowPrivateHosts = c('allowPrivateHosts');
                 return cfg;
             }
 
