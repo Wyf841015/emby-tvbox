@@ -1,5 +1,29 @@
 # emby-tvbox
 
+## v0.14.0 — 搜索并一键推送到 Emby
+
+新增「搜索」页：输入关键词 → 并发搜索同步名单里的所有站点 → 结果列表（封面/名称/年份/备注/站点）
+→ 单条「推送」或「全部推送」，直接把 strm / nfo / 海报写进 Emby 库，目录与命名跟同步出来的完全一致。
+
+**为什么不用重新实现一套逻辑**：推送走的是 `Spider.searchContent()`（TVBox 客户端同款搜索）
+和同步已有的那条链路 —— 拉详情 → `PickBestLine` → 私有 id 经 hub `/play/` 解析（playerContent）
+→ 逐集可播校验（不可播自动换线路）→ StrmWriter 写文件。所以推出来的东西和主流同步没有差别。
+
+接口：
+- `GET /api/search-all?wd=关键词[&keys=a,b]` — 6 线程并发搜所有同步站点，
+  返回 `{total, items:[{site,id,name,year,remarks,pic,type}], sites:[{site,ok,count,msg}]}`
+- `POST /api/push {site,id}` — hub 转给插件 `/TvBox/PushItem`，插件写文件后回
+  `{ok, name, series, count, paths[]}`
+
+实测（庆余年）：
+- 搜索：6 个站点全部命中，43 条结果
+- 推送「庆余年2」（金牌影视）：写出 36 个 strm，
+  `tv/庆余年2 (2024)/Season 01/庆余年2 (2024) - S01E01.strm …`
+
+修的问题：`/TvBox/PushItem` 漏了 `[Unauthenticated]`（hub 用 `?token=` 调，Emby 先拦 401）；
+推送时没设 `_embyBase`，私有分集 id 不会被改写成 `/TvBox/Play` 地址，导致「36 集全部不可播」；
+搜索结果的空字段（year/type/remarks）在页面上显示成 None。
+
 ## v0.13.1 — 修「同步停不下来」
 
 用户报「同步无法停止」。查下来是三个问题叠在一起，最后一个是我自己上一版引入的：

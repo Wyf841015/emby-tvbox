@@ -108,6 +108,114 @@ namespace TvBox.Plugin.Core
             ct.ThrowIfCancellationRequested();
         }
 
+        /// <summary>
+        /// 单条推送：把某个站点的一条内容（电影或剧）立刻写进 Emby 库。
+        ///
+        /// 走跟同步完全一样的三步：拉详情 → 线路选择 + 私有 id 解析（playerContent）→
+        /// 逐集校验 → 写 strm/nfo/海报。搜索页「一键推送」就是调它，
+        /// 所以推出来的东西跟同步出来的文件名、目录结构完全一致。
+        /// </summary>
+        public async Task<Dictionary<string, object>> PushOneAsync(
+            PluginConfiguration cfg, string siteKey, string itemId, string outputRoot,
+            string embyBaseForProxy, CancellationToken ct)
+        {
+            var res = new Dictionary<string, object>();
+            if (string.IsNullOrWhiteSpace(siteKey) || string.IsNullOrWhiteSpace(itemId))
+            {
+                res["ok"] = false; res["msg"] = "缺少站点或条目 id"; return res;
+            }
+            var hub = (cfg?.SpiderHubUrl ?? string.Empty).Trim().TrimEnd('/');
+            if (hub.Length == 0) { res["ok"] = false; res["msg"] = "插件里没配 hub 地址"; return res; }
+
+            // 关键：私有分集 id 要改写成 /TvBox/Play 地址，必须知道 Emby 的局域网地址
+            _embyBase = (embyBaseForProxy ?? string.Empty).Trim().TrimEnd('/');
+
+            using var http = CreateClient(cfg);
+            var client = new CmsClient(http, m => _log("     [push] " + m), cfg.Referer);
+            // 站点对象直接指向 hub 的 MacCMS 适配层，不用再读一遍配置
+            var site = new TvBoxSite
+            {
+                Key = siteKey,
+                Name = siteKey,
+                Api = hub + "/v/" + Uri.EscapeDataString(siteKey) + "/api.php/provide/vod/",
+            };
+
+            var details = await client.GetDetailAsync(site, new[] { itemId }, ct).ConfigureAwait(false);
+            var detail = details != null && details.Count > 0 ? details[0] : null;
+            if (detail == null) { res["ok"] = false; res["msg"] = "拉不到详情（站点可能已失效）"; return res; }
+
+            var line = PlayUrlParser.PickBestLine(detail);
+            if (line?.Episodes == null || line.Episodes.Count == 0)
+            { res["ok"] = false; res["msg"] = "这条没有播放地址"; return res; }
+
+            line = ResolvePrivateIds(line, site, cfg);
+
+            List<VodEpisode> live = line.Episodes;
+            bool series = line.Episodes.Count > 1;
+            if (cfg.VerifyPlayUrl)
+            {
+                live = await FilterPlayableEpisodesAsync(client, line.Episodes, site, cfg, ct,
+                    _ => { }, _ => { }).ConfigureAwait(false);
+                if (live.Count == 0 && detail.Lines != null && detail.Lines.Count > 1)
+                {
+                    foreach (var cand in detail.Lines.Skip(1).Take(3))
+                    {
+                        ThrowIfStopped(ct);
+                        if (cand?.Episodes == null || cand.Episodes.Count == 0) continue;
+                        var candLine = ResolvePrivateIds(new VodLine { Name = cand.Name, Episodes = cand.Episodes }, site, cfg);
+                        var live2 = await FilterPlayableEpisodesAsync(client, candLine.Episodes, site, cfg, ct,
+                            _ => { }, _ => { }).ConfigureAwait(false);
+                        if (live2.Count > 0) { line = candLine; live = live2; break; }
+                    }
+                }
+                if (live.Count == 0)
+                { res["ok"] = false; res["msg"] = line.Episodes.Count + " 集全部不可播"; return res; }
+                series = live.Count > 1;
+            }
+
+            line = new VodLine { Name = line.Name, Episodes = live };
+
+            var writer = new StrmWriter(outputRoot, m => _log("[push] " + m));
+            writer.WriteNfo = cfg.WriteNfo;
+            writer.DownloadPoster = cfg.DownloadPoster;
+            writer.PosterMaxBytes = Math.Max(0, cfg.PosterMaxMb) * 1024 * 1024;
+            writer.MaxDeletePerRun = 0;                       // 单条推送绝不做清理
+            if (cfg.DownloadPoster)
+            {
+                var imgHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(Math.Max(5, cfg.TimeoutSeconds)) };
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(cfg.UserAgent))
+                        imgHttp.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", cfg.UserAgent);
+                }
+                catch { }
+                writer.FetchImage = url => FetchImageBytes(imgHttp, url, writer.PosterMaxBytes);
+            }
+
+            var name = string.IsNullOrWhiteSpace(detail.Name) ? (detail.Id ?? itemId) : detail.Name;
+            var paths = new List<string>();
+            if (series)
+            {
+                foreach (var o in writer.WriteSeries(name, detail, line))
+                    if (!string.IsNullOrEmpty(o.Path)) paths.Add(o.Path);
+            }
+            else
+            {
+                var o = writer.WriteMovie(name, detail, line);
+                if (!string.IsNullOrEmpty(o.Path)) paths.Add(o.Path);
+            }
+
+            res["ok"] = paths.Count > 0;
+            res["series"] = series;
+            res["count"] = paths.Count;
+            res["paths"] = paths;
+            res["name"] = name;
+            if (paths.Count == 0) res["msg"] = "没写出文件（检查输出目录权限）";
+            _log("[push] " + siteKey + " " + itemId + " → " + paths.Count + " 个文件"
+                 + (paths.Count > 0 ? "，首个: " + paths[0] : ""));
+            return res;
+        }
+
         private void Update(Action<SyncProgress> mutate)
         {
             lock (_stateLock) mutate(Progress);

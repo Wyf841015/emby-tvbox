@@ -762,6 +762,117 @@ public class Hub {
                 sendJson(ex, 200, m);
                 return;
             }
+            case "/api/search-all": {   // 关键词搜索（并发打所有同步站点）
+                String wd = q.getOrDefault("wd", "").trim();
+                if (wd.isEmpty()) { sendJson(ex, 200, fail("缺少搜索关键词")); return; }
+                java.util.List<String> keys = new java.util.ArrayList<>(syncSiteKeys());
+                String keysParam = q.get("keys");
+                if (keysParam != null && !keysParam.isBlank()) {
+                    keys.clear();
+                    for (String k : keysParam.split(",")) if (!k.isBlank()) keys.add(k.trim());
+                }
+                if (keys.isEmpty()) { sendJson(ex, 200, fail("同步名单是空的，先在站点页勾选站点")); return; }
+                final String kw = wd;
+                java.util.concurrent.ExecutorService esp =
+                        java.util.concurrent.Executors.newFixedThreadPool(Math.min(6, Math.max(1, keys.size())));
+                java.util.List<java.util.concurrent.Future<Map<String, Object>>> futs = new java.util.ArrayList<>();
+                for (final String k : keys) {
+                    futs.add(esp.submit(() -> {
+                        Map<String, Object> row = new LinkedHashMap<>();
+                        row.put("site", k);
+                        try {
+                            String raw = call(k, () -> pool.get(k).searchContent(kw, false), 30);
+                            Object parsed = tryParse(raw);
+                            int n = 0;
+                            if (parsed instanceof Map) {
+                                Object lst = ((Map<?, ?>) parsed).get("list");
+                                if (lst instanceof java.util.List) {
+                                    for (Object o : (java.util.List<?>) lst) {
+                                        if (!(o instanceof Map)) continue;
+                                        Map<?, ?> it = (Map<?, ?>) o;
+                                        Map<String, Object> one = new LinkedHashMap<>();
+                                        one.put("site", k);
+                                        one.put("id", str0(it.get("vod_id")));
+                                        one.put("name", str0(it.get("vod_name")));
+                                        one.put("year", str0(it.get("vod_year")));
+                                        one.put("remarks", str0(it.get("vod_remarks")));
+                                        one.put("pic", str0(it.get("vod_pic")));
+                                        one.put("type", str0(it.get("type_name")));
+                                        row.computeIfAbsent("items", x -> new java.util.ArrayList<Object>());
+                                        ((java.util.List<Object>) row.get("items")).add(one);
+                                        n++;
+                                    }
+                                }
+                            }
+                            row.put("count", n);
+                            row.put("ok", true);
+                        } catch (Exception e) {
+                            row.put("ok", false);
+                            row.put("count", 0);
+                            row.put("msg", explain(e));
+                        }
+                        return row;
+                    }));
+                }
+                java.util.List<Object> items = new java.util.ArrayList<>();
+                java.util.List<Object> sitesOut = new java.util.ArrayList<>();
+                for (java.util.concurrent.Future<Map<String, Object>> f : futs) {
+                    try {
+                        Map<String, Object> row = f.get(75, java.util.concurrent.TimeUnit.SECONDS);
+                        Object its = row.remove("items");
+                        sitesOut.add(row);
+                        if (its instanceof java.util.List) items.addAll((java.util.List<?>) its);
+                    } catch (Exception e) {
+                        Map<String, Object> row = new LinkedHashMap<>();
+                        row.put("ok", false); row.put("msg", "超时/异常: " + explain(e));
+                        sitesOut.add(row);
+                    }
+                }
+                esp.shutdownNow();
+                Map<String, Object> out = new LinkedHashMap<>();
+                out.put("ok", true);
+                out.put("wd", wd);
+                out.put("total", items.size());
+                out.put("items", items);
+                out.put("sites", sitesOut);
+                sendJson(ex, 200, out);
+                return;
+            }
+            case "/api/push": {   // 一键推送：把一条内容写进 Emby 库（由插件负责写 strm）
+                if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { sendJson(ex, 200, fail("需要 POST")); return; }
+                String bodyText = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                Object parsedBody = tryParse(bodyText);
+                String siteKey = null, itemId = null;
+                if (parsedBody instanceof Map) {
+                    siteKey = str(((Map<?, ?>) parsedBody).get("site"));
+                    itemId = str(((Map<?, ?>) parsedBody).get("id"));
+                }
+                if (siteKey.isBlank() || itemId.isBlank()) { sendJson(ex, 200, fail("缺少 site / id")); return; }
+                String base2 = embyBase();
+                if (base2 == null) { sendJson(ex, 200, fail("还没连上 Emby")); return; }
+                long t0 = System.currentTimeMillis();
+                try {
+                    Map<String, Object> payload = new LinkedHashMap<>();
+                    payload.put("site", siteKey);
+                    payload.put("id", itemId);
+                    String body = embyHttpJson("POST", base2 + "/TvBox/PushItem?token=" + embyToken(),
+                            SpiderPool.Json.stringify(payload), 240);
+                    Object r = SpiderPool.Json.parse(body);
+                    boolean ok = r instanceof Map && "true".equalsIgnoreCase(str(((Map<?, ?>) r).get("Ok")));
+                    Map<String, Object> m2 = new LinkedHashMap<>();
+                    m2.put("ok", ok);
+                    m2.put("result", r);
+                    record("推送条目", base2, ok, siteKey + " / " + itemId, System.currentTimeMillis() - t0);
+                    sendJson(ex, 200, m2);
+                } catch (Exception e) {
+                    Map<String, Object> m2 = new LinkedHashMap<>();
+                    m2.put("ok", false);
+                    m2.put("msg", "推送失败: " + explain(e));
+                    record("推送条目", base2, false, siteKey + " / " + itemId, System.currentTimeMillis() - t0);
+                    sendJson(ex, 200, m2);
+                }
+                return;
+            }
             case "/api/emby/sync": {
                 String base = embyBase();
                 if (base == null) { sendJson(ex, 200, fail("还没连上 Emby")); return; }
@@ -1741,6 +1852,19 @@ public class Hub {
         return s == null || s.isEmpty() ? s : Character.toLowerCase(s.charAt(0)) + s.substring(1);
     }
 
+    /// <summary>带 JSON body + 可配超时的 Emby 调用（推送单条内容可能几十秒）。</summary>
+    static String embyHttpJson(String method, String url, String jsonBody, int timeoutSeconds) throws Exception {
+        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url))
+                .timeout(Duration.ofSeconds(Math.max(5, timeoutSeconds)));
+        if ("POST".equalsIgnoreCase(method))
+            b.POST(HttpRequest.BodyPublishers.ofString(jsonBody == null ? "" : jsonBody, StandardCharsets.UTF_8))
+             .header("Content-Type", "application/json; charset=utf-8");
+        else b.GET();
+        HttpResponse<String> r = EMBY_HTTP.send(b.build(),
+                HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        return r.body();
+    }
+
     static String embyHttp(String method, String url) throws Exception {
         HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(20));
         if ("POST".equalsIgnoreCase(method)) b.POST(HttpRequest.BodyPublishers.noBody());
@@ -2139,6 +2263,16 @@ public class Hub {
         if (c instanceof java.net.http.HttpTimeoutException) return "请求超时（Emby 卡住或正在扫库）";
         if (c instanceof java.io.IOException) return n + ": " + c.getMessage();
         return e.getMessage() == null ? e.toString() : e.getMessage();
+    }
+
+    /** 空值统一成空字符串（避免页面上出现 None / null）。 */
+    static String str0(Object o) {
+        if (o == null) return "";
+        String v;
+        try { v = str(o); } catch (Exception e) { return ""; }
+        if (v == null || v.isEmpty()) return "";
+        if ("null".equalsIgnoreCase(v) || "None".equalsIgnoreCase(v)) return "";
+        return v;
     }
 
     static String str(Object o) {

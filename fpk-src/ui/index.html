@@ -389,6 +389,7 @@
     <div class="tabs">
       <div class="tab active" data-pane="overview" onclick="switchTab('overview',this)">概览</div>
       <div class="tab" data-pane="sites" onclick="switchTab('sites',this)">站点<span class="n" id="tabSiteCount">0</span></div>
+      <div class="tab" data-pane="search" onclick="switchTab('search',this)">搜索</div>
       <div class="tab" data-pane="sync" onclick="switchTab('sync',this)">同步<span class="n" id="tabSyncDot" style="display:none">●</span></div>
       <div class="tab" data-pane="config" onclick="switchTab('config',this)">配置</div>
       <div class="tab" data-pane="emby" onclick="switchTab('emby',this)">Emby 插件</div>
@@ -488,6 +489,25 @@
   </div>
 
   <!-- ══════════ 同步 ══════════ -->
+  <div class="pane" id="pane-search">
+    <div class="panel">
+      <h2>搜索并推送到 Emby</h2>
+      <div class="row" style="margin-bottom:10px">
+        <input id="searchInput" placeholder="输入片名关键词，回车开始搜索" style="flex:1;min-width:220px"
+               onkeydown="if(event.key==='Enter')doSearch()">
+        <button class="primary" id="btnSearch" onclick="doSearch()">🔍 搜索</button>
+        <button id="btnPushAll" onclick="pushAll()">全部推送</button>
+      </div>
+      <div class="hint" id="searchHint">搜索走各站点 spider 的 searchContent，多站点并发，一般 5~20 秒；推送会按同步同样的规则写 strm / nfo / 海报。</div>
+      <div style="overflow:auto;margin-top:12px">
+        <table id="searchTbl">
+          <thead><tr><th>封面</th><th>名称</th><th>年份</th><th>备注</th><th>站点</th><th>操作</th></tr></thead>
+          <tbody id="searchBody"><tr><td colspan="6" style="text-align:center;color:var(--muted)">还没有搜索结果</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
   <div class="pane" id="pane-sync">
     <div class="panel">
       <h2>同步控制</h2>
@@ -767,6 +787,100 @@ function fmtMs(ms) {
 }
 
 // ══════════ Tab ══════════
+// ══════════ 搜索 + 一键推送 ══════════
+var _searchItems = [];
+
+function doSearch() {
+  var wd = (document.getElementById('searchInput').value || '').trim();
+  if (!wd) { toast('请输入关键词', 'warn'); return; }
+  var hint = document.getElementById('searchHint');
+  var btn = document.getElementById('btnSearch');
+  btn.disabled = true; btn.textContent = '搜索中…';
+  hint.textContent = '正在并发搜索各站点…';
+  api('/api/search-all?wd=' + encodeURIComponent(wd)).then(function (r) {
+    _searchItems = (r && r.items) || [];
+    renderSearchResults(r);
+    var sites = (r && r.sites) || [];
+    var okSites = sites.filter(function (x) { return x.ok; }).length;
+    var badSites = sites.filter(function (x) { return !x.ok; });
+    hint.textContent = '共 ' + _searchItems.length + ' 条结果，来自 ' + okSites + ' 个站点'
+      + (badSites.length ? ('；' + badSites.length + ' 个站点搜索失败：' + badSites.map(function (x) { return x.site; }).join('、')) : '');
+  }).catch(function (e) {
+    hint.textContent = '搜索失败: ' + e.message;
+    toast('搜索失败: ' + e.message, 'err');
+  }).then(function () {
+    btn.disabled = false; btn.textContent = '🔍 搜索';
+  });
+}
+
+function renderSearchResults(r) {
+  var tb = document.getElementById('searchBody');
+  var items = (r && r.items) || [];
+  if (!items.length) {
+    tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted)">没搜到结果（换个关键词，或在站点页多勾几个站）</td></tr>';
+    return;
+  }
+  tb.innerHTML = items.map(function (it, i) {
+    var pic = it.pic ? '<img src="' + esc(it.pic) + '" referrerpolicy="no-referrer" style="width:44px;height:62px;object-fit:cover;border-radius:6px" onerror="this.style.visibility=\'hidden\'">' : '—';
+    var meta = [it.year, it.type].filter(Boolean).join(' · ');
+    return '<tr>'
+      + '<td>' + pic + '</td>'
+      + '<td><b>' + esc(it.name || ('#' + it.id)) + '</b>' + (meta ? '<div style="font-size:12px;color:var(--muted)">' + esc(meta) + '</div>' : '') + '</td>'
+      + '<td>' + esc(it.year || '—') + '</td>'
+      + '<td>' + esc(it.remarks || '—') + '</td>'
+      + '<td>' + esc(it.site || '—') + '</td>'
+      + '<td><button onclick="pushItem(' + i + ',this)">推送</button></td>'
+      + '</tr>';
+  }).join('');
+}
+
+function pushOne(site, id) {
+  return api('/api/push', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ site: site, id: String(id) })
+  });
+}
+
+function pushItem(idx, btn) {
+  var it = _searchItems[idx];
+  if (!it) return;
+  btn.disabled = true; btn.textContent = '推送中…';
+  pushOne(it.site, it.id).then(function (r) {
+    var res = (r && r.result) || {};
+    if (r && r.ok) {
+      btn.textContent = '✓ 已推送';
+      toast('已推送「' + (res.Name || it.name) + '」' + (res.Count || 0) + ' 个文件', 'ok');
+    } else {
+      btn.disabled = false; btn.textContent = '推送';
+      toast('推送失败: ' + (res.Msg || (r && r.msg) || '未知原因'), 'err');
+    }
+  }).catch(function (e) {
+    btn.disabled = false; btn.textContent = '推送';
+    toast('推送失败: ' + e.message, 'err');
+  });
+}
+
+async function pushAll() {
+  if (!_searchItems.length) { toast('先搜索', 'warn'); return; }
+  var btn = document.getElementById('btnPushAll');
+  var hint = document.getElementById('searchHint');
+  btn.disabled = true;
+  var ok = 0, fail = 0, files = 0;
+  for (var i = 0; i < _searchItems.length; i++) {
+    var it = _searchItems[i];
+    hint.textContent = '推送中 ' + (i + 1) + '/' + _searchItems.length + '：' + (it.name || it.id);
+    try {
+      var r = await pushOne(it.site, it.id);
+      if (r && r.ok) { ok++; files += ((r.result || {}).Count || 0); }
+      else fail++;
+    } catch (e) { fail++; }
+  }
+  btn.disabled = false;
+  hint.textContent = '推送完成：成功 ' + ok + ' 条（共 ' + files + ' 个文件），失败 ' + fail + ' 条';
+  toast('推送完成：成功 ' + ok + ' 条 / 失败 ' + fail + ' 条', fail ? 'warn' : 'ok');
+}
+
 function switchTab(name, el) {
   // 这三个页都显示「输出目录 / 配置源」，一律从 Emby 插件读，避免各显示各的
   if (name === 'config' || name === 'sync' || name === 'emby') pcLoad();

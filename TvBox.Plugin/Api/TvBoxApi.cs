@@ -184,6 +184,25 @@ namespace TvBox.Plugin.Api
         public int Page { get; set; }
     }
 
+    [Unauthenticated]   // hub 用 ?token= 调，靠 HubOk 校验；不加这个 Emby 会先拦 401
+    [Route("/TvBox/PushItem", "POST", Summary = "把某站点的一条内容立刻写进 Emby 库（搜索页一键推送）")]
+    public class PushItem : IReturn<PushItemResult>
+    {
+        public string Token { get; set; }
+        public string Site { get; set; }
+        public string Id { get; set; }
+    }
+
+    public class PushItemResult
+    {
+        public bool Ok { get; set; }
+        public string Msg { get; set; }
+        public string Name { get; set; }
+        public bool Series { get; set; }
+        public int Count { get; set; }
+        public List<string> Paths { get; set; }
+    }
+
     [Unauthenticated]
     [Route("/TvBox/Live", "GET", Summary = "直播源：把 hub /live/<站点> 的 M3U 转出来，Emby Live TV 直接填这个地址")]
     public class LiveProxy : IReturnVoid
@@ -781,6 +800,35 @@ namespace TvBox.Plugin.Api
         /// 局域网客户端连不上；Emby 本来就在局域网可达，所以由它代跳一次。
         /// hub 内部调 Spider.playerContent(flag, id) —— TVBox 客户端播放前做的同一件事。
         /// </summary>
+        /// <summary>单条推送：搜索页点「推送」时调这里。</summary>
+        public async Task<object> Post(PushItem req)
+        {
+            var p = P;
+            if (!HubOk(req?.Token)) return new PushItemResult { Ok = false, Msg = "token 无效" };
+            var cfg = p.Configuration;
+            var root = p.ResolveOutputRoot();
+            try
+            {
+                var r = await p.SyncService.PushOneAsync(cfg, req.Site, req.Id, root,
+                                                         p.ResolveEmbyBaseUrl(), CancellationToken.None)
+                                             .ConfigureAwait(false);
+                return new PushItemResult
+                {
+                    Ok = r.TryGetValue("ok", out var ok) && ok is bool b && b,
+                    Msg = r.TryGetValue("msg", out var m) ? m as string : null,
+                    Name = r.TryGetValue("name", out var n) ? n as string : null,
+                    Series = r.TryGetValue("series", out var sr) && sr is bool sb && sb,
+                    Count = r.TryGetValue("count", out var c) && c is int ci ? ci : 0,
+                    Paths = r.TryGetValue("paths", out var ps) ? ps as List<string> : null,
+                };
+            }
+            catch (Exception ex)
+            {
+                try { p.Logger.Error("[push] 失败: " + ex); } catch { }
+                return new PushItemResult { Ok = false, Msg = "推送失败: " + ex.Message };
+            }
+        }
+
         /// <summary>
         /// 直播：hub 的 /live/&lt;key&gt; 已经产出标准 M3U，这里原样转出去（顺带处理 key 省略时合并多站）。
         /// Emby 的「Live TV → 添加 M3U tuner」填 http://&lt;lan&gt;:8096/TvBox/Live?key=网络直播 即可。
