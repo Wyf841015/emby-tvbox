@@ -1229,10 +1229,106 @@ namespace TvBox.Plugin.Api
             return path;
         }
 
+        /// <summary>
+        /// 配置页引导脚本（外部 JS）。放在插件路由里而不是内联，是因为 Emby 用 innerHTML
+        /// 插入插件页片段，内联 &lt;script&gt; 可能不执行 —— 外部脚本由内联事件属性去 append 才稳。
+        /// 不含任何凭据，可以被页面直接引用。
+        /// </summary>
+        [Unauthenticated]
+        [Route("/TvBox/ConfigBoot", "GET", Summary = "插件配置页的引导脚本")]
+        public class ConfigBootScript : IReturnVoid { }
+
+        /// <summary>
+        /// 插件配置的只读快照（**不含共享令牌**），配置页用它先把值显示出来。
+        /// 这样即便拿不到 Emby 的 ApiClient，页面也不会是空的。
+        /// </summary>
+        [Unauthenticated]
+        [Route("/TvBox/ConfigPublic", "GET", Summary = "插件配置快照（不含令牌）")]
+        public class ConfigPublicSnapshot : IReturn<object> { }
+
         /// <summary>写一个响应头。IHttpResult 没有 ResponseHeaders，只能走 IResponse。</summary>
         private void SafeHeader(string name, string value)
         {
             try { Response?.AddHeader(name, value); } catch { }
+        }
+
+        /// <summary>供配置页读取的配置快照：显式白名单，绝不带 HubToken。</summary>
+        public object Get(ConfigPublicSnapshot request)
+        {
+            var cfg = P?.Configuration ?? new PluginConfiguration();
+            var m = new Dictionary<string, object>
+            {
+                ["ConfigUrl"] = cfg.ConfigUrl,
+                ["OutputRoot"] = cfg.OutputRoot,
+                ["EmbyBaseUrl"] = cfg.EmbyBaseUrl,
+                ["SpiderHubUrl"] = cfg.SpiderHubUrl,
+                ["Referer"] = cfg.Referer,
+                ["SiteWhitelist"] = cfg.SiteWhitelist,
+                ["SiteBlacklist"] = cfg.SiteBlacklist,
+                ["SiteNameFilter"] = cfg.SiteNameFilter,
+                ["MaxPagesPerCategory"] = cfg.MaxPagesPerCategory,
+                ["MaxItemsPerRun"] = cfg.MaxItemsPerRun,
+                ["RequestDelayMs"] = cfg.RequestDelayMs,
+                ["SyncIntervalHours"] = cfg.SyncIntervalHours,
+                ["IncrementalHours"] = cfg.IncrementalHours,
+                ["MaxDeletePerRun"] = cfg.MaxDeletePerRun,
+                ["PosterMaxMb"] = cfg.PosterMaxMb,
+                ["StreamMode"] = cfg.StreamMode,
+                ["RedirectHosts"] = cfg.RedirectHosts,
+                ["VerifyMaxEpisodes"] = cfg.VerifyMaxEpisodes,
+                ["DetailBatchSize"] = cfg.DetailBatchSize,
+                ["Concurrency"] = cfg.Concurrency,
+                ["TimeoutSeconds"] = cfg.TimeoutSeconds,
+                ["UserAgent"] = cfg.UserAgent,
+                ["UseProxy"] = cfg.UseProxy,
+                ["CleanupOrphans"] = cfg.CleanupOrphans,
+                ["EnableScheduledSync"] = cfg.EnableScheduledSync,
+                ["ExcludeCloudDrive"] = cfg.ExcludeCloudDrive,
+                ["IncrementalSync"] = cfg.IncrementalSync,
+                ["WriteNfo"] = cfg.WriteNfo,
+                ["DownloadPoster"] = cfg.DownloadPoster,
+                ["VerifyPlayUrl"] = cfg.VerifyPlayUrl,
+                ["ResolveIndirectUrl"] = cfg.ResolveIndirectUrl,
+                ["AllowPrivateHosts"] = cfg.AllowPrivateHosts,
+                ["HubTokenSet"] = !string.IsNullOrWhiteSpace(cfg.HubToken),
+                ["LastSyncUtc"] = cfg.LastSyncUtc,
+                ["LastSyncSummary"] = cfg.LastSyncSummary
+            };
+            return m;
+        }
+
+        /// <summary>引导脚本：从程序集嵌入资源里取出 config-boot.js 原样返回。</summary>
+        public object Get(ConfigBootScript request)
+        {
+            string js = null;
+            try
+            {
+                var asm = typeof(Plugin).Assembly;
+                foreach (var name in asm.GetManifestResourceNames())
+                {
+                    if (!name.EndsWith("config-boot.js", StringComparison.OrdinalIgnoreCase)) continue;
+                    using (var st = asm.GetManifestResourceStream(name))
+                    using (var rd = new StreamReader(st, Encoding.UTF8))
+                        js = rd.ReadToEnd();
+                    break;
+                }
+            }
+            catch (Exception ex)
+            {
+                try { P?.Logger.ErrorException("读取 config-boot.js 失败", ex); } catch { }
+            }
+            if (js == null) js = "console.error('TvBox: config-boot.js 未嵌入插件');";
+            try
+            {
+                var built = Factory().GetResult(Request,
+                    new MemoryStream(Encoding.UTF8.GetBytes(js)), "application/javascript; charset=utf-8", null);
+                if (built is MediaBrowser.Model.Services.IHttpResult hr) { try { hr.Status = 200; } catch { } }
+                return built;
+            }
+            catch (Exception)
+            {
+                return js;
+            }
         }
 
         private static IHttpResultFactory Factory()

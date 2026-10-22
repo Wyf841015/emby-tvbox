@@ -1,5 +1,48 @@
 # emby-tvbox
 
+## v0.4.3 — 插件页空白的真因：Emby 用 innerHTML 插片段，内联 `<script>` 根本不执行
+
+之前两轮都在改「填值逻辑」，但问题不在逻辑 —— **那段脚本从来就没跑过**。
+
+### 证据（在 Emby 自己的源里实测）
+
+用 Emby 的同源页面，按它的方式把插件页片段插进 DOM：
+
+```
+host.innerHTML = await (await fetch('/web/configurationpage?name=tvbox')).text();
+→ injected, len=14328, inlineScriptExecuted=no      ← 内联脚本没执行
+```
+
+Emby 的路由（`/configurationpage` → `contentPath: getPluginPageContentPath`）拿到 HTML 后是**赋值插入**的，`innerHTML` 里的 `<script>` 按规范不会执行。所以 `fill()` 一次都没运行，页面永远是空的 —— 配置本身一直是读得出来的（`GET /Plugins/{id}/Configuration` 36 个字段全对）。
+
+### 修法：换成「外部脚本 + 内联事件属性」引导
+
+`innerHTML` 不执行 `<script>`，但**内联事件属性（如 `onerror`）在插入后一定会触发**。于是：
+
+1. 页面逻辑搬到插件自己的路由 `/TvBox/ConfigBoot`（返回 `application/javascript`，内容来自嵌入资源 `config-boot.js`）
+2. 配置页里放两条引导，谁先成功谁加载脚本，脚本内 `__tvboxBooted` 去重：
+   - 内联 `<script>`（Emby 万一执行了就走这条）
+   - `<img src="data:," onerror="…appendChild(script)">`（**这条才是实际生效的那条**）
+3. 值不再依赖 Emby 的 `ApiClient`：新增只读路由 `/TvBox/ConfigPublic`（35 个字段，**显式白名单，绝不含 HubToken**，只回 `HubTokenSet` 布尔），脚本直接 fetch 它来填表
+4. `ApiClient` 可用时再补：读真实配置拿共享令牌 → 状态/站点/启停同步才可用；拿不到就明确显示「只读模式，保存和启停请到 hub 界面」，而不是转圈或报「token 无效」
+
+### 实测（同样的 innerHTML 插入路径）
+
+```
+inlineScriptExecuted = no          ← 内联脚本依旧不执行
+__tvboxBooted        = True        ← 引导脚本照样跑起来
+configUrl            = https://raw.githubusercontent.com/tushen6/Tomorrow/master/lmw.json
+spiderHubUrl         = http://127.0.0.1:8098
+outputRoot           = /vol2/1000/video/tvbox
+streamMode=proxy  concurrency=3  timeoutSeconds=45  maxPagesPerCategory=1
+verifyMaxEpisodes=48  posterMaxMb=4  userAgent=Mozilla/5.0 …
+复选框 useProxy/writeNfo/downloadPoster/incrementalSync/verifyPlayUrl/excludeCloudDrive/resolveIndirectUrl = 全 True
+      allowPrivateHosts/cleanupOrphans/enableScheduledSync = False
+状态行 = 已读取配置（32 项）
+```
+
+32 个控件全部按当前配置填好。
+
 ## v0.4.2 — 卸载增加「保留数据」选项 + 安装/升级统计推送
 
 ### 卸载向导（参考 fnclearup）
