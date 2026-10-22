@@ -1234,6 +1234,11 @@ namespace TvBox.Plugin.Api
         /// 插入插件页片段，内联 &lt;script&gt; 可能不执行 —— 外部脚本由内联事件属性去 append 才稳。
         /// 不含任何凭据，可以被页面直接引用。
         /// </summary>
+        /// <summary>配置页引导用的空响应（iframe onload 触发点）。</summary>
+        [Unauthenticated]
+        [Route("/TvBox/Kick", "GET", Summary = "配置页引导 ping")]
+        public class ConfigBootKick : IReturnVoid { }
+
         [Unauthenticated]
         [Route("/TvBox/ConfigBoot", "GET", Summary = "插件配置页的引导脚本")]
         public class ConfigBootScript : IReturnVoid { }
@@ -1295,6 +1300,23 @@ namespace TvBox.Plugin.Api
                 ["LastSyncSummary"] = cfg.LastSyncSummary
             };
             return m;
+        }
+
+        /// <summary>204 空响应：给 iframe onload 当触发点。</summary>
+        public object Get(ConfigBootKick request)
+        {
+            try
+            {
+                var built = Factory().GetResult(Request, new MemoryStream(Array.Empty<byte>()),
+                    "text/plain; charset=utf-8", null);
+                if (built is MediaBrowser.Model.Services.IHttpResult hr)
+                {
+                    try { hr.Status = 204; } catch { }
+                    try { hr.StatusCode = System.Net.HttpStatusCode.NoContent; } catch { }
+                }
+                return built;
+            }
+            catch (Exception) { return string.Empty; }
         }
 
         /// <summary>引导脚本：从程序集嵌入资源里取出 config-boot.js 原样返回。</summary>

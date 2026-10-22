@@ -1,4 +1,5 @@
-<div id="TvBoxConfigPage" data-role="page" class="page type-interior pluginConfigurationPage"
+<div id="TvBoxConfigPage"
+     data-tvbox-no-cache="1" data-role="page" class="page type-interior pluginConfigurationPage"
      data-require="emby-input,emby-button,emby-checkbox,emby-select">
 
     <div data-role="content">
@@ -11,6 +12,13 @@
                     <br />
                     <strong>注意：</strong>type 3/4 的 spider 源（jar / drpy js）无法解析，会被自动跳过。
                 </p>
+            </div>
+
+            <div id="tvboxBootHint" class="fieldDescription"
+                 style="margin:0 0 1em;padding:.7em .9em;border:1px solid rgba(200,140,0,.45);border-radius:8px;background:rgba(255,190,60,.10)">
+                如果下面各项都是空的：说明插件页的引导脚本没跑起来 —— 请<b>强制刷新</b>（手机端下拉刷新或重开 Emby App），
+                也可以在 fnOS 里打开 <b>TvBox For Emby</b> 应用的 hub 界面配置（那边改动会立即生效，并可「重新检测」）。
+                <span id="tvboxBootDiag" style="opacity:.75"></span>
             </div>
 
             <form id="tvboxForm" class="tvboxForm">
@@ -281,14 +289,36 @@
         · 而 <img onerror> 这类「内联事件属性」在 innerHTML 插入后一定会触发。
       两条路谁先跑起来谁加载脚本，脚本内部有 __tvboxBooted 去重。
     -->
+    <!--
+      配置页逻辑放在插件路由 /TvBox/ConfigBoot（外部脚本）。
+      为什么这么绕：Emby 用 innerHTML 把片段插进宿主，内联 <script> 不会执行
+      （实测 inlineScriptExecuted=no）；但「内联事件属性」在插入后一定会触发，
+      所以用 onerror / onload 去做引导。
+      路径一律用相对的 ../TvBox/...：Emby 若挂在网关子路径下（/emby/web/...），
+      绝对路径 /TvBox/... 会 404。
+      三个触发点都留着，谁先成功谁加载，脚本内 __tvboxBooted 去重：
+        1) 内联 <script>（Emby 万一执行）
+        2) <img> 指向必 404 的同源地址 → onerror（不用 data:，部分 WebView 禁用 data: 图片）
+        3) <iframe> 指向 204 的同源地址 → onload
+    -->
     <script type="text/javascript">
         (function () {
-            if (window.__tvboxBooted) return;
-            var s = document.createElement('script');
-            s.src = '/TvBox/ConfigBoot?_=' + Date.now();
-            document.head.appendChild(s);
+            window.__tvboxBoot = function () {
+                if (window.__tvboxBooted || window.__tvboxBooting) return;
+                window.__tvboxBooting = true;
+                var s = document.createElement('script');
+                s.src = '../TvBox/ConfigBoot?_=' + Date.now();
+                s.onerror = function () {
+                    window.__tvboxBooting = false;
+                    var d = document.getElementById('tvboxBootDiag');
+                    if (d) d.textContent = '（引导脚本加载失败，请刷新页面）';
+                };
+                document.head.appendChild(s);
+            };
+            window.__tvboxBoot();
         })();
     </script>
-    <img src="data:," alt="" style="display:none"
-         onerror="(function(){if(window.__tvboxBooted)return;var s=document.createElement('script');s.src='/TvBox/ConfigBoot?_='+Date.now();document.head.appendChild(s);})()" />
+    <img src="../TvBox/Kick.png" alt="" style="display:none" onerror="(function(){if(window.__tvboxBooted)return;var s=document.createElement('script');s.src='../TvBox/ConfigBoot?_='+Date.now();document.head.appendChild(s)})()" />
+    <iframe src="../TvBox/Kick" onload="(function(){if(window.__tvboxBooted)return;var s=document.createElement('script');s.src='../TvBox/ConfigBoot?_='+Date.now();document.head.appendChild(s)})()"
+            style="display:none;width:0;height:0;border:0" title="boot"></iframe>
 </div>

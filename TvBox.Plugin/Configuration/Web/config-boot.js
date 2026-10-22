@@ -5,6 +5,13 @@
 
     var PLUGIN_ID = '7f3c1d92-4a6b-4c8e-9f21-8b5d3a72c104';
     var TOKEN = '';
+    // Emby 若挂在子路径（/emby/web/...），绝对路径 /TvBox/... 会 404，按 /web/ 之前的前缀拼
+    var BASE = (function () {
+        try {
+            var p = location.pathname, i = p.indexOf('/web/');
+            return (i >= 0 ? p.slice(0, i) : '') + '/TvBox/';
+        } catch (e) { return '/TvBox/'; }
+    })();
 
     function el(id) { return document.getElementById(id); }
     function setText(id, t) { var e = el(id); if (e) e.textContent = t; }
@@ -78,6 +85,7 @@
             .then(function (cfg) {
                 window.__tvboxCfg = cfg;
                 var n = fill(cfg);
+                var hint = el('tvboxBootHint'); if (hint) hint.style.display = 'none';
                 setText('tvboxStatus', '已读取配置（' + n + ' 项）');
                 withApiClient(function (a) {
                     // 有 ApiClient 才能拿到共享令牌 → 状态/站点/启停同步才可用
@@ -92,12 +100,15 @@
                 });
             })
             .catch(function (e) {
-                setText('tvboxStatus', '读取配置失败: ' + (e && e.message ? e.message : e));
+                var msg = '读取配置失败: ' + (e && e.message ? e.message : e);
+                setText('tvboxStatus', msg);
+                var d = el('tvboxBootDiag');
+                if (d) d.textContent = '（' + msg + '）';
             });
     }
 
     function url(path) {
-        var u = '/TvBox/' + path;
+        var u = BASE + path;
         if (!TOKEN) return u;
         return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN);
     }
