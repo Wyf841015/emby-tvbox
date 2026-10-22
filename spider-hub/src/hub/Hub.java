@@ -256,8 +256,9 @@ public class Hub {
         if (socketPath != null) {
             try {
                 final String prefix = hubPrefix;
-                unix = new UnixHttp(Path.of(socketPath), (method, path, rawQuery, body) -> {
+                unix = new UnixHttp(Path.of(socketPath), (method, path, rawQuery, body, headers) -> {
                     String p = path;
+                    String pxUsed = (headers == null) ? "" : headers.getOrDefault("x-hub-prefix-used", "");
                     if (!prefix.isEmpty() && p.startsWith(prefix)) {
                         p = p.substring(prefix.length());
                         if (p.isEmpty()) p = "/";
@@ -265,7 +266,7 @@ public class Hub {
                     }
                     String url = "http://127.0.0.1:" + tcpPort + p
                             + (rawQuery == null || rawQuery.isEmpty() ? "" : "?" + rawQuery);
-                    return proxy(method, url, body);
+                    return proxy(method, url, body, headers, pxUsed);
                 });
                 unix.start();
                 System.out.println("Unix socket 监听: " + socketPath + "  prefix=" + prefix);
@@ -2548,6 +2549,10 @@ public class Hub {
 
     /** 当前请求的网关前缀（/app/tvboxhub 之类），用于拼同源地址。 */
     static String basePath(com.sun.net.httpserver.HttpExchange ex) {
+        // 走 unix socket 时前缀被剥掉了，靠 proxy() 注入的 X-Hub-Prefix 还原，
+        // 否则重写出来的分片地址会少掉 /app/tvboxhub 这一段 → 浏览器 404。
+        String px = ex.getRequestHeaders().getFirst("X-Hub-Prefix");
+        if (px != null && !px.isEmpty()) return px.replaceAll("/+$", "");
         String p = ex.getRequestURI().getPath();
         int i = p.indexOf("/api/");
         return i > 0 ? p.substring(0, i) : "";
@@ -2669,12 +2674,22 @@ public class Hub {
     }
 
     /** Unix 前端把请求反代到本地 TCP。 */
-    static UnixHttp.Resp proxy(String method, String url, String body) {
+    static UnixHttp.Resp proxy(String method, String url, String body, Map<String, String> inHeaders, String pxUsed) {
         try {
             java.net.http.HttpClient c = java.net.http.HttpClient.newBuilder()
                     .connectTimeout(java.time.Duration.ofSeconds(10)).build();
             java.net.http.HttpRequest.Builder b = java.net.http.HttpRequest.newBuilder(java.net.URI.create(url))
                     .timeout(java.time.Duration.ofSeconds(180));
+            // 转发给本机 handler 的请求头：Range 一定要带，否则视频没法边下边播
+            if (inHeaders != null) {
+                for (String k : new String[]{"range", "accept", "user-agent", "referer", "origin", "cookie", "if-range"}) {
+                    String v = inHeaders.get(k);
+                    if (v != null && !v.isEmpty()) {
+                        try { b.header(k, v); } catch (Exception ignore) { }
+                    }
+                }
+            }
+            if (pxUsed != null && !pxUsed.isEmpty()) b.header("X-Hub-Prefix", pxUsed);
             if ("POST".equalsIgnoreCase(method)) {
                 b.POST(java.net.http.HttpRequest.BodyPublishers.ofString(body == null ? "" : body,
                         StandardCharsets.UTF_8));
@@ -2685,9 +2700,13 @@ public class Hub {
                     java.net.http.HttpResponse.BodyHandlers.ofByteArray());
             UnixHttp.Resp r = new UnixHttp.Resp();
             r.code = resp.statusCode();
-            String ct = resp.headers().firstValue("content-type").orElse("text/plain; charset=utf-8");
-            r.contentType = ct;
+            r.contentType = resp.headers().firstValue("content-type").orElse("text/plain; charset=utf-8");
             r.body = resp.body();
+            // 响应头也要透传：Content-Range/Accept-Ranges/X-Accel-Buffering 全在里头
+            for (String k : new String[]{"content-range", "accept-ranges", "x-accel-buffering", "cache-control", "location"}) {
+                java.util.Optional<String> v = resp.headers().firstValue(k);
+                if (v.isPresent()) r.headers.put(k, v.get());
+            }
             return r;
         } catch (Exception e) {
             return UnixHttp.Resp.of("proxy 失败: " + e).code(502);

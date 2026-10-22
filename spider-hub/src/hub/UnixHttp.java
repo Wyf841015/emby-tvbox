@@ -27,7 +27,7 @@ public class UnixHttp {
 
     /** 处理函数。 */
     public interface Handler {
-        Resp handle(String method, String path, String rawQuery, String body) throws Exception;
+        Resp handle(String method, String path, String rawQuery, String body, Map<String, String> headers) throws Exception;
     }
 
     /** 响应。 */
@@ -35,6 +35,8 @@ public class UnixHttp {
         public int code = 200;
         public String contentType = "text/plain; charset=utf-8";
         public byte[] body = new byte[0];
+        /** 额外响应头（Range/206、缓存、流式开关等都要靠它带出去）。 */
+        public Map<String, String> headers = new LinkedHashMap<>();
 
         public static Resp of(String body) {
             Resp r = new Resp();
@@ -158,11 +160,13 @@ public class UnixHttp {
             if (!prefix.isEmpty() && path.startsWith(prefix)) {
                 path = path.substring(prefix.length());
                 if (path.isEmpty()) path = "/";
+                // 记下来：handler 重写播放列表时要还原成浏览器实际用的路径
+                headers.put("x-hub-prefix-used", prefix);
             }
 
             Resp resp;
             try {
-                resp = handler.handle(method, path, rawQuery, body);
+                resp = handler.handle(method, path, rawQuery, body, headers);
             } catch (Exception e) {
                 resp = Resp.of("ERROR: " + e).code(500);
             }
@@ -171,7 +175,16 @@ public class UnixHttp {
             sb.append("HTTP/1.1 ").append(resp.code).append(' ').append(reason(resp.code)).append("\r\n");
             sb.append("Content-Type: ").append(resp.contentType).append("\r\n");
             sb.append("Content-Length: ").append(resp.body.length).append("\r\n");
-            sb.append("Cache-Control: no-store\r\n");
+            boolean hasCache = false;
+            for (Map.Entry<String, String> e : resp.headers.entrySet()) {
+                String k = e.getKey();
+                if (k == null) continue;
+                String lk = k.toLowerCase(Locale.ROOT);
+                if (lk.equals("content-length") || lk.equals("content-type") || lk.equals("connection")) continue;
+                if (lk.equals("cache-control")) hasCache = true;
+                sb.append(k).append(": ").append(e.getValue()).append("\r\n");
+            }
+            if (!hasCache) sb.append("Cache-Control: no-store\r\n");
             sb.append("Connection: close\r\n");
             sb.append("\r\n");
             out.write(sb.toString().getBytes(StandardCharsets.UTF_8));

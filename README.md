@@ -1,5 +1,31 @@
 # emby-tvbox
 
+## v0.16.3 — 修「播不了」的真根因：分片地址丢了网关前缀
+
+**症状**：详情页点播放，界面没提示、也没画面。
+
+**根因**：fnOS 网关把请求转给 unix socket 时，路径是 `/app/tvboxhub/api/stream`；hub 剥掉前缀后
+重写 m3u8 里的分片地址，写出来的是 `/api/stream/seg?...` —— **少了 `/app/tvboxhub` 这一段**。
+浏览器拿到这种地址会去「站点根」取，网关那里没有这个路由 → 404 → hls.js 致命错误 → 播不了。
+
+本地测试一直用 `http://127.0.0.1:8098/`（没有前缀），所以这个 bug 在我这儿永远复现不出来，
+只有走网关才会踩到。
+
+**修法**：
+- `UnixHttp` 剥前缀时把用到的前缀记进请求头 `x-hub-prefix-used`，hub 的 `basePath()`
+  读它来还原 —— 重写出来的分片地址变成 `/app/tvboxhub/api/stream/seg?...`
+- 直连 hub（无前缀）时仍写成 `/api/stream/seg?...`，两种情况都对
+
+**顺带修掉 socket 反向代理丢头的问题**（视频播放必需）：
+- 请求头透传：`Range` 之前根本没转给 handler，所以「边下边播 / 拖动进度」都不工作
+- 响应头透传：`Content-Range`、`Accept-Ranges`、`X-Accel-Buffering`、`Cache-Control`、`Location`
+  之前全被吞掉（Resp 只有 code/contentType/body）
+
+实测：
+- 带前缀请求 → 分片地址 `/app/tvboxhub/api/stream/seg?...` → 拉取 `200 video/mp2t 1,955,012 字节`
+- `Range: bytes=0-99` → `206` + `Content-Range: bytes 0-99/1955012` + `Accept-Ranges: bytes`
+- 浏览器实测「集结号」第一个结果：`readyState=4 / duration=7432s / currentTime=1.2s / paused=false`
+
 ## v0.16.2 — 播放器加自检：播不了要能说出原因
 
 「都无法播放」但界面上什么提示都没有，只能靠猜。这一版把播放器做成会说话的：
