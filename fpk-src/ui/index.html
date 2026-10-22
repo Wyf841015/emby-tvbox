@@ -895,10 +895,18 @@ function closePlayer() {
   document.getElementById('playerMask').classList.remove('show');
 }
 
-function openPlayer(streamUrl, title, info) {
+function pageBase() {
+  var p = location.pathname || '/';
+  return p.endsWith('/') ? p : (p.substring(0, p.lastIndexOf('/') + 1) || '/');
+}
+
+function openPlayer(streamUrl, title, info, directUrl) {
   document.getElementById('playerTitle').textContent = title || '播放';
   document.getElementById('playerInfo').textContent = info || '';
-  document.getElementById('playerHint').textContent = '';
+  var hintEl = document.getElementById('playerHint');
+  hintEl.innerHTML = directUrl
+    ? '播放不通？把 <a href="' + esc(directUrl) + '" target="_blank" rel="noreferrer">302 直链</a> 复制到 VLC / IINA / PotPlayer 里打开（源站可能限制 Referer，外部播放器反而更稳）'
+    : '';
   document.getElementById('playerMask').classList.add('show');
   var v = document.getElementById('playerVideo');
   if (_hls) { try { _hls.destroy(); } catch (e) { } _hls = null; }
@@ -908,8 +916,8 @@ function openPlayer(streamUrl, title, info) {
     _hls = new Hls({ maxBufferLength: 30, enableWorker: true });
     _hls.on(Hls.Events.ERROR, function (evt, data) {
       if (data && data.fatal) {
-        document.getElementById('playerHint').textContent = '播放出错：' + (data.details || data.type)
-          + '（换个线路或源试试）';
+        document.getElementById('playerHint').innerHTML = '播放出错：' + esc(data.details || data.type || '')
+          + '（换个线路或源试试）' + (directUrl ? '｜<a href="' + esc(directUrl) + '" target="_blank" rel="noreferrer">302 直链</a>' : '');
       }
     });
     _hls.loadSource(streamUrl);
@@ -920,7 +928,7 @@ function openPlayer(streamUrl, title, info) {
   } else {
     // Safari / iOS 原生支持 HLS
     v.src = streamUrl;
-    document.getElementById('playerHint').textContent = window.Hls ? '' : '（浏览器不支持 MSE，尝试原生播放）';
+    if (!window.Hls) document.getElementById('playerHint').textContent = '（浏览器不支持 MSE，尝试原生播放）';
     playPromise = v.play(); if (playPromise && playPromise.catch) playPromise.catch(function () { });
   }
 }
@@ -954,7 +962,14 @@ function playDetail(idx, epVal) {
         return '<option value="' + i + '"' + (i === ep ? ' selected' : '') + '>' + esc(e.name || ('第' + (i + 1) + '集')) + '</option>';
       }).join('');
     } else { sel.style.display = 'none'; }
-    openPlayer(r.streamUrl, title, (r.flag || '') + (r.episode ? ' · ' + r.episode : ''));
+    // 同源地址：不管在局域网还是外网，只要能打开这个界面就能播（走 hub 代理 + 302 直链）
+    var sameOrigin = pageBase() + 'api/stream?site=' + encodeURIComponent(it.site)
+                   + '&id=' + encodeURIComponent(it.id) + '&ep=' + ep
+                   + '&flag=' + encodeURIComponent(r.flag || '');
+    var direct = pageBase() + 'api/go?site=' + encodeURIComponent(it.site)
+               + '&id=' + encodeURIComponent(it.id) + '&ep=' + ep
+               + '&flag=' + encodeURIComponent(r.flag || '');
+    openPlayer(sameOrigin, title, (r.flag || '') + (r.episode ? ' · ' + r.episode : ''), direct);
   }).catch(function (e) {
     var btns = document.getElementById('dlgFoot').querySelectorAll('button');
     if (btns.length) btns[0].textContent = '▶ 播放';

@@ -1,5 +1,28 @@
 # emby-tvbox
 
+## v0.16.0 — 外网也能播：同源代理 + 302 直链
+
+之前播放地址拼的是 `http://192.168.1.10:8096/TvBox/Stream?...`（走插件代理），出了局域网就废了。
+现在改成**同源**：播放地址用当前页面的 base + `api/stream?...`，页面能打开就能播。
+
+- `GET /api/stream?site=&id=&ep=[&flag=]` — hub 自己代理播放：
+  m3u8 会把里面**每一个分片地址**（含 `EXT-X-KEY` 的 `URI="..."`）重写成
+  `{当前前缀}/api/stream/seg?u=<真实地址>&h=<源要求的 header>`，播放器自始至终只跟 hub 打交道；
+  mp4/ts 之类做字节直通并透传 `Range` / `206`
+- `GET /api/stream/seg?u=&h=[Range]` — 分片代理，带源 header（Referer/UA/Cookie），支持 Range
+- `GET /api/go?site=&id=&ep=` — **302** 到真实地址，给 VLC / IINA / PotPlayer 这类外部播放器
+- 播放器界面下方常驻一个「302 直链」链接，代理播不动时可以把它丢进外部播放器
+
+为什么这样能解决外网问题：浏览器只连「打开这个页面的那个地址」，不再需要能访问 `192.168.1.10`。
+源的 CORS / Referer 限制也由 hub 侧带 header 解决。
+
+实测（本机同源路径）：`/api/stream` → 200 `application/vnd.apple.mpegurl` 231KB →
+分片 `/api/stream/seg` → 200 `video/mp2t` 641KB → 浏览器 `readyState=4 / duration=2872s`；
+`/api/go` → `302 Found`。
+
+⚠️ 另外提醒：**Emby 库里的 strm 仍然是绝对地址**，外网看 Emby 时要把插件配置的
+`EmbyBaseUrl` 改成客户端实际访问 Emby 用的地址，再跑一次同步重写 strm。
+
 ## v0.15.0 — 详情页直接播放
 
 详情弹窗加了「▶ 播放」，点开就能看，不用先推送：

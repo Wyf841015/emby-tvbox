@@ -518,6 +518,79 @@ public class Hub {
                 sendJson(ex, 200, m);
                 return;
             }
+            case "/api/stream": {   // 同源播放代理：m3u8 重写分片地址，其它类型直通字节
+                String key = q.getOrDefault("site", "").trim();
+                String vid = q.getOrDefault("id", "").trim();
+                int epIdx = 0;
+                try { epIdx = Integer.parseInt(q.getOrDefault("ep", "0")); } catch (Exception ignore) { }
+                String wantFlag = q.getOrDefault("flag", "").trim();
+                if (key.isEmpty() || vid.isEmpty()) { sendText(ex, 400, "缺少 site / id"); return; }
+                try {
+                    String[] picked = pickEpisode(key, vid, wantFlag, epIdx);
+                    if (picked == null) { sendText(ex, 404, "这条没有播放地址"); return; }
+                    String flag = picked[0], epId = picked[1];
+                    String[] r = resolveEpisode(key, flag, epId);
+                    if (!"1".equals(r[0])) { sendText(ex, 502, "解析失败: " + r[2]); return; }
+                    String real = r[1];
+                    String hdr = (r.length > 4) ? r[4] : null;
+                    String base = basePath(ex);     // 例如 /app/tvboxhub
+                    if (isM3u8(real)) {
+                        String body = new String(httpGetBytes(real, hdr, null).body(), StandardCharsets.UTF_8);
+                        String rewritten = rewritePlaylist(body, real, hdr, base);
+                        sendBytes(ex, 200, "application/vnd.apple.mpegurl; charset=utf-8", rewritten.getBytes(StandardCharsets.UTF_8));
+                    } else {
+                        // mp4/ts 之类：直通（带 Range），省得浏览器 CORS 或 Referer 挡
+                        java.net.http.HttpResponse<byte[]> resp = httpGetBytes(real, hdr,
+                                ex.getRequestHeaders().getFirst("Range"));
+                        String ct = resp.headers().firstValue("Content-Type").orElse("application/octet-stream");
+                        String cr = resp.headers().firstValue("Content-Range").orElse(null);
+                        if (cr != null) ex.getResponseHeaders().set("Content-Range", cr);
+                        ex.getResponseHeaders().set("Accept-Ranges", "bytes");
+                        sendBytes(ex, resp.statusCode() == 206 ? 206 : 200, ct, resp.body());
+                    }
+                } catch (Exception e) {
+                    sendText(ex, 502, "代理失败: " + explain(e));
+                }
+                return;
+            }
+            case "/api/stream/seg": {   // 分片代理（m3u8 里重写出来的地址）
+                String u = unb64url(q.getOrDefault("u", ""));
+                String hdr = q.containsKey("h") ? unb64url(q.get("h")) : null;
+                if (u == null || u.isBlank()) { sendText(ex, 400, "缺少 u"); return; }
+                try {
+                    java.net.http.HttpResponse<byte[]> resp = httpGetBytes(u, hdr,
+                            ex.getRequestHeaders().getFirst("Range"));
+                    String ct = resp.headers().firstValue("Content-Type").orElse("application/octet-stream");
+                    String cr = resp.headers().firstValue("Content-Range").orElse(null);
+                    if (cr != null) ex.getResponseHeaders().set("Content-Range", cr);
+                    ex.getResponseHeaders().set("Accept-Ranges", "bytes");
+                    ex.getResponseHeaders().set("Cache-Control", "public, max-age=3600");
+                    sendBytes(ex, resp.statusCode() == 206 ? 206 : 200, ct, resp.body());
+                } catch (Exception e) {
+                    sendText(ex, 502, "分片代理失败: " + explain(e));
+                }
+                return;
+            }
+            case "/api/go": {           // 302 到真实地址（给 VLC/IINA 这类外部播放器用）
+                String key = q.getOrDefault("site", "").trim();
+                String vid = q.getOrDefault("id", "").trim();
+                int epIdx = 0;
+                try { epIdx = Integer.parseInt(q.getOrDefault("ep", "0")); } catch (Exception ignore) { }
+                String wantFlag = q.getOrDefault("flag", "").trim();
+                try {
+                    String[] picked = pickEpisode(key, vid, wantFlag, epIdx);
+                    if (picked == null) { sendText(ex, 404, "这条没有播放地址"); return; }
+                    String[] r = resolveEpisode(key, picked[0], picked[1]);
+                    if (!"1".equals(r[0])) { sendText(ex, 502, "解析失败: " + r[2]); return; }
+                    ex.getResponseHeaders().set("Location", r[1]);
+                    ex.getResponseHeaders().set("Cache-Control", "no-store");
+                    ex.sendResponseHeaders(302, -1);
+                    ex.close();
+                } catch (Exception e) {
+                    sendText(ex, 502, "解析失败: " + explain(e));
+                }
+                return;
+            }
             case "/api/play-resolve": {   // 详情页「播放」：挑线路/集 → playerContent 解出真地址 → 给浏览器可播的地址
                 String key = q.getOrDefault("site", "").trim();
                 String vid = q.getOrDefault("id", "").trim();
@@ -2439,6 +2512,131 @@ public class Hub {
     }
 
     /** 空值统一成空字符串（避免页面上出现 None / null）。 */
+    static final java.net.http.HttpClient HUB_HTTP = java.net.http.HttpClient.newBuilder()
+            .connectTimeout(java.time.Duration.ofSeconds(15))
+            .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
+            .build();
+
+    /** 带源 header 的 GET（Range 可选），拿原始字节。 */
+    static java.net.http.HttpResponse<byte[]> httpGetBytes(String url, String headerJson, String range) throws Exception {
+        java.net.http.HttpRequest.Builder b = java.net.http.HttpRequest.newBuilder(java.net.URI.create(url))
+                .timeout(java.time.Duration.ofSeconds(45))
+                .GET()
+                .header("User-Agent", "Mozilla/5.0");
+        if (range != null && !range.isBlank()) b.header("Range", range);
+        if (headerJson != null && !headerJson.isBlank()) {
+            Object h = tryParse(headerJson);
+            if (h instanceof Map) {
+                for (Map.Entry<?, ?> e : ((Map<?, ?>) h).entrySet()) {
+                    if (e.getKey() == null || e.getValue() == null) continue;
+                    String k1 = String.valueOf(e.getKey());
+                    String lk = k1.toLowerCase();
+                    if (lk.equals("host") || lk.equals("content-length") || lk.equals("connection")
+                            || lk.equals("accept-encoding") || lk.equals("range")) continue;
+                    try { b.header(k1, String.valueOf(e.getValue())); } catch (Exception ignore) { }
+                }
+            }
+        }
+        return HUB_HTTP.send(b.build(), java.net.http.HttpResponse.BodyHandlers.ofByteArray());
+    }
+
+    static void sendText(com.sun.net.httpserver.HttpExchange ex, int code, String text) throws java.io.IOException {
+        sendBytes(ex, code, "text/plain; charset=utf-8", text.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** 当前请求的网关前缀（/app/tvboxhub 之类），用于拼同源地址。 */
+    static String basePath(com.sun.net.httpserver.HttpExchange ex) {
+        String p = ex.getRequestURI().getPath();
+        int i = p.indexOf("/api/");
+        return i > 0 ? p.substring(0, i) : "";
+    }
+
+    static boolean isM3u8(String url) {
+        if (url == null) return false;
+        String u = url.toLowerCase();
+        int cut = u.indexOf('?');
+        if (cut >= 0) u = u.substring(0, cut);
+        return u.endsWith(".m3u8") || u.contains("m3u8");
+    }
+
+    /** 把播放列表里的相对/分片地址统统改写成 /api/stream/seg?u=&h=，播放器只跟本机打交道。 */
+    static String rewritePlaylist(String body, String playlistUrl, String hdr, String base) {
+        String hb64 = (hdr == null || hdr.isBlank()) ? null : b64url(hdr);
+        StringBuilder out = new StringBuilder(body.length() * 2);
+        for (String line : body.split("\n")) {
+            String t = line.trim();
+            if (t.isEmpty()) { out.append(line).append('\n'); continue; }
+            if (t.startsWith("#")) {
+                StringBuilder sb = new StringBuilder(line);
+                int from = 0;
+                while (true) {
+                    int a = sb.indexOf("URI=\"", from);
+                    if (a < 0) break;
+                    int b = sb.indexOf("\"", a + 5);
+                    if (b < 0) break;
+                    String ref = sb.substring(a + 5, b);
+                    String abs = absolutize(playlistUrl, ref);
+                    String proxy = base + "/api/stream/seg?u=" + b64url(abs) + (hb64 != null ? ("&h=" + hb64) : "");
+                    sb.replace(a + 5, b, proxy);
+                    from = a + 5 + proxy.length();
+                }
+                out.append(sb).append('\n');
+            } else {
+                String abs = absolutize(playlistUrl, t);
+                out.append(base).append("/api/stream/seg?u=").append(b64url(abs))
+                   .append(hb64 != null ? ("&h=" + hb64) : "").append('\n');
+            }
+        }
+        return out.toString();
+    }
+
+    static String absolutize(String baseUrl, String ref) {
+        try {
+            return java.net.URI.create(baseUrl).resolve(ref).toString();
+        } catch (Exception e) {
+            return ref;
+        }
+    }
+
+    /** 按 flag/序号挑一集：返回 {线路名, 分集id}。 */
+    static String[] pickEpisode(String key, String vid, String wantFlag, int epIdx) {
+        try {
+            String raw = call(key, () -> pool.get(key).detailContent(java.util.Collections.singletonList(vid)), 60);
+            Map<?, ?> d = firstItem(tryParse(raw));
+            if (d == null) return null;
+            String from = str0(d.get("vod_play_from"));
+            String urls = str0(d.get("vod_play_url"));
+            String[] froms = from.split("\\$\\$\\$");
+            String[] groups = urls.split("\\$\\$\\$");
+            String firstFlag = null, firstId = null;
+            for (int i = 0; i < froms.length; i++) {
+                String g = i < groups.length ? groups[i] : "";
+                java.util.List<String> ids = new java.util.ArrayList<>();
+                for (String seg : g.split("#")) {
+                    if (seg.isBlank()) continue;
+                    int cut = seg.lastIndexOf('$');
+                    ids.add(cut >= 0 ? seg.substring(cut + 1) : seg);
+                }
+                if (ids.isEmpty()) continue;
+                String lineName = froms[i].isBlank() ? ("线路" + (i + 1)) : froms[i];
+                String pick = ids.get(Math.min(Math.max(0, epIdx), ids.size() - 1));
+                if (wantFlag != null && !wantFlag.isEmpty() && wantFlag.equals(lineName)) return new String[]{lineName, pick};
+                if (firstFlag == null) { firstFlag = lineName; firstId = pick; }
+            }
+            return firstFlag == null ? null : new String[]{firstFlag, firstId};
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    static String unb64url(String s) {
+        try {
+            return new String(java.util.Base64.getUrlDecoder().decode(s), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     /** 从 detailContent 解析结果里取第一条。 */
     static Map<?, ?> firstItem(Object parsed) {
         if (!(parsed instanceof Map)) return null;
