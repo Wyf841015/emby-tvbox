@@ -1,5 +1,41 @@
 # emby-tvbox
 
+## v0.5.1 — 补齐 hub 界面配置：12 项设置以前改了会被静默丢掉
+
+排查发现同一份配置有**三个入口**，但字段覆盖不一致：
+
+| 位置 | 之前能改 |
+|---|---|
+| Emby 插件页 | 32 项（v0.4.1 已补齐） |
+| hub 界面「配置」 | **19 项** |
+| `/api/save` 白名单 | 21 项 |
+| 插件 `/TvBox/Config` + `ConfigResult` DTO | 21 项 |
+
+也就是说有 12 项设置**只有 Emby 插件页能改**，在 hub 界面（也就是 fnOS 里那个主界面）根本看不到：
+
+`VerifyPlayUrl`、`VerifyMaxEpisodes`、`DetailBatchSize`、`ResolveIndirectUrl`、
+`WriteNfo`、`DownloadPoster`、`PosterMaxMb`、`IncrementalSync`、`IncrementalHours`、
+`StreamMode`、`RedirectHosts`、`MaxDeletePerRun`
+
+其中 `StreamMode`（播放流模式）和 `MaxDeletePerRun`（单次删除上限）都算安全相关，藏起来不合适。
+
+三处一起补：
+
+1. **hub 界面**：「配置」页新增两组 —— 「输出与探测」（写 nfo / 下海报 / 海报上限 / 可播性探测 / 探测分集数 / 详情批处理 / 二次跳转解析 / 流模式下拉 / 302 域名白名单）和「同步策略」（增量同步 / 增量窗口 / 单次删除上限），控件从 19 → **32**
+2. **`/api/save` 白名单**：21 → 33 项，另外把数字型 key 的判断改成列表（漏一个就会被当字符串发出去）
+3. **插件 DTO**：`UpdateConfig` 与 `ConfigResult` 各补 12 个属性 + Post 里加 `Math.Clamp` 校验 + Get 回填 —— 之前就算 hub 传过来，插件侧也会静默丢弃
+
+实测（改 → 存 → 回读 → 落盘 → 还原）：
+
+```
+POST /api/save {StreamMode:redirect, WriteNfo:false, PosterMaxMb:6, MaxDeletePerRun:100}
+→ {"ok":true,"msg":"插件已保存 4 项","pluginSaved":true}
+hub 回读 → redirect / false / 6 / 100（source=plugin）
+插件 XML → StreamMode=redirect WriteNfo=false PosterMaxMb=6 MaxDeletePerRun=100
+还原后   → proxy / true / 4 / 300
+浏览器   → 「配置」页 32 个控件，12 个新项全部按当前值回填，分组为「输出与探测」「同步策略」
+```
+
 ## v0.5.0 — 新增「使用说明」页 + 首次使用向导
 
 之前新用户装完只有一个空的「概览」，不知道下一步该干什么。这版补上引导。

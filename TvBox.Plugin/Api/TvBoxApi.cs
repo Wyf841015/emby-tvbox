@@ -133,6 +133,19 @@ namespace TvBox.Plugin.Api
         // ── 定时 ──
         public bool? EnableScheduledSync { get; set; }
         public int? SyncIntervalHours { get; set; }
+        // ── 输出内容 / 探测 / 播放策略（以前只在插件页能改，hub 界面传了也会被丢掉）──
+        public bool? WriteNfo { get; set; }
+        public bool? DownloadPoster { get; set; }
+        public int? PosterMaxMb { get; set; }
+        public bool? VerifyPlayUrl { get; set; }
+        public int? VerifyMaxEpisodes { get; set; }
+        public int? DetailBatchSize { get; set; }
+        public bool? ResolveIndirectUrl { get; set; }
+        public string StreamMode { get; set; }
+        public string RedirectHosts { get; set; }
+        public bool? IncrementalSync { get; set; }
+        public int? IncrementalHours { get; set; }
+        public int? MaxDeletePerRun { get; set; }
     }
 
     /// <summary>
@@ -169,6 +182,18 @@ namespace TvBox.Plugin.Api
         public bool ExcludeCloudDrive { get; set; }
         public bool EnableScheduledSync { get; set; }
         public int SyncIntervalHours { get; set; }
+        // 下面这些以前没回给 hub，导致 hub 界面显示不出来、也存不进去
+        public bool WriteNfo { get; set; }
+        public bool DownloadPoster { get; set; }
+        public int PosterMaxMb { get; set; }
+        public int VerifyMaxEpisodes { get; set; }
+        public int DetailBatchSize { get; set; }
+        public bool ResolveIndirectUrl { get; set; }
+        public string StreamMode { get; set; }
+        public string RedirectHosts { get; set; }
+        public bool IncrementalSync { get; set; }
+        public int IncrementalHours { get; set; }
+        public int MaxDeletePerRun { get; set; }
         /// <summary>配置文件绝对路径，界面上显示便于排查。</summary>
         public string ConfigFilePath { get; set; }
         /// <summary>只读字段（由安装器/运行环境决定）。</summary>
@@ -661,6 +686,17 @@ namespace TvBox.Plugin.Api
                 VerifyPlayUrl = cfg.VerifyPlayUrl,
                 EnableScheduledSync = cfg.EnableScheduledSync,
                 SyncIntervalHours = cfg.SyncIntervalHours,
+                WriteNfo = cfg.WriteNfo,
+                DownloadPoster = cfg.DownloadPoster,
+                PosterMaxMb = cfg.PosterMaxMb,
+                VerifyMaxEpisodes = cfg.VerifyMaxEpisodes,
+                DetailBatchSize = cfg.DetailBatchSize,
+                ResolveIndirectUrl = cfg.ResolveIndirectUrl,
+                StreamMode = cfg.StreamMode,
+                RedirectHosts = cfg.RedirectHosts,
+                IncrementalSync = cfg.IncrementalSync,
+                IncrementalHours = cfg.IncrementalHours,
+                MaxDeletePerRun = cfg.MaxDeletePerRun,
                 ConfigFilePath = p.ConfigurationFilePath,
                 ReadOnly = new[] { "ConfigFilePath" },
             };
@@ -695,6 +731,23 @@ namespace TvBox.Plugin.Api
             if (req.CleanupOrphans.HasValue) { cfg.CleanupOrphans = req.CleanupOrphans.Value; changed++; }
             if (req.EnableScheduledSync.HasValue) { cfg.EnableScheduledSync = req.EnableScheduledSync.Value; changed++; }
             if (req.SyncIntervalHours.HasValue) { cfg.SyncIntervalHours = Math.Clamp(req.SyncIntervalHours.Value, 1, 168); changed++; }
+            // 输出内容 / 探测 / 播放策略
+            if (req.WriteNfo.HasValue) { cfg.WriteNfo = req.WriteNfo.Value; changed++; }
+            if (req.DownloadPoster.HasValue) { cfg.DownloadPoster = req.DownloadPoster.Value; changed++; }
+            if (req.PosterMaxMb.HasValue) { cfg.PosterMaxMb = Math.Clamp(req.PosterMaxMb.Value, 1, 50); changed++; }
+            if (req.VerifyPlayUrl.HasValue) { cfg.VerifyPlayUrl = req.VerifyPlayUrl.Value; changed++; }
+            if (req.VerifyMaxEpisodes.HasValue) { cfg.VerifyMaxEpisodes = Math.Clamp(req.VerifyMaxEpisodes.Value, 1, 1000); changed++; }
+            if (req.DetailBatchSize.HasValue) { cfg.DetailBatchSize = Math.Clamp(req.DetailBatchSize.Value, 1, 200); changed++; }
+            if (req.ResolveIndirectUrl.HasValue) { cfg.ResolveIndirectUrl = req.ResolveIndirectUrl.Value; changed++; }
+            if (!string.IsNullOrWhiteSpace(req.StreamMode))
+            {
+                var sm = req.StreamMode.Trim().ToLowerInvariant();
+                if (sm == "proxy" || sm == "redirect" || sm == "auto") { cfg.StreamMode = sm; changed++; }
+            }
+            if (req.RedirectHosts != null) { cfg.RedirectHosts = req.RedirectHosts.Trim(); changed++; }
+            if (req.IncrementalSync.HasValue) { cfg.IncrementalSync = req.IncrementalSync.Value; changed++; }
+            if (req.IncrementalHours.HasValue) { cfg.IncrementalHours = Math.Clamp(req.IncrementalHours.Value, 0, 720); changed++; }
+            if (req.MaxDeletePerRun.HasValue) { cfg.MaxDeletePerRun = Math.Clamp(req.MaxDeletePerRun.Value, 0, 100000); changed++; }
 
             try
             {

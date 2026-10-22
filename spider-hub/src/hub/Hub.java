@@ -2250,7 +2250,11 @@ public class Hub {
             "MaxPagesPerCategory", "MaxItemsPerRun", "Concurrency", "TimeoutSeconds",
             "RequestDelayMs", "ExcludeCloudDrive", "OutputRoot", "EmbyBaseUrl",
             "Referer", "UserAgent", "UseProxy", "AllowPrivateHosts", "CleanupOrphans",
-            "EnableScheduledSync", "SyncIntervalHours", "SpiderHubUrl", "ConfigFilePath"
+            "EnableScheduledSync", "SyncIntervalHours", "SpiderHubUrl", "ConfigFilePath",
+            // 下面 12 项以前漏在白名单外：Emby 插件页能改，hub 界面改了会被静默忽略
+            "VerifyPlayUrl", "VerifyMaxEpisodes", "DetailBatchSize", "ResolveIndirectUrl",
+            "WriteNfo", "DownloadPoster", "PosterMaxMb", "IncrementalSync", "IncrementalHours",
+            "StreamMode", "RedirectHosts", "MaxDeletePerRun"
     };
 
     /** 读插件配置。插件不可达/未安装 → 返回 null。 */

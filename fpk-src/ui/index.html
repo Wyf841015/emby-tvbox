@@ -491,7 +491,7 @@
       <div class="brand-text">
         <div class="brand-line">
           <h1>TvBox For Emby</h1>
-          <span class="ver">v0.5.0</span>
+          <span class="ver">v0.5.1</span>
         </div>
         <div class="sub">点播源 → Emby</div>
       </div>
@@ -789,6 +789,28 @@
         <label class="chk"><input type="checkbox" id="pcCleanup"> 同步后清理孤儿文件</label>
         <label class="chk"><input type="checkbox" id="pcSched"> 启用定时同步</label>
       </div>
+
+      <h2 style="margin-top:22px">输出与探测</h2>
+      <div class="chk"><label><input type="checkbox" id="pcWriteNfo"> 为条目写 .nfo 元数据</label></div>
+      <div class="chk"><label><input type="checkbox" id="pcDownloadPoster"> 下载海报</label></div>
+      <div class="f"><label>海报大小上限(MB)</label><input type="number" id="pcPosterMaxMb" min="1" max="50"></div>
+      <div class="chk"><label><input type="checkbox" id="pcVerifyPlay"> 同步前探测播放地址是否可用</label></div>
+      <div class="f"><label>每部最多探测分集</label><input type="number" id="pcVerifyMaxEp" min="1"></div>
+      <div class="f"><label>详情批处理条数</label><input type="number" id="pcDetailBatch" min="1"></div>
+      <div class="chk"><label><input type="checkbox" id="pcResolveIndirect"> 解析播放页二次跳转</label></div>
+      <div class="f"><label>播放流模式</label>
+        <select id="pcStreamMode">
+          <option value="proxy">proxy — 全部经 NAS 中转（能补 Referer/UA、能重写 HLS 分片）</option>
+          <option value="redirect">redirect — 直接 302 到源站（省带宽，防盗链会失败）</option>
+          <option value="auto">auto — 按「允许 302 的域名」决定，m3u8 仍走代理</option>
+        </select>
+      </div>
+      <div class="f"><label>允许 302 的域名</label><input type="text" id="pcRedirectHosts" placeholder="cdn.example.com, *.foo.com（仅 auto 模式生效）"></div>
+
+      <h2 style="margin-top:22px">同步策略</h2>
+      <div class="chk"><label><input type="checkbox" id="pcIncremental"> 增量同步（N 小时内没更新的站点跳过）</label></div>
+      <div class="f"><label>增量窗口(小时)</label><input type="number" id="pcIncrementalHours" min="0"></div>
+      <div class="f"><label>单次最多删除条目</label><input type="number" id="pcMaxDelete" min="0"></div>
       <div class="row">
         <button class="primary" onclick="pcSave()" id="btnPcSave">保存配置</button>
         <button onclick="pcLoad()">重新读取</button>
@@ -2155,6 +2177,9 @@ function probeAll() {
 
 // ══════════ 插件配置镜像（配置页 = 插件 TvBox.xml，同一份数据）══════════
 var PC_FIELDS = {
+  PosterMaxMb: 'pcPosterMaxMb', VerifyMaxEpisodes: 'pcVerifyMaxEp', DetailBatchSize: 'pcDetailBatch',
+  StreamMode: 'pcStreamMode', RedirectHosts: 'pcRedirectHosts',
+  IncrementalHours: 'pcIncrementalHours', MaxDeletePerRun: 'pcMaxDelete',
   ConfigUrl: 'pcConfigUrl', SiteNameFilter: 'pcNameFilter',
   SiteWhitelist: 'pcWhitelist', SiteBlacklist: 'pcBlacklist',
   MaxPagesPerCategory: 'pcPages', MaxItemsPerRun: 'pcMaxItems',
@@ -2163,6 +2188,8 @@ var PC_FIELDS = {
   Referer: 'pcReferer', UserAgent: 'pcUA', SyncIntervalHours: 'pcInterval'
 };
 var PC_CHECKS = {
+  WriteNfo: 'pcWriteNfo', DownloadPoster: 'pcDownloadPoster', VerifyPlayUrl: 'pcVerifyPlay',
+  ResolveIndirectUrl: 'pcResolveIndirect', IncrementalSync: 'pcIncremental',
   ExcludeCloudDrive: 'pcExcludeNd', UseProxy: 'pcUseProxy',
   AllowPrivateHosts: 'pcAllowPrivate', CleanupOrphans: 'pcCleanup',
   EnableScheduledSync: 'pcSched'
@@ -2238,8 +2265,9 @@ function pcSave() {
     var el = document.getElementById(PC_FIELDS[k]);
     if (!el) return;
     var v = el.value.trim();
-    if (k === 'MaxPagesPerCategory' || k === 'MaxItemsPerRun' || k === 'Concurrency' ||
-        k === 'TimeoutSeconds' || k === 'RequestDelayMs' || k === 'SyncIntervalHours') {
+    if (['MaxPagesPerCategory','MaxItemsPerRun','Concurrency','TimeoutSeconds','RequestDelayMs',
+        'SyncIntervalHours','PosterMaxMb','VerifyMaxEpisodes','DetailBatchSize',
+        'IncrementalHours','MaxDeletePerRun'].indexOf(k) >= 0) {
       if (v !== '') body[k] = parseInt(v, 10);
     } else if (v !== '') {
       body[k] = v;
