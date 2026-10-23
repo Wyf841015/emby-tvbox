@@ -569,8 +569,10 @@ namespace TvBox.Plugin.Core
                              + " 海报=" + (cfg.DownloadPoster ? "开" : "关"));
                     }
                     // ── 播放链路初始化（直链缓存 + 签名）──
+                    // 不要在这里 Clear：每轮同步都清空的话，上一轮预热好的直链全废了
+                    // （实测第二轮同步 0 集需要校验 → 缓存空着，重播又得打源站）。
+                    // 条目自带 TTL，过期自然失效；密钥轮换也不影响缓存里的直链。
                     Core.PlayLinkCache.TtlMinutes = Math.Max(0, cfg.PlayCacheMinutes);
-                    Core.PlayLinkCache.Clear();
                     var signSecret = (cfg.StreamSign ?? string.Empty).Trim();
                     if (signSecret.Length == 0)
                     {
