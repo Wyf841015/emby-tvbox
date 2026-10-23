@@ -128,6 +128,15 @@ namespace TvBox.Plugin
         public int DirectProbeSeconds { get; set; } = 6;
 
         /// <summary>
+        /// 跨站换源：某个条目在它自己的站点里整条都解不出来时，
+        /// 自动去其它站点搜同名影片，用能播的那个站写一份（TVBox 的「换源」）。
+        /// </summary>
+        public bool CrossSiteFallback { get; set; } = true;
+
+        /// <summary>跨站换源每次最多试几个候选站点</summary>
+        public int CrossSiteMaxCandidates { get; set; } = 3;
+
+        /// <summary>
         /// 允许代理到内网/本机地址。默认关闭（防 SSRF）。
         /// 自建 CMS 源在内网时打开，否则播放会被「blocked host」拒掉。
         /// </summary>

@@ -168,6 +168,8 @@ namespace TvBox.Plugin.Api
         public int? DirectRefreshHours { get; set; }
         public bool? DirectProbe { get; set; }
         public int? DirectProbeSeconds { get; set; }
+        public bool? CrossSiteFallback { get; set; }
+        public int? CrossSiteMaxCandidates { get; set; }
 
     }
 
@@ -242,6 +244,8 @@ namespace TvBox.Plugin.Api
         public int DirectRefreshHours { get; set; }
         public bool DirectProbe { get; set; }
         public int DirectProbeSeconds { get; set; }
+        public bool CrossSiteFallback { get; set; }
+        public int CrossSiteMaxCandidates { get; set; }
 
     }
 
@@ -802,6 +806,8 @@ namespace TvBox.Plugin.Api
                 StreamBaseUrl = cfg.StreamBaseUrl,
                 DirectRefreshHours = cfg.DirectRefreshHours,
                 DirectProbe = cfg.DirectProbe,
+                CrossSiteFallback = cfg.CrossSiteFallback,
+                CrossSiteMaxCandidates = cfg.CrossSiteMaxCandidates,
                 DirectProbeSeconds = cfg.DirectProbeSeconds,
                 ConfigFilePath = p.ConfigurationFilePath,
                 ReadOnly = new[] { "ConfigFilePath" },
@@ -875,6 +881,8 @@ namespace TvBox.Plugin.Api
             if (req.DirectRefreshHours.HasValue) { cfg.DirectRefreshHours = Math.Clamp(req.DirectRefreshHours.Value, 1, 240); changed++; }
             if (req.DirectProbe.HasValue) { cfg.DirectProbe = req.DirectProbe.Value; changed++; }
             if (req.DirectProbeSeconds.HasValue) { cfg.DirectProbeSeconds = Math.Clamp(req.DirectProbeSeconds.Value, 2, 30); changed++; }
+            if (req.CrossSiteFallback.HasValue) { cfg.CrossSiteFallback = req.CrossSiteFallback.Value; changed++; }
+            if (req.CrossSiteMaxCandidates.HasValue) { cfg.CrossSiteMaxCandidates = Math.Clamp(req.CrossSiteMaxCandidates.Value, 1, 10); changed++; }
 
             try
             {

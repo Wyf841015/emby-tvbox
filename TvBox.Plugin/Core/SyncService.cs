@@ -55,6 +55,8 @@ namespace TvBox.Plugin.Core
 
         /// <summary>Emby 的局域网访问地址：私有分集 id 改写成 /TvBox/Play 时用。</summary>
         private string _embyBase = string.Empty;
+        /// <summary>本轮输出根目录（换源写文件时要用，而它在被调函数里拿不到参数）。</summary>
+        private string _outputRoot = string.Empty;
         /// <summary>strm 播放地址策略：proxy / direct / direct_fallback（direct* = 写源站直链，外网可播）。</summary>
         private string _playMode = "proxy";
         /// <summary>本轮增量状态（RunAsync 里创建）。</summary>
@@ -192,6 +194,7 @@ namespace TvBox.Plugin.Core
 
             line = new VodLine { Name = line.Name, Episodes = live };
 
+            _outputRoot = outputRoot;
             var writer = new StrmWriter(outputRoot, m => _log("[push] " + m));
             writer.WriteNfo = cfg.WriteNfo;
             writer.DownloadPoster = cfg.DownloadPoster;
@@ -738,6 +741,7 @@ namespace TvBox.Plugin.Core
 
                     Update(p => { p.SiteTotal = sites.Count; p.Stage = "同步站点"; });
 
+                    _outputRoot = outputRoot;
                     var writer = new StrmWriter(outputRoot, m => _log("[strm] " + m));
                     writer.WriteNfo = cfg.WriteNfo;
                     writer.DownloadPoster = cfg.DownloadPoster;
@@ -1141,6 +1145,18 @@ namespace TvBox.Plugin.Core
                                 }
                                 if (live.Count == 0)
                                 {
+                                    // 整条都解不出：先试换源（同片在别的站可能好好的）
+                                    int altN = await TryCrossSiteWriteAsync(cfg, item.Name ?? detail.Name,
+                                        string.IsNullOrWhiteSpace(detail.Year) ? item.Year : detail.Year,
+                                        site.Key, ct).ConfigureAwait(false);
+                                    if (altN > 0)
+                                    {
+                                        summary.Items++;
+                                        summary.Episodes += altN;
+                                        written++;
+                                        Update(p => { p.ItemsWritten++; p.EpisodesWritten += altN; });
+                                        continue;
+                                    }
                                     summary.Skipped++; Update(p => p.ItemsSkipped++);
                                     _log("     [" + (item.Name ?? item.Id) + "] 跳过：" + line.Episodes.Count + " 集全部不可用" + FormatReasons(reasons));
                                     if (cfg.RequestDelayMs > 0) await Task.Delay(cfg.RequestDelayMs, ct).ConfigureAwait(false);
@@ -1168,6 +1184,17 @@ namespace TvBox.Plugin.Core
                                 var (pok, why) = await client.VerifyPlayableAsync(epUrl, site?.Referer, ct).ConfigureAwait(false);
                                 if (!pok)
                                 {
+                                    int altM = await TryCrossSiteWriteAsync(cfg, item.Name ?? detail.Name,
+                                        string.IsNullOrWhiteSpace(detail.Year) ? item.Year : detail.Year,
+                                        site.Key, ct).ConfigureAwait(false);
+                                    if (altM > 0)
+                                    {
+                                        summary.Items++;
+                                        summary.Episodes += altM;
+                                        written++;
+                                        Update(p => { p.ItemsWritten++; p.EpisodesWritten += altM; });
+                                        continue;
+                                    }
                                     summary.Skipped++; Update(p => p.ItemsSkipped++);
                                     _log("     [" + (item.Name ?? item.Id) + "] 跳过：播放地址不可用（" + why + "）");
                                     if (cfg.RequestDelayMs > 0) await Task.Delay(cfg.RequestDelayMs, ct).ConfigureAwait(false);
@@ -1200,6 +1227,140 @@ namespace TvBox.Plugin.Core
             }
             _log("     没分类但直接拉到 " + seen + " 条，写入 " + written + " 条");
             return written;
+        }
+
+        /// <summary>片名归一化：去括号里的内容、去年份、只留字母数字（中文按字母算），统一小写。</summary>
+        private static string NormalizeTitle(string s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return string.Empty;
+            var t = System.Text.RegularExpressions.Regex.Replace(s, @"[\(（\[【].*?[\)）\]】]", " ");
+            t = System.Text.RegularExpressions.Regex.Replace(t, @"(19|20)\d{2}", " ");
+            var sb = new System.Text.StringBuilder(t.Length);
+            foreach (var ch in t)
+                if (char.IsLetterOrDigit(ch)) sb.Append(char.ToLowerInvariant(ch));
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// 跨站换源：这个条目在自己站点里整条解不出（或全部分集不可播）时，
+        /// 去其它站点搜同名影片，用能播的那个站写一份 —— 就是 TVBox 里「换源」那件事。
+        ///
+        /// 为什么要它：单个站点失效（spider 改版、解析 key 过期、整站换域名）是常态，
+        /// 而同一部片子在 152 个站里的重合度极高，换一个站九成还能看。
+        /// 返回写入的分集数（电影成功写 1）；没换成返回 0。
+        /// </summary>
+        private async Task<int> TryCrossSiteWriteAsync(PluginConfiguration cfg, string name, string year,
+            string excludeKey, CancellationToken ct)
+        {
+            if (!cfg.CrossSiteFallback || string.IsNullOrWhiteSpace(name)) return 0;
+            var hub = (cfg.SpiderHubUrl ?? string.Empty).Trim().TrimEnd('/');
+            if (hub.Length == 0) return 0;
+            var kw = NormalizeTitle(name);
+            if (kw.Length < 2) return 0;
+
+            string body;
+            try
+            {
+                using var searchHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+                body = await searchHttp.GetStringAsync(hub + "/api/search-all?wd=" + Uri.EscapeDataString(kw), ct)
+                                        .ConfigureAwait(false);
+            }
+            catch (Exception ex) { _log("     [换源] 搜索失败: " + ShortErr(ex)); return 0; }
+
+            // 选候选：片名归一化后一致优先，其次包含；年份能对上再加分
+            var cands = new List<(string key, string siteName, string id, string name, int score)>();
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(body);
+                if (!doc.RootElement.TryGetProperty("items", out var items)
+                    || items.ValueKind != System.Text.Json.JsonValueKind.Array) return 0;
+                var wantYear = (year ?? string.Empty).Trim();
+                foreach (var it in items.EnumerateArray())
+                {
+                    var key = it.TryGetProperty("site", out var sEl) ? (sEl.GetString() ?? "") : "";
+                    var id = it.TryGetProperty("id", out var iEl) ? (iEl.GetString() ?? "") : "";
+                    var nm = it.TryGetProperty("name", out var nEl) ? (nEl.GetString() ?? "") : "";
+                    var yr = it.TryGetProperty("year", out var yEl) ? (yEl.GetString() ?? "") : "";
+                    var siteName = it.TryGetProperty("siteName", out var snEl) ? (snEl.GetString() ?? "") : "";
+                    if (key.Length == 0 || id.Length == 0) continue;
+                    if (string.Equals(key, excludeKey, StringComparison.OrdinalIgnoreCase)) continue;
+                    var nn = NormalizeTitle(nm);
+                    if (nn.Length == 0) continue;
+                    int score = nn == kw ? 3 : (nn.Contains(kw) || kw.Contains(nn) ? 2 : 0);
+                    if (score == 0) continue;
+                    if (wantYear.Length > 0 && yr.Length > 0) score += (wantYear == yr) ? 1 : -1;
+                    cands.Add((key, string.IsNullOrWhiteSpace(siteName) ? key : siteName, id, nm, score));
+                }
+            }
+            catch (Exception ex) { _log("     [换源] 解析搜索结果失败: " + ShortErr(ex)); return 0; }
+
+            if (cands.Count == 0) return 0;
+            var limit = Math.Max(1, cfg.CrossSiteMaxCandidates);
+            foreach (var cand in cands.OrderByDescending(c => c.score).ThenBy(c => c.key == excludeKey).Take(limit))
+            {
+                try
+                {
+                    ThrowIfStopped(ct);
+                    using var altHttp = CreateClient(cfg);
+                    var altClient = new CmsClient(altHttp, m => _log("       [换源] " + m), cfg.Referer);
+                    var altSite = new TvBoxSite
+                    {
+                        Key = cand.key,
+                        Name = cand.siteName,
+                        Api = hub + "/v/" + Uri.EscapeDataString(cand.key) + "/api.php/provide/vod/",
+                    };
+                    var dets = await altClient.GetDetailAsync(altSite, new[] { cand.id }, ct).ConfigureAwait(false);
+                    var det = dets != null && dets.Count > 0 ? dets[0] : null;
+                    if (det == null) continue;
+                    var altLine = PlayUrlParser.PickBestLine(det);
+                    if (altLine?.Episodes == null || altLine.Episodes.Count == 0) continue;
+                    altLine = ResolvePrivateIds(altLine, altSite, cfg, det.Id);
+                    var liveAlt = cfg.VerifyPlayUrl
+                        ? await FilterPlayableEpisodesAsync(altClient, altLine.Episodes, altSite, cfg, ct,
+                              _ => { }, _ => { }).ConfigureAwait(false)
+                        : altLine.Episodes;
+                    if (liveAlt.Count == 0) continue;
+                    altLine = new VodLine { Name = altLine.Name, Episodes = liveAlt };
+
+                    var writer2 = new StrmWriter(_outputRoot, m => _log("       [换源] " + m));
+                    writer2.WriteNfo = cfg.WriteNfo;
+                    writer2.DownloadPoster = cfg.DownloadPoster;
+                    writer2.PosterMaxBytes = Math.Max(0, cfg.PosterMaxMb) * 1024 * 1024;
+                    writer2.MaxDeletePerRun = 0;                     // 换源写文件绝不做清理
+                    writer2.NameTemplate = cfg.NameTemplate;
+                    writer2.RenameRules = ParseLineList(cfg.RenameRules);
+                    writer2.SkipKeywords = SplitCsv(cfg.SkipKeywords);
+                    writer2.DownloadSubtitle = cfg.DownloadSubtitle;
+                    AttachTmdb(writer2, cfg);
+                    if (_playMode != "proxy") writer2.UrlRewriter = u => u;
+                    else if (cfg.UseProxy && !string.IsNullOrWhiteSpace(_embyBase))
+                    {
+                        var bu = _embyBase;
+                        writer2.UrlRewriter = u => u != null && u.Contains("/TvBox/Play?", StringComparison.Ordinal)
+                            ? u : bu + TvBox.Plugin.Api.TvBoxApi.BuildProxyPath(u, cfg.Referer);
+                    }
+
+                    int added = 0;
+                    if (liveAlt.Count > 1)
+                    {
+                        var outs = writer2.WriteSeries(cand.siteName, det, altLine);
+                        added = outs.Count(o => o.Created || o.Updated);
+                    }
+                    else
+                    {
+                        var o = writer2.WriteMovie(cand.siteName, det, altLine);
+                        if (o.Created || o.Updated) added = 1;
+                    }
+                    if (added > 0)
+                    {
+                        _log("     [换源] " + (name ?? det.Name) + " → 换到「" + cand.siteName + "」写入 " + added + " 集");
+                        return added;
+                    }
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                catch (Exception ex) { _log("     [换源] " + cand.siteName + " 失败: " + ShortErr(ex)); }
+            }
+            return 0;
         }
 
         public static IEnumerable<TvBoxSite> SelectSites(IEnumerable<TvBoxSite> all, PluginConfiguration cfg)

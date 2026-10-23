@@ -1451,6 +1451,10 @@ public class Hub {
                         Map<String, Object> row = new LinkedHashMap<>();
                         row.put("site", k);
                         try {
+                            SpiderPool.Site ss = pool.site(k);
+                            if (ss != null) row.put("siteName", ss.name != null ? ss.name : ss.key);
+                        } catch (Exception ignore) { }
+                        try {
                             String raw = call(k, () -> pool.get(k).searchContent(kw, false), 30);
                             Object parsed = tryParse(raw);
                             int n = 0;
@@ -1462,6 +1466,10 @@ public class Hub {
                                         Map<?, ?> it = (Map<?, ?>) o;
                                         Map<String, Object> one = new LinkedHashMap<>();
                                         one.put("site", k);
+                                        try {
+                                            SpiderPool.Site ss0 = pool.site(k);
+                                            if (ss0 != null && ss0.name != null) one.put("siteName", ss0.name);
+                                        } catch (Exception ignore) { }
                                         one.put("id", str0(it.get("vod_id")));
                                         one.put("name", str0(it.get("vod_name")));
                                         one.put("year", str0(it.get("vod_year")));

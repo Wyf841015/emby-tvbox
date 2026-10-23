@@ -568,7 +568,7 @@
         <div class="brand-text">
           <div class="brand-line">
             <h1>TvBox For Emby</h1>
-            <span class="ver">v0.3.4</span>
+            <span class="ver">v0.3.5</span>
           </div>
           <div class="sub"><span id="paneTitle">概览</span></div>
         </div>
@@ -917,6 +917,8 @@
       <div class="f"><label>TMDB 语言</label><input type="text" id="pcTmdbLang" placeholder="zh-CN"></div>
       <div class="chk"><label><input type="checkbox" id="pcTimeCursor"> 按条目更新时间增量（源更新时间变了就重拉详情）</label></div>
       <div class="chk"><label><input type="checkbox" id="pcDeleteSync"> Emby 里删片时同步删掉 strm</label></div>
+      <div class="chk"><label><input type="checkbox" id="pcCrossSite"> 跨站换源：本条在自己站点整条解不出时，自动去其它站搜同名影片顶上</label></div>
+      <div class="f"><label>换源最多试几个候选站</label><input type="number" id="pcCrossMax" min="1" max="10" placeholder="3"></div>
       <div class="f"><label>站点失败熔断(次，0=关闭)</label><input type="number" id="pcFailThreshold" min="0"></div>
       <div class="f"><label>多条同步计划（每行 HH:mm|站点key|full）</label><textarea id="pcSyncPlans" rows="3" placeholder="03:00||full&#10;15:30|金牌影视|"></textarea></div>
       <div class="row">
@@ -2357,7 +2359,8 @@ var PC_FIELDS = {
   StrmPlayMode: 'pcStrmMode', StreamBaseUrl: 'pcStreamBase', DirectRefreshHours: 'pcDirectRefresh',
   NameTemplate: 'pcNameTpl', RenameRules: 'pcRenameRules', SkipKeywords: 'pcSkipKeywords',
   TmdbApiKey: 'pcTmdbKey', TmdbLanguage: 'pcTmdbLang',
-  SiteFailThreshold: 'pcFailThreshold', SyncPlans: 'pcSyncPlans'
+  SiteFailThreshold: 'pcFailThreshold', SyncPlans: 'pcSyncPlans',
+  CrossSiteMaxCandidates: 'pcCrossMax'
 };
 var PC_CHECKS = {
   WriteNfo: 'pcWriteNfo', DownloadPoster: 'pcDownloadPoster', VerifyPlayUrl: 'pcVerifyPlay',
@@ -2366,7 +2369,8 @@ var PC_CHECKS = {
   AllowPrivateHosts: 'pcAllowPrivate', CleanupOrphans: 'pcCleanup',
   EnableScheduledSync: 'pcSched',
   StreamSignRequired: 'pcSignRequired', DownloadSubtitle: 'pcDownloadSub',
-  UseItemTimeCursor: 'pcTimeCursor', EmbyDeleteSync: 'pcDeleteSync'
+  UseItemTimeCursor: 'pcTimeCursor', EmbyDeleteSync: 'pcDeleteSync',
+  CrossSiteFallback: 'pcCrossSite'
 };
 
 // ── 解析能力（hub 侧设置，不写进插件 TvBox.xml）──
