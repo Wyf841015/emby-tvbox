@@ -1,5 +1,51 @@
 # emby-tvbox
 
+## v0.5.8 — 同步页新增「删除历史数据」：一键删掉所有同步生成的文件
+
+### 界面
+
+「同步」页多一张「删除历史数据」卡片：
+
+- **先看看要删什么** → 只统计不删，显示目录、文件数、总大小、按扩展名分布
+- **🗑 一键删除全部同步文件** → 先统计再弹确认框，要求输入 `DELETE` 才执行（小写 `delete` 也不认）
+- 删完显示「已删除 N 个，清掉 M 个空目录（X ms）」，并自动刷新预览与同步状态
+
+### 后端
+
+新增两个接口：
+
+| 接口 | 说明 |
+|---|---|
+| `GET /api/sync/purge-preview` | 只读统计：root / files / bytes / dirs / byExt / movies / tv / blocked |
+| `POST /api/sync/purge` | 执行删除，body `{"confirm":"DELETE"}`，已加入 `DESTRUCTIVE_APIS`（必须有令牌或同源证明） |
+
+**删除边界写死**（这个操作不可逆，宁可少删）：
+
+- 目录取插件配置的 `OutputRoot`（不可达时退回本地镜像）
+- 只进入 `<root>/movies` 和 `<root>/tv` 两个子树，别的目录一律不进
+- 只删这些扩展名：`.strm .nfo .srt .ass .vtt .jpg .jpeg .png .webp .tbn`
+- **不跟随符号链接**，符号链接文件本身也不删
+- 根路径 `getNameCount() < 2` 直接拒绝；没有 `movies/` 也没有 `tv/` 时判定「不是同步输出目录」并拒绝
+- 删完只清理 movies/tv 子树内的空目录，两个根目录本身保留
+- 全程 `record("删除同步文件", …)` 落操作记录
+
+### 实测（沙箱，不动真实库）
+
+夹具：`movies/测试电影/{.strm,.nfo,poster.jpg}` + `movies/keep.mkv` + `movies/link.strm→符号链接` + `tv/剧集/{.strm,.srt}` + `tv/notes.txt` + 根目录 `outside.txt`
+
+```
+① 预览          5 个文件（.strm 2 / .nfo 1 / .jpg 1 / .srt 1）
+② 无令牌        拒绝：缺少令牌或请求不合法（CSRF 防护）
+③ 有令牌缺 confirm  拒绝：没有确认
+④ 有令牌 + DELETE   deleted=5, removedDirs=2
+⑤ 删后残留      keep.mkv / link.strm(符号链接) / outside.txt / notes.txt / 沙箱外 secret.strm 全部保留
+⑥ 再预览        0 个
+⑦ 非同步目录     blocked：「目录里没有 movies/ 或 tv/，看起来不是同步输出目录」
+⑧ 对它执行删除   同样拒绝
+```
+
+真实库（只读预览，**没有执行删除**）：`/vol2/1000/video/tvbox` → 777 个文件 / 1.8 MB（.strm 691 · .nfo 46 · .jpg 8 · .webp 32）
+
 ## v0.5.7 — 重启 Emby 时弹窗提示，后台检测到恢复才自动关闭
 
 以前只有 `pluginHint` 一行小字在跳秒数，容易以为界面卡住了。现在改成弹窗。

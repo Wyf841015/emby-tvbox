@@ -568,7 +568,7 @@
         <div class="brand-text">
           <div class="brand-line">
             <h1>TvBox For Emby</h1>
-            <span class="ver">v0.5.7</span>
+            <span class="ver">v0.5.8</span>
           </div>
           <div class="sub"><span id="paneTitle">概览</span></div>
         </div>
@@ -760,6 +760,20 @@
       <div class="card"><div class="k">已写分集</div><div class="v" id="kEps">–</div></div>
       <div class="card"><div class="k">错误</div><div class="v bad" id="kErrs">–</div></div>
       <div class="card"><div class="k">上次同步</div><div class="v" id="kLastSync" style="font-size:14px">–</div></div>
+    </div>
+
+    <div class="panel">
+      <h2>删除历史数据</h2>
+      <div class="hint" style="margin:0 0 10px">
+        把输出目录里<b>由同步生成</b>的文件删掉，重新同步从零开始：
+        <code>.strm</code> / <code>.nfo</code> / 字幕 / 海报图。只删这几类扩展名，别的文件一律不碰。
+        Emby 里的条目会在下次「扫描媒体库」后消失。
+      </div>
+      <div id="purgeInfo" class="hint" style="margin:0 0 10px;font-size:13px">点「先看看要删什么」可以只统计不删除。</div>
+      <div class="row">
+        <button onclick="purgePreview()">先看看要删什么</button>
+        <button class="danger" onclick="purgeOpen()">🗑 一键删除全部同步文件</button>
+      </div>
     </div>
 
     <div class="panel">
@@ -2634,6 +2648,100 @@ function waitEmbyBack(limitMs) {
   }, 1500);
 }
 
+// ══════════ 删除同步生成的文件 ══════════
+function fmtBytes2(n) {
+  n = Number(n) || 0;
+  if (n > 1073741824) return (n / 1073741824).toFixed(2) + ' GB';
+  if (n > 1048576) return (n / 1048576).toFixed(1) + ' MB';
+  if (n > 1024) return (n / 1024).toFixed(0) + ' KB';
+  return n + ' B';
+}
+
+function purgeStatsHtml(d) {
+  var ext = d.byExt || {};
+  var parts = Object.keys(ext).map(function (k) { return '.' + k + ' ' + ext[k]; });
+  return '<div class="kv">'
+    + '<div class="k">输出目录</div><div class="v"><code>' + esc(d.root || '') + '</code></div>'
+    + '<div class="k">movies/</div><div class="v">' + (d.movies ? '有' : '没有') + '</div>'
+    + '<div class="k">tv/</div><div class="v">' + (d.tv ? '有' : '没有') + '</div>'
+    + '<div class="k">待删文件</div><div class="v"><b>' + (d.files || 0) + '</b> 个，共 ' + fmtBytes2(d.bytes) + '</div>'
+    + '<div class="k">按类型</div><div class="v">' + (parts.length ? parts.join(' · ') : '—') + '</div>'
+    + '</div>';
+}
+
+function purgePreview() {
+  var box = document.getElementById('purgeInfo');
+  if (box) { box.textContent = '正在统计…'; box.style.color = ''; }
+  api('api/sync/purge-preview').then(function (d) {
+    if (!d || d.ok === false || d.blocked) {
+      var msg = (d && d.msg) || '统计失败';
+      if (box) { box.textContent = '⚠️ ' + msg; box.style.color = 'var(--warn-text)'; }
+      toast(msg, 'bad');
+      return;
+    }
+    if (box) {
+      box.innerHTML = '输出目录 <code>' + esc(d.root) + '</code> 下：<b>' + (d.files || 0) + '</b> 个同步文件，共 ' + fmtBytes2(d.bytes)
+        + (Object.keys(d.byExt || {}).length ? '（' + Object.keys(d.byExt).map(function (k) { return '.' + k + ' ' + d.byExt[k]; }).join(' · ') + '）' : '');
+      box.style.color = '';
+    }
+  }).catch(function (e) {
+    if (box) { box.textContent = '统计失败: ' + (e && e.message ? e.message : e); box.style.color = 'var(--bad-text)'; }
+  });
+}
+
+function purgeOpen() {
+  api('api/sync/purge-preview').then(function (d) {
+    if (!d || d.ok === false || d.blocked) { toast((d && d.msg) || '统计失败', 'bad'); return; }
+    if (!d.files) { toast('输出目录里没有同步生成的文件，不用删', 'ok'); return; }
+    var st = document.getElementById('purgeStats');
+    if (st) st.innerHTML = purgeStatsHtml(d);
+    var t = document.getElementById('purgeConfirmText');
+    if (t) t.value = '';
+    var res = document.getElementById('purgeResult');
+    if (res) res.textContent = '';
+    var btn = document.getElementById('btnPurgeDo');
+    if (btn) { btn.disabled = false; btn.textContent = '确认删除'; }
+    document.getElementById('purgeMask').classList.add('show');
+  }).catch(function (e) { toast('统计失败: ' + (e && e.message ? e.message : e), 'bad'); });
+}
+
+function purgeClose() {
+  document.getElementById('purgeMask').classList.remove('show');
+}
+
+function purgeConfirm() {
+  var t = document.getElementById('purgeConfirmText');
+  var val = (t && t.value || '').trim();
+  var res = document.getElementById('purgeResult');
+  if (val !== 'DELETE') {
+    if (res) { res.textContent = '请先输入 DELETE 再点确认'; res.style.color = 'var(--bad-text)'; }
+    return;
+  }
+  var btn = document.getElementById('btnPurgeDo');
+  if (btn) { btn.disabled = true; btn.textContent = '删除中…'; }
+  api('api/sync/purge', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm: 'DELETE' })
+  }).then(function (d) {
+    if (d && d.ok) {
+      if (res) { res.textContent = '✅ ' + (d.msg || '已删除') + '（' + (d.ms || 0) + ' ms）'; res.style.color = 'var(--ok-text)'; }
+      toast(d.msg || '已删除', 'ok');
+      setTimeout(function () {
+        purgeClose();
+        purgePreview();
+        try { refreshSyncStatus(); } catch (e) { }
+        try { embyStatus(); } catch (e) { }
+      }, 1200);
+    } else {
+      if (res) { res.textContent = '❌ ' + ((d && d.msg) || '删除失败'); res.style.color = 'var(--bad-text)'; }
+      if (btn) { btn.disabled = false; btn.textContent = '确认删除'; }
+    }
+  }).catch(function (e) {
+    if (res) { res.textContent = '❌ 删除失败: ' + (e && e.message ? e.message : e); res.style.color = 'var(--bad-text)'; }
+    if (btn) { btn.disabled = false; btn.textContent = '确认删除'; }
+  });
+}
+
 function selfUpdatePlugin() {
   var btn = document.getElementById('btnSelfUpdate');
   var hint = document.getElementById('pluginHint');
@@ -3281,6 +3389,26 @@ if (document.readyState === "loading") document.addEventListener("DOMContentLoad
     </div>
   </div>
 </div>
+<!-- ══════════ 删除同步文件确认 ══════════ -->
+<div class="mask" id="purgeMask" style="z-index:1260">
+  <div class="dlg" style="width:min(520px,100%)" role="alertdialog">
+    <div class="dlg-head"><h3 style="color:var(--bad-text)">确认删除同步生成的文件</h3></div>
+    <div class="dlg-body" style="display:block">
+      <div id="purgeStats" style="font-size:13.5px;line-height:1.9"></div>
+      <div class="hint" style="margin-top:12px;color:var(--warn-text)">这个操作不可撤销。只删 .strm / .nfo / 字幕 / 海报图，其它文件不动。</div>
+      <div class="f" style="margin-top:14px">
+        <label>输入 <b>DELETE</b> 确认</label>
+        <input type="text" id="purgeConfirmText" placeholder="DELETE" autocomplete="off">
+      </div>
+      <div class="hint" id="purgeResult" style="margin-top:10px"></div>
+    </div>
+    <div class="dlg-foot">
+      <button type="button" onclick="purgeClose()">取消</button>
+      <button type="button" class="danger" id="btnPurgeDo" onclick="purgeConfirm()">确认删除</button>
+    </div>
+  </div>
+</div>
+
 <!-- ══════════ 重启 Emby 提示（后台检测到恢复后自动关闭） ══════════ -->
 <div class="mask" id="restartMask" style="z-index:1280">
   <div class="dlg" style="width:min(440px,100%)" role="alertdialog" aria-live="polite">

@@ -361,7 +361,8 @@ public class Hub {
     /** 需要令牌才能调的破坏性端点（都是界面/插件主动触发、且会改磁盘或换代码的操作）。 */
     static final java.util.Set<String> DESTRUCTIVE_APIS = java.util.Set.of(
             "/api/emby/install", "/api/emby/uninstall", "/api/emby/prepare-output",
-            "/api/emby/probe-as-emby", "/api/save", "/api/reload", "/api/cache/clear");
+            "/api/emby/probe-as-emby", "/api/save", "/api/reload", "/api/cache/clear",
+            "/api/sync/purge");
 
     /** 本地令牌：首次启动生成，注入到页面 <meta>，用于挡住「本机别的进程」和跨站 CSRF。 */
     static String localToken() {
@@ -481,6 +482,147 @@ public class Hub {
                     + " host=" + ex.getRequestHeaders().getFirst("Host"));
         }
         return allowed;
+    }
+
+    // ══════════ 删除同步生成的文件 ══════════
+    // 只删「同步产出的那几类扩展名」，且只在 movies/ 或 tv/ 子树里动手；
+    // 输出目录本身和别的文件一律不碰（这个操作不可逆，边界必须写死）。
+    static final java.util.Set<String> PURGE_EXTS = new java.util.HashSet<>(Arrays.asList(
+            "strm", "nfo", "srt", "ass", "vtt", "jpg", "jpeg", "png", "webp", "tbn"));
+
+    /** 同步输出目录：插件配置是权威，退回本地镜像。 */
+    static Path syncOutputRoot() {
+        String out = null;
+        try {
+            Map<String, Object> pc = pluginConfig();   // 插件不可达时返回 null
+            if (pc != null) out = str(pc.get("OutputRoot"));
+        } catch (Exception ignore) {
+        }
+        out = firstNonEmpty(out, str(settings.get("outputRoot")));
+        if (out == null || out.isBlank()) return null;
+        return Path.of(out.trim()).toAbsolutePath().normalize();
+    }
+
+    /** 扫一遍要删什么，stats 里放人看的统计，返回待删文件列表。 */
+    static List<Path> purgeCollect(Path root, Map<String, Object> stats) {
+        List<Path> files = new ArrayList<>();
+        Map<String, Object> byExt = new LinkedHashMap<>();
+        long[] bytes = {0};
+        int[] dirs = {0};
+        stats.put("root", root == null ? "" : root.toString());
+        if (root == null) { stats.put("blocked", true); stats.put("msg", "还没配置同步输出目录"); return files; }
+        if (!Files.isDirectory(root)) {
+            stats.put("blocked", true); stats.put("msg", "输出目录不存在：" + root); return files;
+        }
+        if (root.getNameCount() < 2) {
+            stats.put("blocked", true); stats.put("msg", "拒绝在这么靠上的目录里删文件：" + root); return files;
+        }
+        List<Path> bases = new ArrayList<>();
+        for (String sub : new String[]{"movies", "tv"}) {
+            Path p = root.resolve(sub);
+            if (Files.isDirectory(p)) bases.add(p);
+        }
+        if (bases.isEmpty()) {
+            stats.put("blocked", true);
+            stats.put("msg", "目录里没有 movies/ 或 tv/，看起来不是同步输出目录：" + root);
+            return files;
+        }
+        for (Path base : bases) {
+            try {
+                Files.walkFileTree(base, java.util.EnumSet.noneOf(java.nio.file.FileVisitOption.class),
+                        Integer.MAX_VALUE, new java.nio.file.SimpleFileVisitor<Path>() {
+                    @Override public java.nio.file.FileVisitResult visitFile(Path f, java.nio.file.attribute.BasicFileAttributes a) {
+                        try {
+                            if (Files.isSymbolicLink(f)) return java.nio.file.FileVisitResult.CONTINUE;
+                            String name = f.getFileName().toString();
+                            int dot = name.lastIndexOf('.');
+                            if (dot < 0) return java.nio.file.FileVisitResult.CONTINUE;
+                            String ext = name.substring(dot + 1).toLowerCase();
+                            if (!PURGE_EXTS.contains(ext)) return java.nio.file.FileVisitResult.CONTINUE;
+                            files.add(f);
+                            bytes[0] += a.size();
+                            long prev = byExt.containsKey(ext) ? Long.parseLong(String.valueOf(byExt.get(ext))) : 0L;
+                            byExt.put(ext, prev + 1);
+                        } catch (Exception ignore) {
+                        }
+                        return java.nio.file.FileVisitResult.CONTINUE;
+                    }
+                    @Override public java.nio.file.FileVisitResult preVisitDirectory(Path d, java.nio.file.attribute.BasicFileAttributes a) {
+                        dirs[0]++;
+                        return java.nio.file.FileVisitResult.CONTINUE;
+                    }
+                    @Override public java.nio.file.FileVisitResult visitFileFailed(Path f, java.io.IOException e) {
+                        return java.nio.file.FileVisitResult.CONTINUE;   // 读不了就跳过，不要中断整轮
+                    }
+                });
+            } catch (Exception ignore) {
+            }
+        }
+        stats.put("blocked", false);
+        stats.put("files", files.size());
+        stats.put("bytes", bytes[0]);
+        stats.put("dirs", dirs[0]);
+        stats.put("byExt", byExt);
+        stats.put("movies", Files.isDirectory(root.resolve("movies")));
+        stats.put("tv", Files.isDirectory(root.resolve("tv")));
+        return files;
+    }
+
+    static Map<String, Object> purgeExecute(Path root) {
+        Map<String, Object> stats = new LinkedHashMap<>();
+        List<Path> files = purgeCollect(root, stats);
+        if (Boolean.TRUE.equals(stats.get("blocked"))) {
+            Map<String, Object> r = fail(String.valueOf(stats.get("msg")));
+            r.put("root", stats.get("root"));
+            return r;
+        }
+        int deleted = 0, failed = 0;
+        List<String> firstErrors = new ArrayList<>();
+        for (Path f : files) {
+            try {
+                if (Files.deleteIfExists(f)) deleted++;
+            } catch (Exception e) {
+                failed++;
+                if (firstErrors.size() < 5) firstErrors.add(f + "：" + explain(e));
+            }
+        }
+        // 顺手清掉空目录（只清 movies/tv 子树里的空目录，不动两个根目录本身）
+        int removedDirs = 0;
+        for (String sub : new String[]{"movies", "tv"}) {
+            Path base = root.resolve(sub);
+            if (!Files.isDirectory(base)) continue;
+            try {
+                List<Path> dirs = new ArrayList<>();
+                Files.walkFileTree(base, new java.nio.file.SimpleFileVisitor<Path>() {
+                    @Override public java.nio.file.FileVisitResult postVisitDirectory(Path d, java.io.IOException e) {
+                        if (!d.equals(base)) dirs.add(d);
+                        return java.nio.file.FileVisitResult.CONTINUE;
+                    }
+                });
+                for (Path d : dirs) {
+                    try {
+                        try (java.util.stream.Stream<Path> left = Files.list(d)) {
+                            if (left.findAny().isPresent()) continue;
+                        }
+                        if (Files.deleteIfExists(d)) removedDirs++;
+                    } catch (Exception ignore) {
+                    }
+                }
+            } catch (Exception ignore) {
+            }
+        }
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("ok", failed == 0);
+        r.put("root", root.toString());
+        r.put("deleted", deleted);
+        r.put("failed", failed);
+        r.put("removedDirs", removedDirs);
+        r.put("bytes", stats.get("bytes"));
+        r.put("msg", "已删除 " + deleted + " 个同步生成的文件"
+                + (removedDirs > 0 ? "，清掉 " + removedDirs + " 个空目录" : "")
+                + (failed > 0 ? "；" + failed + " 个删不掉（看日志）" : ""));
+        if (!firstErrors.isEmpty()) r.put("errors", firstErrors);
+        return r;
     }
 
     static void handleApi(HttpExchange ex, String path) throws Exception {
@@ -1435,6 +1577,39 @@ public class Hub {
                         + "。容器部署时请把 TvBox.dll 手动拷进容器的 /config/plugins/，"
                         + "或让 hub 以 root 运行后重试"));
                 sendJson(ex, 200, m);
+                return;
+            }
+            case "/api/sync/purge-preview": {
+                Map<String, Object> stats = new LinkedHashMap<>();
+                try {
+                    Path root = syncOutputRoot();
+                    purgeCollect(root, stats);
+                    stats.put("ok", !Boolean.TRUE.equals(stats.get("blocked")));
+                } catch (Exception e) {
+                    sendJson(ex, 200, fail("扫描失败: " + explain(e)));
+                    return;
+                }
+                sendJson(ex, 200, stats);
+                return;
+            }
+            case "/api/sync/purge": {
+                Map<String, String> req = parseForm(readBody(ex));
+                String confirm = firstNonEmpty(req.get("confirm"), "");
+                if (!"DELETE".equalsIgnoreCase(confirm)) {
+                    sendJson(ex, 200, fail("没有确认：请在前端勾选确认后再删"));
+                    return;
+                }
+                Map<String, Object> r;
+                try {
+                    r = purgeExecute(syncOutputRoot());
+                } catch (Exception e) {
+                    sendJson(ex, 200, fail("删除失败: " + explain(e)));
+                    return;
+                }
+                record("删除同步文件", String.valueOf(r.get("root")), Boolean.TRUE.equals(r.get("ok")),
+                        String.valueOf(r.get("msg")), 0);
+                System.out.println("[purge] " + r);
+                sendJson(ex, 200, r);
                 return;
             }
             case "/api/cache/clear": {
