@@ -775,6 +775,52 @@ public class Hub {
                 sendJson(ex, 200, m);
                 return;
             }
+            case "/api/parse-apis": {   // 解析接口模板（parse=1 的源靠它换真地址）
+                if ("POST".equalsIgnoreCase(ex.getRequestMethod())) {
+                    String body = readBody(ex);
+                    Object ob = SpiderPool.Json.parse(body);
+                    String lines = ob instanceof Map ? str(((Map<?, ?>) ob).get("lines")) : body;
+                    java.nio.file.Path f = dataDir.resolve("parse-apis.txt");
+                    java.nio.file.Files.write(f, (lines == null ? "" : lines).getBytes(StandardCharsets.UTF_8));
+                    Map<String, Object> m = ok("已保存 " + parseApiTemplates().size() + " 个解析接口");
+                    m.put("lines", String.join("\n", parseApiTemplates()));
+                    sendJson(ex, 200, m);
+                } else {
+                    Map<String, Object> m = ok("");
+                    m.put("lines", String.join("\n", parseApiTemplates()));
+                    m.put("count", parseApiTemplates().size());
+                    m.put("hint", "一行一个模板，{url} 会被替换成待解析地址；例：https://api.example.com/parse?url={url}");
+                    sendJson(ex, 200, m);
+                }
+                return;
+            }
+            case "/api/vip-flags": {    // playerContent 的 vipFlags（有些 spider 靠它决定线路质量）
+                if ("POST".equalsIgnoreCase(ex.getRequestMethod())) {
+                    String body = readBody(ex);
+                    Object ob = SpiderPool.Json.parse(body);
+                    java.util.List<String> list = new ArrayList<>();
+                    if (ob instanceof Map) {
+                        Object raw = ((Map<?, ?>) ob).get("flags");
+                        if (raw instanceof List) {
+                            for (Object o : (List<?>) raw) if (str(o).trim().length() > 0) list.add(str(o).trim());
+                        } else {
+                            for (String s : str(raw).split("[,\\s]+")) if (s.trim().length() > 0) list.add(s.trim());
+                        }
+                    }
+                    if (list.isEmpty()) settings.remove("vipFlags");
+                    else settings.put("vipFlags", list);
+                    saveSettings();
+                    Map<String, Object> m = ok(list.isEmpty() ? "已恢复默认" : "已保存 " + list.size() + " 个");
+                    m.put("flags", vipFlagsList());
+                    sendJson(ex, 200, m);
+                } else {
+                    Map<String, Object> m = ok("");
+                    m.put("flags", vipFlagsList());
+                    m.put("default", VIP_FLAGS);
+                    sendJson(ex, 200, m);
+                }
+                return;
+            }
             case "/api/prefs": {   // 界面偏好（主题等）：存服务端，localStorage 不可用时也能记住
                 String body = readBody(ex);
                 if (body != null && !body.isBlank() && !"null".equals(body.trim())) {
@@ -4037,10 +4083,24 @@ public class Hub {
         return s.contains(".m3u8") || s.contains(".mp4") || s.contains(".flv") || s.contains(".mkv");
     }
 
+    /** 当前生效的 vipFlags：用户在界面上改过就用他的，否则用内置 TVBox 通用列表。 */
+    static java.util.List<String> vipFlagsList() {
+        Object v = settings.get("vipFlags");
+        if (v instanceof List) {
+            java.util.List<String> out = new ArrayList<>();
+            for (Object o : (List<?>) v) {
+                String s = str(o).trim();
+                if (!s.isEmpty()) out.add(s);
+            }
+            if (!out.isEmpty()) return out;
+        }
+        return VIP_FLAGS;
+    }
+
     /** 调 playerContent 换真地址，返回 {ok(1/0), url, 说明, parse 标记, header}。 */
     static String[] resolveEpisode(String key, String flag, String id) {
         try {
-            String raw = call(key, () -> pool.get(key).playerContent(flag, id, new ArrayList<>(VIP_FLAGS)), 45);
+            String raw = call(key, () -> pool.get(key).playerContent(flag, id, new ArrayList<>(vipFlagsList())), 45);
             if (raw == null || raw.isBlank()) return new String[]{"0", "", "playerContent 返回空", "", null};
             Object parsed = tryParse(raw);
             if (!(parsed instanceof Map)) return new String[]{"0", "", "playerContent 返回的不是 JSON: " + abbrev(raw, 80), "", null};

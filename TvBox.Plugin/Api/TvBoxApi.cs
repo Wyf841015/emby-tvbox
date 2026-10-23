@@ -1453,6 +1453,13 @@ namespace TvBox.Plugin.Api
                     }
                 }
 
+                // 命中 302 缓存就直接打最终地址（省掉一到两跳）
+                bool usedCachedRedirect = false;
+                if (RedirectCache.TryGetValue(rawUrl, out var cachedHop) && cachedHop.exp > DateTime.UtcNow.Ticks)
+                {
+                    try { request.RequestUri = new Uri(cachedHop.url); usedCachedRedirect = true; } catch { }
+                }
+
                 // 同步 Send：不需要续体线程，避免同步校验/播放时把 Emby 线程池抽干
                 var resp = http.Send(request, HttpCompletionOption.ResponseHeadersRead);
 
@@ -1474,14 +1481,24 @@ namespace TvBox.Plugin.Api
                     resp = http.Send(req2, HttpCompletionOption.ResponseHeadersRead);
                 }
 
+                // 记下最终落点：既用于缓存，也用作分片相对路径的解析基准
+                string finalUrl = resp.RequestMessage?.RequestUri?.ToString() ?? rawUrl;
+                if (!usedCachedRedirect && !string.Equals(finalUrl, rawUrl, StringComparison.Ordinal))
+                {
+                    RedirectCache[rawUrl] = (finalUrl, DateTime.UtcNow.AddMinutes(10).Ticks);
+                    if (RedirectCache.Count > 512) RedirectCache.Clear();
+                }
+
                 var contentType = resp.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
                 var isPlaylist = contentType.IndexOf("mpegurl", StringComparison.OrdinalIgnoreCase) >= 0
-                                 || rawUrl.Contains(".m3u8", StringComparison.OrdinalIgnoreCase);
+                                 || rawUrl.Contains(".m3u8", StringComparison.OrdinalIgnoreCase)
+                                 || finalUrl.Contains(".m3u8", StringComparison.OrdinalIgnoreCase);
 
                 if (isPlaylist)
                 {
                     var text = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-                    var rewritten = RewritePlaylist(text, rawUrl, referer ?? cfg?.Referer, req?.H);
+                    // 用最终地址重写：302 之后的相对分片路径要基于最终 URL 解析，否则接出 404
+                    var rewritten = RewritePlaylist(text, finalUrl, referer ?? cfg?.Referer, req?.H);
                     var bytes = Encoding.UTF8.GetBytes(rewritten);
                     resp.Dispose();
                     http.Dispose();
@@ -1532,6 +1549,17 @@ namespace TvBox.Plugin.Api
             StreamSignSecret = (secret ?? string.Empty).Trim();
             StreamSignRequiredFlag = required;
         }
+
+        /// <summary>
+        /// 302 最终地址缓存：源站地址 → 跟随跳转后的地址（TTL 10 分钟）。
+        ///
+        /// 半日99 这类源每次播放都是「cibn-edge-5g → 302 → apple-co-speed-wug」两跳，
+        /// 一集 50 个分片就是 50 次多余往返。缓存最终地址后直接打第二跳。
+        /// </summary>
+        static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string url, long exp)>
+            RedirectCache = new System.Collections.Concurrent.ConcurrentDictionary<string, (string, long)>();
+
+        public static int RedirectCacheCount => RedirectCache.Count;
 
         /// <summary>对 /TvBox/Play 的（站点|线路|分集id）签名。私有分集 id 走这个路由，也要防白嫖。</summary>
         public static string SignPlay(string site, string flag, string id)

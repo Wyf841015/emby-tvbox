@@ -568,7 +568,7 @@
         <div class="brand-text">
           <div class="brand-line">
             <h1>TvBox For Emby</h1>
-            <span class="ver">v0.3.3</span>
+            <span class="ver">v0.3.4</span>
           </div>
           <div class="sub"><span id="paneTitle">概览</span></div>
         </div>
@@ -897,6 +897,20 @@
       <div class="f"><label>重命名规则（每行 正则=&gt;替换）</label><textarea id="pcRenameRules" rows="3" placeholder="【.*?】=&gt;&#10;\[.*?\]=&gt;"></textarea></div>
       <div class="f"><label>跳过关键词（逗号分隔）</label><input type="text" id="pcSkipKeywords" placeholder="预告,花絮,抢先版"></div>
       <div class="chk"><label><input type="checkbox" id="pcDownloadSub"> 落地源站字幕（源提供时才生效）</label></div>
+
+      <h2 style="margin-top:22px">解析能力</h2>
+      <div class="f"><label>VIP 关键字（playerContent 的 vipFlags，逗号分隔）</label>
+        <input type="text" id="pcVipFlags" placeholder="youku,qq,iqiyi,qiyi,letv,sohu,mgtv,bilibili">
+      </div>
+      <div class="hint" style="margin:-4px 0 8px">有些 spider 靠这个列表判断要不要给高清/VIP 线路。留空 = 用内置 TVBox 通用列表。</div>
+      <div class="f"><label>解析接口模板（每行一个，{url} 会被替换；用于 parse=1 的源）</label>
+        <textarea id="pcParseApis" rows="3" placeholder="https://api.example.com/parse?url={url}"></textarea>
+      </div>
+      <div class="row" style="margin-bottom:10px">
+        <button onclick="saveVipFlags()">保存 VIP 关键字</button>
+        <button onclick="saveParseApis()">保存解析接口</button>
+        <span class="hint" id="pcParseMsg" style="margin:0"></span>
+      </div>
 
       <h2 style="margin-top:22px">元数据与调度</h2>
       <div class="f"><label>TMDB API Key（可选）</label><input type="text" id="pcTmdbKey" placeholder="留空 = 不做 TMDB 规范化"></div>
@@ -2355,7 +2369,36 @@ var PC_CHECKS = {
   UseItemTimeCursor: 'pcTimeCursor', EmbyDeleteSync: 'pcDeleteSync'
 };
 
+// ── 解析能力（hub 侧设置，不写进插件 TvBox.xml）──
+function loadParseCapability() {
+  api('api/vip-flags').then(function (d) {
+    var el = document.getElementById('pcVipFlags');
+    if (el && d && d.ok) el.value = (d.flags || []).join(',');
+  }).catch(function () { });
+  api('api/parse-apis').then(function (d) {
+    var el = document.getElementById('pcParseApis');
+    if (el && d && d.ok) el.value = d.lines || '';
+  }).catch(function () { });
+}
+
+function saveVipFlags() {
+  var v = (document.getElementById('pcVipFlags') || {}).value || '';
+  api('api/vip-flags', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ flags: v }) }).then(function (d) {
+    var m = document.getElementById('pcParseMsg');
+    if (m) m.textContent = d && d.ok ? ('VIP 关键字：' + (d.flags || []).length + ' 个') : ((d && d.msg) || '保存失败');
+  }).catch(function () { });
+}
+
+function saveParseApis() {
+  var v = (document.getElementById('pcParseApis') || {}).value || '';
+  api('api/parse-apis', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: v }) }).then(function (d) {
+    var m = document.getElementById('pcParseMsg');
+    if (m) m.textContent = d && d.ok ? d.msg : ((d && d.msg) || '保存失败');
+  }).catch(function () { });
+}
+
 function pcLoad() {
+  loadParseCapability();
   var badge = document.getElementById('pcSource');
   // Webhook 地址（走插件，局域网可达；用于外部触发与 Emby 删除同步）
   api('api/webhook').then(function (w) {
