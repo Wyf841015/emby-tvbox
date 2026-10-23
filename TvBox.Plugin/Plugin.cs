@@ -248,6 +248,16 @@ namespace TvBox.Plugin
                     IsMainConfigPage = true,
                     EnableInMainMenu = false,
                 },
+                // 配置页的控制器（AMD 模块）。Emby 4.10 打开插件页后会读
+                // controller.lifeCycleAbortSignal，没有控制器就抛
+                // "Cannot read properties of undefined (reading 'lifeCycleAbortSignal')"。
+                // 页面里用 data-controller="__plugin/tvboxjs" 引用它。
+                new PluginPageInfo
+                {
+                    Name = "tvboxjs",
+                    EmbeddedResourcePath = "TvBox.Plugin.Configuration.Web.config.js",
+                    EnableInMainMenu = false,
+                },
             };
         }
     }

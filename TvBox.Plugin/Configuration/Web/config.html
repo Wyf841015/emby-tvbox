@@ -1,5 +1,6 @@
 <div id="TvBoxConfigPage"
      data-tvbox-no-cache="1" data-role="page" class="page type-interior pluginConfigurationPage"
+     data-controller="__plugin/tvboxjs"
      data-require="emby-input,emby-button,emby-checkbox,emby-select">
 
     <div data-role="content">
@@ -318,7 +319,7 @@
             window.__tvboxBoot();
         })();
     </script>
-    <img src="../TvBox/Kick.png" alt="" style="display:none" onerror="(function(){if(window.__tvboxBooted)return;var s=document.createElement('script');s.src='../TvBox/ConfigBoot?_='+Date.now();document.head.appendChild(s)})()" />
-    <iframe src="../TvBox/Kick" onload="(function(){if(window.__tvboxBooted)return;var s=document.createElement('script');s.src='../TvBox/ConfigBoot?_='+Date.now();document.head.appendChild(s)})()"
+    <img src="../TvBox/Kick.png" alt="" style="display:none" onerror="(window.__tvboxBoot||function(){})()" />
+    <iframe src="../TvBox/Kick" onload="(window.__tvboxBoot||function(){})()"
             style="display:none;width:0;height:0;border:0" title="boot"></iframe>
 </div>
