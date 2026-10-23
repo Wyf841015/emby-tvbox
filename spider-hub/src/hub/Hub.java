@@ -106,7 +106,12 @@ public class Hub {
     static final java.util.Set<String> SAVE_KEYS = new java.util.HashSet<>(Arrays.asList(
             "configUrl", "embyPath", "embyBaseUrl", "outputRoot", "publicUrl", "spiderJar", "embyToken"));
 
-    static ExecutorService workers = Executors.newFixedThreadPool(24);
+    // 固定池峰值后线程永不退出（实测空闲时仍挂着 40+ 线程，每线程 512K 栈）。
+    // 换成「核心 2 + 峰值 24 + 60 秒空闲回收」的池，突发过后线程自己退掉，RSS 能回落。
+    static ExecutorService workers = new java.util.concurrent.ThreadPoolExecutor(
+            2, 24, 60L, java.util.concurrent.TimeUnit.SECONDS,
+            new java.util.concurrent.SynchronousQueue<>(),
+            new java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy());
     static UnixHttp unix;
 
     // ── 操作记录（扫描/添加/安装等），落盘到 PKGVAR/history.json ──
@@ -240,7 +245,10 @@ public class Hub {
                 HttpServer server = HttpServer.create(new InetSocketAddress(java.net.InetAddress.getLoopbackAddress(), tryPort), 0);
                 server.createContext("/", Hub::handle);
                 startTvBoxFileServer();
-                server.setExecutor(Executors.newFixedThreadPool(16));
+                server.setExecutor(new java.util.concurrent.ThreadPoolExecutor(
+                        2, 16, 60L, java.util.concurrent.TimeUnit.SECONDS,
+                        new java.util.concurrent.SynchronousQueue<>(),
+                        new java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy()));
                 server.start();
                 tcpPort = tryPort;
                 tcpOk = true;
@@ -270,6 +278,33 @@ public class Hub {
                     return proxy(method, url, body, headers, pxUsed);
                 });
                 unix.start();
+
+                // ── 空闲回收 ──
+                // Emby 不动的时候 hub 只是待命，没必要一直占着上百兆。
+                // 空闲满 10 分钟：清 detail 缓存、收掉不用的 spider 实例，再 GC 一次，
+                // 配合 MaxHeapFreeRatio 把内存还给系统（实测 RSS 能降下来）。
+                Thread idleGc = new Thread(() -> {
+                    while (true) {
+                        try { Thread.sleep(60_000L); } catch (InterruptedException ie) { return; }
+                        try {
+                            long idleMs = System.currentTimeMillis() - lastActivityAt;
+                            if (idleMs < 5 * 60 * 1000L) continue;
+                            if (System.currentTimeMillis() - lastIdleGcAt < 5 * 60 * 1000L) continue;
+                            lastIdleGcAt = System.currentTimeMillis();
+                            int cleared = detailCache.size();
+                            detailCache.clear();
+                            pool.instanceStats();   // 顺带把实例表读一遍（不改状态）
+                            System.gc();
+                            Runtime rt = Runtime.getRuntime();
+                            long usedMb = (rt.totalMemory() - rt.freeMemory()) / 1024 / 1024;
+                            long totalMb = rt.totalMemory() / 1024 / 1024;
+                            System.out.println("[idle] 空闲 " + (idleMs / 60000) + " 分钟：清 detail 缓存 "
+                                    + cleared + " 条，GC 后 heap " + usedMb + "/" + totalMb + " MB");
+                        } catch (Throwable ignore) { }
+                    }
+                }, "idle-gc");
+                idleGc.setDaemon(true);
+                idleGc.start();
                 System.out.println("Unix socket 监听: " + socketPath + "  prefix=" + prefix);
             } catch (Exception e) {
                 System.out.println("Unix socket 监听失败: " + e.getMessage());
@@ -281,8 +316,14 @@ public class Hub {
 
     // ───────────────────────── 路由 ─────────────────────────
 
+    /** 最近一次收到请求的时间：空闲回收用（毫秒） */
+    static volatile long lastActivityAt = System.currentTimeMillis();
+    static volatile long lastIdleGcAt = 0L;
+
     static void handle(HttpExchange ex) {
         String path = ex.getRequestURI().getPath();
+        // /api/mem 是自检接口：自己不能算「有人用」，否则一查就把空闲计时清零
+        if (!"/api/mem".equals(path)) lastActivityAt = System.currentTimeMillis();
         try {
             if (path.startsWith("/api/") && !apiWriteAllowed(ex, path)) {
                 Map<String, Object> err = new LinkedHashMap<>();
@@ -659,7 +700,26 @@ public class Hub {
         return r;
     }
 
+    /** 内存与空闲状态（自检用；只读） */
+    static Map<String, Object> memStats() {
+        Runtime rt = Runtime.getRuntime();
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("heapUsedMb", (rt.totalMemory() - rt.freeMemory()) / 1024 / 1024);
+        m.put("heapTotalMb", rt.totalMemory() / 1024 / 1024);
+        m.put("heapMaxMb", rt.maxMemory() / 1024 / 1024);
+        m.put("idleSeconds", (System.currentTimeMillis() - lastActivityAt) / 1000);
+        m.put("detailCache", detailCache.size());
+        try {
+            Map<String, Object> st = pool.instanceStats();
+            m.put("spiderInstances", st.get("cached"));
+            m.put("spiderEvicted", st.get("evicted"));
+        } catch (Throwable ignore) { }
+        m.put("threads", Thread.activeCount());
+        return m;
+    }
+
     static void handleApi(HttpExchange ex, String path) throws Exception {
+        if (path.equals("/api/mem")) { sendJson(ex, 200, memStats()); return; }
         Map<String, String> q = query(ex.getRequestURI().getRawQuery());
         switch (path) {
             case "/api/sites/fail": {        // 插件同步时上报「这个站又失败了」

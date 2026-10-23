@@ -56,8 +56,19 @@ while true; do
     # -Xverify:none 必须保留：TVBox 生态的部分 spider jar 里有不合规的 class
     #（实测 ClassFormatError: Bad string initial value in class file com/github/catvod/spider/Init），
     # 打开校验会让这些站点整站不可用。作为补偿，远程 jar 现在强制校验配置里的 ;md5;（Hub.downloadJar）。
-    "$JAVA" -Xverify:none -Xmx512m -XX:+UseSerialGC -XX:+ExitOnOutOfMemoryError \
-        -XX:MaxMetaspaceSize=256m -Dfile.encoding=UTF-8 \
+    # 内存：小堆起步 + 空闲时把归还给系统（配 Hub 里的空闲 GC）
+    #   -Xms32m 起步不让 JVM 一开机就吃掉一大块
+    #   MaxHeapFreeRatio=40 → GC 后空闲超过 40% 就把内存还给 OS（SerialGC 认这个）
+    #   ReservedCodeCacheSize 限住 JIT 代码缓存（默认能长到 240M）
+    # RSS 实测构成（133MB 里 99MB 是匿名内存）：堆只占 31MB，剩下是元空间 +
+    # JIT 代码缓存 + 线程栈 + glibc 分配器 arena。逐项压：
+    #   MALLOC_ARENA_MAX=2  → 多线程下 glibc 默认每线程一个 arena，白白吃掉几十兆
+    #   -Xss512k            → 线程栈默认 1M，49 个线程省一半
+    #   TieredStopAtLevel=1 → 只用 C1 编译器，代码缓存小一截（spider 干的是 HTTP/JSON，不吃峰值 JIT）
+    export MALLOC_ARENA_MAX=2
+    "$JAVA" -Xverify:none -Xms32m -Xmx320m -Xss512k -XX:+UseSerialGC -XX:+ExitOnOutOfMemoryError \
+        -XX:MinHeapFreeRatio=15 -XX:MaxHeapFreeRatio=40 -XX:ReservedCodeCacheSize=48m \
+        -XX:TieredStopAtLevel=1 -XX:MaxMetaspaceSize=176m -Dfile.encoding=UTF-8 \
         -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 \
         -cp "${APP}/ui/hub.jar:${APP}/ui/lib/*" hub.Hub \
         --port "$PORT" --socket "$SOCK" --prefix /app/tvboxhub \
