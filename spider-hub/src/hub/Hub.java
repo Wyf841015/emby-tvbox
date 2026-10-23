@@ -2511,7 +2511,9 @@ public class Hub {
             "TmdbApiKey", "TmdbLanguage", "DownloadSubtitle",
             "UseItemTimeCursor", "SyncPlans", "SiteFailThreshold",
             "WebhookToken", "EmbyDeleteSync",
-            "HubToken"};
+            "HubToken",
+            // v0.3.0：外网播放（strm 写什么地址）
+            "StrmPlayMode", "StreamBaseUrl", "DirectRefreshHours"};
 
     /**
      * 重启 Emby 的进度。前端弹窗「正在重启 Emby 服务器」靠它决定何时关闭 ——

@@ -568,7 +568,7 @@
         <div class="brand-text">
           <div class="brand-line">
             <h1>TvBox For Emby</h1>
-            <span class="ver">v0.2.1</span>
+            <span class="ver">v0.3.0</span>
           </div>
           <div class="sub"><span id="paneTitle">概览</span></div>
         </div>
@@ -879,6 +879,15 @@
 
       <h2 style="margin-top:22px">播放与安全</h2>
       <div class="f"><label>播放直链缓存(分钟，0=关闭)</label><input type="number" id="pcPlayCache" min="0" max="720"></div>
+      <div class="f"><label>strm 播放地址方式</label>
+        <select id="pcStrmMode">
+          <option value="proxy">代理（内网可播，外网要能免登录访问 Emby）</option>
+          <option value="direct">直链（写源站地址，外网可直接播）</option>
+          <option value="direct_fallback">直链优先（解析不出时退回代理）</option>
+        </select>
+      </div>
+      <div class="f"><label>播放地址基址（留空=Emby 地址）</label><input type="text" id="pcStreamBase" placeholder="如 https://tv.example.com:8096"></div>
+      <div class="f"><label>直链重解析间隔(小时)</label><input type="number" id="pcDirectRefresh" min="1" max="240" placeholder="12"></div>
       <div class="chk"><label><input type="checkbox" id="pcSignRequired"> 强制校验播放签名（把 Emby 暴露到公网时务必打开）</label></div>
       <div class="f"><label>播放签名密钥</label><input type="text" id="pcStreamSign" placeholder="留空自动生成；改了这个值老 strm 需要重新同步"></div>
       <div class="f"><label>Webhook 地址（外部触发 / Emby 删除同步）</label><input type="text" id="pcWebhookUrl" readonly onclick="this.select()" placeholder="先跑一次同步后生成"></div>
@@ -2331,6 +2340,7 @@ var PC_FIELDS = {
   OutputRoot: 'pcOutputRoot', EmbyBaseUrl: 'pcEmbyBase',
   Referer: 'pcReferer', UserAgent: 'pcUA', SyncIntervalHours: 'pcInterval',
   PlayCacheMinutes: 'pcPlayCache', StreamSign: 'pcStreamSign',
+  StrmPlayMode: 'pcStrmMode', StreamBaseUrl: 'pcStreamBase', DirectRefreshHours: 'pcDirectRefresh',
   NameTemplate: 'pcNameTpl', RenameRules: 'pcRenameRules', SkipKeywords: 'pcSkipKeywords',
   TmdbApiKey: 'pcTmdbKey', TmdbLanguage: 'pcTmdbLang',
   SiteFailThreshold: 'pcFailThreshold', SyncPlans: 'pcSyncPlans'

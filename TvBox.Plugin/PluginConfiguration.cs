@@ -102,6 +102,23 @@ namespace TvBox.Plugin
         public bool UseProxy { get; set; } = true;
 
         /// <summary>
+        /// strm 里写什么地址（外网能不能播就看这个）：
+        ///   proxy           —— 本插件 /TvBox/Play（内网可播；外网需能免认证访问到 Emby）
+        ///   direct          —— 源站直链（外网直接可播；链接会过期，按 DirectRefreshHours 自动重解析）
+        ///   direct_fallback —— 同 direct，解析不出来的那一集退回 proxy 地址
+        /// </summary>
+        public string StrmPlayMode { get; set; } = "proxy";
+
+        /// <summary>
+        /// 播放地址基址（写进 strm 的协议+主机），留空=用 EmbyBaseUrl。
+        /// 域名分流场景填域名：家里 DNS 指内网、外网指公网，一份 strm 内外通吃。
+        /// </summary>
+        public string StreamBaseUrl { get; set; } = "";
+
+        /// <summary>直链模式多久重解析一次（小时）。源站 auth_key 通常 1~3 天过期。</summary>
+        public int DirectRefreshHours { get; set; } = 12;
+
+        /// <summary>
         /// 允许代理到内网/本机地址。默认关闭（防 SSRF）。
         /// 自建 CMS 源在内网时打开，否则播放会被「blocked host」拒掉。
         /// </summary>

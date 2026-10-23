@@ -55,6 +55,8 @@ namespace TvBox.Plugin.Core
 
         /// <summary>Emby 的局域网访问地址：私有分集 id 改写成 /TvBox/Play 时用。</summary>
         private string _embyBase = string.Empty;
+        /// <summary>strm 播放地址策略：proxy / direct / direct_fallback（direct* = 写源站直链，外网可播）。</summary>
+        private string _playMode = "proxy";
         /// <summary>本轮增量状态（RunAsync 里创建）。</summary>
         private SyncState _state;
         private readonly SemaphoreSlim _gate = new SemaphoreSlim(1, 1);
@@ -129,8 +131,9 @@ namespace TvBox.Plugin.Core
             var hub = (cfg?.SpiderHubUrl ?? string.Empty).Trim().TrimEnd('/');
             if (hub.Length == 0) { res["ok"] = false; res["msg"] = "插件里没配 hub 地址"; return res; }
 
-            // 关键：私有分集 id 要改写成 /TvBox/Play 地址，必须知道 Emby 的局域网地址
-            _embyBase = (embyBaseForProxy ?? string.Empty).Trim().TrimEnd('/');
+            // 关键：私有分集 id 要改写成 /TvBox/Play 地址，必须知道 Emby 的局域网地址；
+            // 直链模式下则改成源站真实地址（外网可播）
+            SetupPlayMode(cfg, embyBaseForProxy);
             // 单条推送也要用同一套签名密钥，否则推出来的地址播不了
             if (string.IsNullOrWhiteSpace(cfg.StreamSign))
             {
@@ -312,17 +315,126 @@ namespace TvBox.Plugin.Core
         /// 有些源 vod_play_url 里是 `146660@1314815`、`CO4K_…@CO4K@重生@1`、`/play/50375-1-1.html`
         /// 这类私有格式，以前要么被 PlayUrlParser 丢掉整站为空，要么被当成地址写进 strm 播不了。
         /// </summary>
+        /// <summary>
+        /// 决定这一轮 strm 里写什么地址。
+        ///
+        /// 外网播放的关键就在这：内网 IP（192.168.x.x）外网播放器连不上，
+        /// 而走 fnOS 网关的域名又要登录态，播放器拿不到 cookie —— 所以给出直链模式：
+        /// 直接把源站地址写进 strm，客户端连源站（不经过 NAS）。
+        /// </summary>
+        private void SetupPlayMode(PluginConfiguration cfg, string embyBaseForProxy)
+        {
+            var mode = (cfg?.StrmPlayMode ?? "proxy").Trim().ToLowerInvariant();
+            if (mode != "direct" && mode != "direct_fallback") mode = "proxy";
+            _playMode = mode;
+
+            var explicitBase = (cfg?.StreamBaseUrl ?? string.Empty).Trim();
+            _embyBase = (explicitBase.Length > 0 ? explicitBase : (embyBaseForProxy ?? string.Empty)).Trim().TrimEnd('/');
+
+            if (mode == "proxy")
+            {
+                if (explicitBase.Length > 0) _log("播放地址基址: " + _embyBase);
+            }
+            else
+            {
+                _log("播放地址策略: 直链（写源站地址，外网可直接播放）"
+                     + (mode == "direct_fallback" ? "，解析不出的集退回插件代理" : ""));
+                if (cfg != null && cfg.DirectRefreshHours > 0)
+                    _log("直链每 " + cfg.DirectRefreshHours + " 小时重解析一次（源站 auth_key 会过期）");
+            }
+        }
+
+        /// <summary>
+        /// 把私有分集 id 解析成源站真实地址（直链模式用）。
+        /// 先查直链缓存；没有再打 hub 的 /play/{site}?flag=&id=&json=1（内部走 Spider.playerContent）。
+        /// </summary>
+        private string ResolveRealPlayUrl(TvBoxSite site, string flag, string id, PluginConfiguration cfg)
+        {
+            if (string.IsNullOrEmpty(id)) return null;
+            var key = Core.PlayLinkCache.Key(site?.Key, flag, id);
+            if (Core.PlayLinkCache.TryGet(key, out var hit) && !string.IsNullOrWhiteSpace(hit.Url)) return hit.Url;
+
+            var hub = (cfg?.SpiderHubUrl ?? string.Empty).Trim().TrimEnd('/');
+            if (hub.Length == 0) return null;
+            var url = hub + "/play/" + Uri.EscapeDataString(site?.Key ?? string.Empty)
+                    + "?flag=" + Uri.EscapeDataString(flag ?? string.Empty)
+                    + "&id=" + Uri.EscapeDataString(id) + "&json=1";
+            try
+            {
+                var timeout = cfg != null && cfg.TimeoutSeconds > 0 ? cfg.TimeoutSeconds : 45;
+                using (var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(timeout) })
+                using (var resp = http.GetAsync(url).GetAwaiter().GetResult())
+                {
+                    if (!resp.IsSuccessStatusCode) return null;
+                    var body = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                    using (var doc = System.Text.Json.JsonDocument.Parse(body))
+                    {
+                        var root = doc.RootElement;
+                        bool ok = root.TryGetProperty("ok", out var okEl)
+                                  && okEl.ValueKind == System.Text.Json.JsonValueKind.True;
+                        if (!ok) return null;
+                        if (!root.TryGetProperty("url", out var uEl)) return null;
+                        var real = uEl.GetString();
+                        if (string.IsNullOrWhiteSpace(real)) return null;
+                        var parse = root.TryGetProperty("parse", out var pEl) ? pEl.GetString() : null;
+                        Core.PlayLinkCache.Set(key, real.Trim(), parse);
+                        return real.Trim();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logOnce("[直链] 解析失败 " + id + ": " + ex.Message);
+                return null;
+            }
+        }
+
         private VodLine ResolvePrivateIds(VodLine line, TvBoxSite site, PluginConfiguration cfg)
         {
             if (line?.Episodes == null || line.Episodes.Count == 0) return line;
             // 注意：不能直接写 hub 的 /play/ 地址 —— hub 的 TCP 只监听回环（安全审计结论），
             // 局域网播放器连不上。改成指向 Emby 自己的 /TvBox/Play，由插件内部再问 hub。
             var baseUrl = (_embyBase ?? string.Empty).Trim().TrimEnd('/');
-            if (baseUrl.Length == 0) return line;
+            // 直链模式不需要插件基址（解析成功就不写代理地址）；
+            // 但 direct_fallback 的退回分支需要，缺基址时直接按 direct 处理。
+            if (baseUrl.Length == 0 && _playMode == "proxy") return line;
 
             var head = baseUrl + "/TvBox/Play?site=" + Uri.EscapeDataString(site?.Key ?? string.Empty)
                      + "&flag=" + Uri.EscapeDataString(line.Name ?? string.Empty) + "&id=";
             bool changed = false;
+
+            // ── 直链模式要逐集问 hub（每个 id 一次 playerContent），串行会慢到没法用 ──
+            // 先并行解析出「私有 id → 真实地址」，再按原顺序组装，保持分集顺序不乱。
+            Dictionary<string, string> realMap = null;
+            if (_playMode != "proxy")
+            {
+                var need = line.Episodes
+                    .Where(e => e != null)
+                    .Select(e => (e.Url ?? string.Empty).Trim())
+                    .Where(u => u.Length > 0
+                                && !u.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                                && !u.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                    .Distinct()
+                    .ToList();
+                if (need.Count > 0)
+                {
+                    realMap = new Dictionary<string, string>(need.Count, StringComparer.Ordinal);
+                    var done = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.Ordinal);
+                    var dop = Math.Max(1, Math.Min(cfg != null && cfg.Concurrency > 0 ? cfg.Concurrency * 2 : 6, 8));
+                    System.Threading.Tasks.Parallel.ForEach(need, new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = dop }, u =>
+                    {
+                        try
+                        {
+                            var real = ResolveRealPlayUrl(site, line.Name, u, cfg);
+                            if (!string.IsNullOrWhiteSpace(real)) done[u] = real;
+                        }
+                        catch { }
+                    });
+                    foreach (var kv in done) realMap[kv.Key] = kv.Value;
+                    _logOnce("[直链] " + (site?.Name ?? site?.Key) + " 的 " + line.Name + " 线路并发解析 " + need.Count + " 个分集（" + dop + " 并发）");
+                }
+            }
+
             var eps = new List<VodEpisode>(line.Episodes.Count);
             foreach (var ep in line.Episodes)
             {
@@ -332,6 +444,28 @@ namespace TvBox.Plugin.Core
                 bool isHttp = u.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
                            || u.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
                 if (isHttp) { eps.Add(ep); continue; }
+
+                // ── 直链模式：把私有 id 换成源站真实地址直接写 ──
+                if (_playMode != "proxy")
+                {
+                    string realUrl = null;
+                    realMap?.TryGetValue(u, out realUrl);
+                    if (!string.IsNullOrWhiteSpace(realUrl))
+                    {
+                        changed = true;
+                        eps.Add(new VodEpisode { Name = ep.Name, Url = realUrl, Resolved = true });
+                        continue;
+                    }
+                    if (_playMode == "direct")
+                    {
+                        // 解析不出来就别写死链，整集跳过（日志里能查到）
+                        changed = true;
+                        _logOnce("[直链] " + (site?.Name ?? site?.Key) + " " + u + " 解析不出真实地址，跳过这一集");
+                        continue;
+                    }
+                    // direct_fallback：解析不出退回插件代理地址（下面继续走 head）
+                }
+
                 changed = true;
                 var playUrl = head + Uri.EscapeDataString(u);
                 var psig = TvBox.Plugin.Api.TvBoxApi.SignPlay(site?.Key, line.Name, u);
@@ -595,10 +729,15 @@ namespace TvBox.Plugin.Core
 
                     // 站点级 Referer：每个站点单独取，写进代理地址里，播放时才会带对 Referer
                     string siteReferer = null;
-                    _embyBase = (embyBaseUrlForProxy ?? string.Empty).Trim().TrimEnd('/');
-                    if (cfg.UseProxy && !string.IsNullOrWhiteSpace(embyBaseUrlForProxy))
+                    SetupPlayMode(cfg, embyBaseUrlForProxy);
+                    if (_playMode != "proxy")
                     {
-                        var baseUrl = embyBaseUrlForProxy.TrimEnd('/');
+                        // 直链：源站地址原样写进 strm，播放器直连源站，外网也能播
+                        writer.UrlRewriter = u => u;
+                    }
+                    else if (cfg.UseProxy && !string.IsNullOrWhiteSpace(_embyBase))
+                    {
+                        var baseUrl = _embyBase;
                         if (IsLoopbackBase(baseUrl))
                         {
                             summary.Detail = "输出地址解析成了本机回环 " + baseUrl
@@ -1155,7 +1294,11 @@ namespace TvBox.Plugin.Core
         {
             if (_state == null || !cfg.IncrementalSync || listed == null || string.IsNullOrEmpty(listed.Id))
                 return false;
-            if (!_state.TrySkip(site.Key, listed.Id, SyncState.Signature(listed), cfg.IncrementalHours, out var cached,
+            // 直链会过期（源站 auth_key 一般 1~3 天）：把跳过窗口压到 DirectRefreshHours，
+            // 到点就重新拉详情 + 重解析，strm 里的地址跟着刷新
+            var skipHours = cfg.IncrementalHours;
+            if (_playMode != "proxy") skipHours = Math.Min(skipHours <= 0 ? 24 : skipHours, Math.Max(1, cfg.DirectRefreshHours));
+            if (!_state.TrySkip(site.Key, listed.Id, SyncState.Signature(listed), skipHours, out var cached,
                                 listed.Time, cfg.UseItemTimeCursor))
                 return false;
             foreach (var cp in cached) keep.Add(cp);

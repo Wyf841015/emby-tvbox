@@ -163,6 +163,9 @@ namespace TvBox.Plugin.Api
         public bool? EmbyDeleteSync { get; set; }
         /// <summary>hub ↔ 插件共享令牌（hub 写进来，插件所有免登录路由校验它）</summary>
         public string HubToken { get; set; }
+        public string StrmPlayMode { get; set; }
+        public string StreamBaseUrl { get; set; }
+        public int? DirectRefreshHours { get; set; }
 
     }
 
@@ -231,6 +234,10 @@ namespace TvBox.Plugin.Api
         public int SiteFailThreshold { get; set; }
         public string WebhookToken { get; set; }
         public bool EmbyDeleteSync { get; set; }
+
+        public string StrmPlayMode { get; set; }
+        public string StreamBaseUrl { get; set; }
+        public int DirectRefreshHours { get; set; }
 
     }
 
@@ -787,6 +794,9 @@ namespace TvBox.Plugin.Api
                 SiteFailThreshold = cfg.SiteFailThreshold,
                 WebhookToken = cfg.WebhookToken,
                 EmbyDeleteSync = cfg.EmbyDeleteSync,
+                StrmPlayMode = cfg.StrmPlayMode,
+                StreamBaseUrl = cfg.StreamBaseUrl,
+                DirectRefreshHours = cfg.DirectRefreshHours,
                 ConfigFilePath = p.ConfigurationFilePath,
                 ReadOnly = new[] { "ConfigFilePath" },
             };
@@ -854,6 +864,9 @@ namespace TvBox.Plugin.Api
             if (req.WebhookToken != null) { cfg.WebhookToken = req.WebhookToken.Trim(); changed++; }
             if (req.EmbyDeleteSync.HasValue) { cfg.EmbyDeleteSync = req.EmbyDeleteSync.Value; changed++; }
             if (req.HubToken != null) { cfg.HubToken = req.HubToken.Trim(); changed++; }
+            if (!string.IsNullOrWhiteSpace(req.StrmPlayMode)) { cfg.StrmPlayMode = req.StrmPlayMode.Trim().ToLowerInvariant(); changed++; }
+            if (req.StreamBaseUrl != null) { cfg.StreamBaseUrl = req.StreamBaseUrl.Trim(); changed++; }
+            if (req.DirectRefreshHours.HasValue) { cfg.DirectRefreshHours = Math.Clamp(req.DirectRefreshHours.Value, 1, 240); changed++; }
 
             try
             {
