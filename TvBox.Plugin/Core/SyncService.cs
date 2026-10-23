@@ -165,7 +165,7 @@ namespace TvBox.Plugin.Core
             if (line?.Episodes == null || line.Episodes.Count == 0)
             { res["ok"] = false; res["msg"] = "这条没有播放地址"; return res; }
 
-            line = ResolvePrivateIds(line, site, cfg);
+            line = ResolvePrivateIds(line, site, cfg, detail?.Id);
 
             List<VodEpisode> live = line.Episodes;
             bool series = line.Episodes.Count > 1;
@@ -179,7 +179,7 @@ namespace TvBox.Plugin.Core
                     {
                         ThrowIfStopped(ct);
                         if (cand?.Episodes == null || cand.Episodes.Count == 0) continue;
-                        var candLine = ResolvePrivateIds(new VodLine { Name = cand.Name, Episodes = cand.Episodes }, site, cfg);
+                        var candLine = ResolvePrivateIds(new VodLine { Name = cand.Name, Episodes = cand.Episodes }, site, cfg, detail?.Id);
                         var live2 = await FilterPlayableEpisodesAsync(client, candLine.Episodes, site, cfg, ct,
                             _ => { }, _ => { }).ConfigureAwait(false);
                         if (live2.Count > 0) { line = candLine; live = live2; break; }
@@ -348,7 +348,8 @@ namespace TvBox.Plugin.Core
         /// 把私有分集 id 解析成源站真实地址（直链模式用）。
         /// 先查直链缓存；没有再打 hub 的 /play/{site}?flag=&id=&json=1（内部走 Spider.playerContent）。
         /// </summary>
-        private string ResolveRealPlayUrl(TvBoxSite site, string flag, string id, PluginConfiguration cfg)
+        private string ResolveRealPlayUrl(TvBoxSite site, string flag, string id, PluginConfiguration cfg,
+                                          string itemId = null, string epName = null)
         {
             if (string.IsNullOrEmpty(id)) return null;
             var key = Core.PlayLinkCache.Key(site?.Key, flag, id);
@@ -359,6 +360,10 @@ namespace TvBox.Plugin.Core
             var url = hub + "/play/" + Uri.EscapeDataString(site?.Key ?? string.Empty)
                     + "?flag=" + Uri.EscapeDataString(flag ?? string.Empty)
                     + "&id=" + Uri.EscapeDataString(id) + "&json=1";
+            // 带上条目 id + 集名：这条线路解不出来时，hub 会自动换其它线路的同名集再试
+            if (!string.IsNullOrWhiteSpace(itemId))
+                url += "&auto=1&item=" + Uri.EscapeDataString(itemId)
+                     + "&name=" + Uri.EscapeDataString(epName ?? string.Empty);
             try
             {
                 var timeout = cfg != null && cfg.TimeoutSeconds > 0 ? cfg.TimeoutSeconds : 45;
@@ -438,7 +443,7 @@ namespace TvBox.Plugin.Core
             return cfg == null ? null : (string.IsNullOrWhiteSpace(cfg.Referer) ? null : cfg.Referer);
         }
 
-        private VodLine ResolvePrivateIds(VodLine line, TvBoxSite site, PluginConfiguration cfg)
+        private VodLine ResolvePrivateIds(VodLine line, TvBoxSite site, PluginConfiguration cfg, string itemId = null)
         {
             if (line?.Episodes == null || line.Episodes.Count == 0) return line;
             // 注意：不能直接写 hub 的 /play/ 地址 —— hub 的 TCP 只监听回环（安全审计结论），
@@ -465,6 +470,15 @@ namespace TvBox.Plugin.Core
                                 && !u.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
                     .Distinct()
                     .ToList();
+                // url → 集名：换线路重试要按集名匹配，串不上就白搭
+                var nameOf = new Dictionary<string, string>(StringComparer.Ordinal);
+                foreach (var e in line.Episodes)
+                {
+                    if (e == null) continue;
+                    var uu = (e.Url ?? string.Empty).Trim();
+                    if (uu.Length == 0 || nameOf.ContainsKey(uu)) continue;
+                    nameOf[uu] = e.Name ?? string.Empty;
+                }
                 if (need.Count > 0)
                 {
                     realMap = new Dictionary<string, string>(need.Count, StringComparer.Ordinal);
@@ -474,7 +488,8 @@ namespace TvBox.Plugin.Core
                     {
                         try
                         {
-                            var real = ResolveRealPlayUrl(site, line.Name, u, cfg);
+                            nameOf.TryGetValue(u, out var epName);
+                            var real = ResolveRealPlayUrl(site, line.Name, u, cfg, itemId, epName);
                             if (!string.IsNullOrWhiteSpace(real)) done[u] = real;
                         }
                         catch { }
@@ -1089,7 +1104,7 @@ namespace TvBox.Plugin.Core
                         // （金牌影视 146660@1314815 / 半日99 CO4K_… / Sao火 /play/x.html）。
                         // TVBox 客户端播之前都会调 playerContent 换真地址，
                         // 这里同样交给 hub 的 /play/ 端点，校验和写 strm 都用换出来的地址。
-                        line = ResolvePrivateIds(line, site, cfg);
+                        line = ResolvePrivateIds(line, site, cfg, item?.Id ?? detail?.Id);
 
                         if (line.Episodes.Count > 1)
                         {
@@ -1111,7 +1126,7 @@ namespace TvBox.Plugin.Core
                                     {
                                         ThrowIfStopped(ct);
                                         if (cand?.Episodes == null || cand.Episodes.Count == 0) continue;
-                                        var candLine = ResolvePrivateIds(new VodLine { Name = cand.Name, Episodes = cand.Episodes }, site, cfg);
+                                        var candLine = ResolvePrivateIds(new VodLine { Name = cand.Name, Episodes = cand.Episodes }, site, cfg, item?.Id ?? detail?.Id);
                                         int dead2 = 0;
                                         var live2 = await FilterPlayableEpisodesAsync(client, candLine.Episodes, site, cfg, ct,
                                             _ => dead2++, _ => { }).ConfigureAwait(false);
@@ -1522,7 +1537,7 @@ namespace TvBox.Plugin.Core
                             if (line == null) continue;
                             // 有分类的主路径之前漏了这一步：私有分集 id（146660@1314815 这类）
                             // 在这里没换成 hub /play/ 地址，就被当成死链 404 全跳过。
-                            line = ResolvePrivateIds(line, site, cfg);
+                            line = ResolvePrivateIds(line, site, cfg, item?.Id);
 
                             if (item.IsSeries)
                             {
@@ -1543,7 +1558,7 @@ namespace TvBox.Plugin.Core
                                         {
                                             ThrowIfStopped(ct);
                                             if (cand?.Episodes == null || cand.Episodes.Count == 0) continue;
-                                            var candLine = ResolvePrivateIds(new VodLine { Name = cand.Name, Episodes = cand.Episodes }, site, cfg);
+                                            var candLine = ResolvePrivateIds(new VodLine { Name = cand.Name, Episodes = cand.Episodes }, site, cfg, item?.Id);
                                             int dead2 = 0;
                                             var live2 = await FilterPlayableEpisodesAsync(client, candLine.Episodes, site, cfg, ct,
                                                 _ => dead2++, _ => { }).ConfigureAwait(false);

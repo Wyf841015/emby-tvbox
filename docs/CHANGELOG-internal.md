@@ -1,5 +1,54 @@
 # emby-tvbox
 
+## v0.3.3 — 照着 TVBox 源码补解析能力（半日99 已恢复可播）
+
+**先说怎么研究的**
+
+读 TVBox 生态源码（`q215613905/TVBoxOS`、`FongMi/TV`、catvod `Spider.java`），解析链路是这样的：
+
+```java
+// catvod 给客户端的接口
+String playerContent(String flag, String id, List<String> vipFlags);
+
+// 客户端拿到 JSON 后看 parse：
+//   parse=0 → url 就是播放地址，直接播
+//   parse=1 → url 是「播放页」，交给解析器：ParseBean(type 0 嗅探 / 1 json / 2 json扩展 / 3 聚合)
+//   header  → Referer/UA/Cookie，播放器请求要带上，否则 CDN 403
+```
+
+**发现的三个差距（都在我们这边，不用改 spider）**
+
+1. **`vipFlags` 我们一直传空列表**
+   spider 内部会判断这个列表里有没有自己的平台名，没有就只给低清线路、甚至直接返回
+   「播放链接解析失败」。按 TVBox 生态的通用列表补上（youku/qq/iqiyi/letv/sohu/mgtv/bilibili…）——
+   **`半日99` 就是这一条修好的**：改前 `播放链接解析失败,请更换其他源播放`，改后直接给出
+   `https://cibn-edge-5g.1ljx.com/…m3u8?auth_key=…`
+
+2. **一条线路解不出来就整条放弃**
+   TVBox 是让用户手动点别的线路（同一个片子常有 自营/专线/非凡/量子 4~5 条线路，id 各不相同）。
+   现在自动换：按**集名**在其它线路里找同一集，逐个 `playerContent`，第一个成功就用它。
+   `/play/{site}?…&auto=1&item=<条目id>&name=<集名>`
+
+3. **`parse=1` 时只会正则找 m3u8**
+   补上网页嗅探 `sniffPage()`，覆盖三类常见写法：
+   - 苹果CMS v10：`var player_aaaa = {"url":"…","url_next":"…"}`
+   - 嵌套 `<iframe src="…">`（再抓一层，最多两层）
+   - 正文里任意 `.m3u8/.mp4/.flv/.mkv`
+
+**实测**
+
+| 项 | 结果 |
+|---|---|
+| 半日99 解析 | 改前 `playerContent 没给 url`；改后 `ok:true` 给出 m3u8 |
+| 半日99 经插件播放 | **200 / 702,190 B**，正文 `#EXTM3U` |
+| 直链可播性 | m3u8 先 302 到 `apple-co-speed-wug.sviptq.com`（200/457KB），分片 **200/888KB** |
+| 金牌影视 | 仍正常（同样带上了 vipFlags） |
+| 校验速度 | 这个站每集要过 302 链，48 集抽样太慢 → `VerifyMaxEpisodes` 调到 8 |
+
+**注意**：直链模式下这类「先 302 再给 m3u8」的源，写进 strm 的是**第一跳地址**，
+播放器要能跟 302（Infuse/SenPlayer/Emby 都会跟）。若某个播放器不跟，走代理模式即可。
+
+
 ## v0.5.9 — 输出按站点分目录；去掉顶栏刷新按钮
 
 ### 目录结构改了

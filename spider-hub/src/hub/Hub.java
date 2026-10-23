@@ -3876,6 +3876,21 @@ public class Hub {
             if (id.isBlank()) { sendJson(ex, 400, Map.of("ok", false, "msg", "缺少 id")); return; }
 
             String[] r = resolveEpisode(key, flag, id);
+
+            // ── 跨线路自动回退 ──
+            // 同一个条目通常有 2~5 条线路（在线播放/高清/专线/…），每条线路的 id 互不相同，
+            // 某条线路的 spider 解不出来很常见（源变了、要 VIP、接口挂了）。
+            // TVBox 客户端是让用户手动换线路；我们自动换：按「集名」在其它线路里找同一集再试。
+            if (!"1".equals(r[0]) && "1".equals(q.get("auto"))) {
+                String itemId = q.getOrDefault("item", "");
+                String epName = q.getOrDefault("name", "");
+                String[] alt = tryOtherLines(key, itemId, epName, flag, id);
+                if (alt != null) {
+                    System.out.println("[play] 换线路成功: " + flag + " → " + alt[5] + " (" + alt[1] + ")");
+                    r = alt;
+                }
+            }
+
             if (wantJson || !"1".equals(r[0])) {
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("ok", "1".equals(r[0]));
@@ -3896,10 +3911,136 @@ public class Hub {
         }
     }
 
-    /** 调 playerContent 换真地址，返回 {ok(1/0), url, 说明, parse 标记}。 */
+    /**
+     * TVBox 客户端调 playerContent 时传的第二个参数（VIP 平台关键字）。
+     *
+     * 原来我们传空列表 —— 有些 spider 内部会判断 vipFlags 里有没有自己的平台名，
+     * 没有就当「普通用户」只给低清线路，甚至直接返回「需要VIP」。
+     * 这里照 TVBox 生态的通用列表给上，等于告诉 spider「我有全平台会员」。
+     */
+    static final java.util.List<String> VIP_FLAGS = java.util.Collections.unmodifiableList(java.util.Arrays.asList(
+            "youku", "qq", "iqiyi", "qiyi", "letv", "sohu", "tudou", "pptv",
+            "mgtv", "wasu", "bilibili", "renrenmi", "fun", "duoduo"));
+
+    /**
+     * 换线路重试：拉一次详情，在其它线路里找「集名相同」的那一集，逐个 playerContent。
+     * 某条线路解不出来（源变了 / 要 VIP / 接口挂了）很常见，TVBox 是让用户手动换线路，
+     * 我们自动换。返回成功的 {ok,url,msg,parse,header,flag}，全失败返回 null。
+     */
+    static String[] tryOtherLines(String key, String itemId, String epName, String skipFlag, String skipId) {
+        if (itemId == null || itemId.isBlank()) return null;
+        try {
+            String raw = call(key, () -> pool.get(key).detailContent(new ArrayList<>(java.util.List.of(itemId))), 45);
+            Object parsed = tryParse(raw);
+            if (!(parsed instanceof Map)) return null;
+            Object list = ((Map<?, ?>) parsed).get("list");
+            if (!(list instanceof List) || ((List<?>) list).isEmpty()) return null;
+            Object first = ((List<?>) list).get(0);
+            if (!(first instanceof Map)) return null;
+            Map<?, ?> vod = (Map<?, ?>) first;
+            String froms = str(vod.get("vod_play_from"));
+            String urls = str(vod.get("vod_play_url"));
+            if (froms.isBlank() || urls.isBlank()) return null;
+            String[] fromArr = froms.split("\\$\\$\\$");
+            String[] urlArr = urls.split("\\$\\$\\$");
+            for (int i = 0; i < Math.min(fromArr.length, urlArr.length); i++) {
+                String flag = fromArr[i].trim();
+                if (flag.isEmpty() || flag.equals(skipFlag)) continue;
+                for (String ep : urlArr[i].split("#")) {
+                    String[] kv = ep.split("\\$", 2);
+                    if (kv.length < 2) continue;
+                    String name = kv[0].trim();
+                    String pid = kv[1].trim();
+                    if (pid.isEmpty() || pid.equals(skipId)) continue;
+                    // 只认同名集，避免把第 5 集接成第 6 集
+                    if (!epName.isBlank() && !name.equals(epName)) continue;
+                    if (epName.isBlank()) continue;
+                    String[] r = resolveEpisode(key, flag, pid);
+                    if ("1".equals(r[0])) {
+                        String[] out = new String[6];
+                        System.arraycopy(r, 0, out, 0, Math.min(r.length, 5));
+                        out[5] = flag;
+                        return out;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            System.out.println("[play] 换线路失败: " + explain(e));
+        }
+        return null;
+    }
+
+    /**
+     * 网页嗅探（没有解析接口时的兜底）：从播放页里把真实地址抠出来。
+     * 覆盖三类常见写法：
+     *   1) 苹果CMS： var player_aaaa = {"url":"…","url_next":"…","encrypt":0}
+     *   2) 嵌套 iframe：<iframe src="…">（再抓一层）
+     *   3) 直给：正文里任何 .m3u8/.mp4 链接
+     */
+    static String sniffPage(String url, int depth) {
+        if (url == null || url.isBlank() || depth <= 0) return null;
+        String body;
+        try {
+            HttpRequest req = HttpRequest.newBuilder(java.net.URI.create(sanitizeForUri(url)))
+                    .timeout(Duration.ofSeconds(20))
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+                    .header("Referer", url)
+                    .GET().build();
+            HttpResponse<String> resp = PROBE_HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+            body = resp.body();
+        } catch (Exception e) {
+            return null;
+        }
+        if (body == null || body.isBlank()) return null;
+
+        // 1) player_aaaa（苹果CMS v10 模板）
+        java.util.regex.Matcher ma = java.util.regex.Pattern
+                .compile("player_[a-zA-Z0-9_]*\\s*=\\s*(\\{[^<]{0,4000}?\\})\\s*;?\\s*</script>", java.util.regex.Pattern.DOTALL)
+                .matcher(body);
+        if (ma.find()) {
+            Object pj = tryParse(ma.group(1));
+            if (pj instanceof Map) {
+                Map<?, ?> m = (Map<?, ?>) pj;
+                for (String k : new String[]{"url", "url_next", "from"}) {
+                    String u = str(m.get(k));
+                    if (u.startsWith("http") && looksLikeMedia(u)) return u;
+                }
+                // encrypt=1/2 是加密播放，这里解不了，交给上层判定
+            }
+        }
+
+        // 2) iframe 再抓一层
+        java.util.regex.Matcher mi = java.util.regex.Pattern
+                .compile("<iframe[^>]+src=[\"']([^\"']+)[\"']", java.util.regex.Pattern.CASE_INSENSITIVE)
+                .matcher(body);
+        if (mi.find()) {
+            String sub = mi.group(1).trim();
+            if (!sub.startsWith("http")) {
+                try { sub = java.net.URI.create(url).resolve(sub).toString(); } catch (Exception ignore) { }
+            }
+            if (sub.startsWith("http")) {
+                String deeper = sniffPage(sub, depth - 1);
+                if (deeper != null) return deeper;
+            }
+        }
+
+        // 3) 正文里的媒体链接
+        java.util.regex.Matcher mm = java.util.regex.Pattern
+                .compile("https?:[^\\s\"'<>()\\\\]*?\\.(?:m3u8|mp4|flv|mkv)(?:\\?[^\\s\"'<>()\\\\]*)?")
+                .matcher(body.replace("\\/", "/"));
+        if (mm.find()) return mm.group();
+        return null;
+    }
+
+    static boolean looksLikeMedia(String u) {
+        String s = u.toLowerCase();
+        return s.contains(".m3u8") || s.contains(".mp4") || s.contains(".flv") || s.contains(".mkv");
+    }
+
+    /** 调 playerContent 换真地址，返回 {ok(1/0), url, 说明, parse 标记, header}。 */
     static String[] resolveEpisode(String key, String flag, String id) {
         try {
-            String raw = call(key, () -> pool.get(key).playerContent(flag, id, new ArrayList<String>()), 45);
+            String raw = call(key, () -> pool.get(key).playerContent(flag, id, new ArrayList<>(VIP_FLAGS)), 45);
             if (raw == null || raw.isBlank()) return new String[]{"0", "", "playerContent 返回空", "", null};
             Object parsed = tryParse(raw);
             if (!(parsed instanceof Map)) return new String[]{"0", "", "playerContent 返回的不是 JSON: " + abbrev(raw, 80), "", null};
@@ -3976,7 +4117,12 @@ public class Hub {
             } catch (Exception ignore) { }
         }
         // 2) 再把地址本身当解析接口试（原有行为）
-        return tryParseInline(url);
+        String inline = tryParseInline(url);
+        if (inline != null) return inline;
+        // 3) 兜底：当播放页嗅探（player_aaaa / iframe / 正文 .m3u8）
+        String sniffed = sniffPage(url, 2);
+        if (sniffed != null) System.out.println("[play] 网页嗅探解出: " + abbrev(sniffed, 100));
+        return sniffed;
     }
 
     static String tryParseInline(String url) {
