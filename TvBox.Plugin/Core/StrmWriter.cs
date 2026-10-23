@@ -18,16 +18,17 @@ namespace TvBox.Plugin.Core
     /// 把 TVBox 的点播条目写成 Emby 能直接扫的 .strm 文件树。
     ///
     /// 目录结构完全按 Emby 官方命名规范（这样后续 Emby 才能正确刮削剧集信息）：
-    ///   &lt;root&gt;/movies/&lt;片名 (年份)&gt;/&lt;片名 (年份)&gt;.strm
-    ///   &lt;root&gt;/tv/&lt;剧名 (年份)&gt;/Season 01/&lt;剧名 (年份)&gt; - S01E01 - &lt;集名&gt;.strm
+    ///   &lt;root&gt;/&lt;站点名&gt;/movies/&lt;片名 (年份)&gt;/&lt;片名 (年份)&gt;.strm
+    ///   &lt;root&gt;/&lt;站点名&gt;/tv/&lt;剧名 (年份)&gt;/Season 01/&lt;剧名 (年份)&gt; - S01E01 - &lt;集名&gt;.strm
     ///
     /// 关键点（少一条 Emby 就认不出来）：
     ///   · 片名/剧名后面带 (年份)，同名不同版才不会串
     ///   · 集文件必须是「剧名 - SxxEyy - 集名」，季目录必须是 Season NN
     ///   · 电影文件名与所在目录同名
-    ///   · 不再插入「站点名」这一层 —— Emby 以「含 Season 目录的那层」当剧名，
-    ///     中间多一层会让刮削器拿站点名去匹配；去掉后同一部剧多个源会自然合并
-    ///     （先同步的站先占集号，后同集的覆盖 URL，等于多源冗余）。
+    ///   · 站点名放在「movies/tv 的上一层」：Emby 以「含 Season 目录的那层」当剧名，
+    ///     所以站点层必须在外侧（&lt;站点&gt;/tv/&lt;剧名&gt;/Season 01/…）。
+    ///     代价是同一部剧在多个站点下会各存一份（来源清晰、互不覆盖）；
+    ///     加媒体库时把 &lt;root&gt;/&lt;站点&gt;/movies 与 &lt;root&gt;/&lt;站点&gt;/tv 分别加进去即可。
     /// </summary>
     public class StrmWriter
     {
@@ -64,8 +65,19 @@ namespace TvBox.Plugin.Core
         /// <summary>最近一次写失败的原因（给同步汇总用，避免「同步成功但没文件」）。</summary>
         public string LastError { get; private set; }
 
+        /// <summary>旧布局（不带站点层）的电影/剧集根，只用于清理历史文件。</summary>
         public string MoviesRoot => Path.Combine(_root, "movies");
         public string TvRoot => Path.Combine(_root, "tv");
+
+        /// <summary>站点层目录：&lt;root&gt;/&lt;站点名&gt;/</summary>
+        public string SiteRoot(string siteName)
+            => Path.Combine(_root, SafeName(string.IsNullOrWhiteSpace(siteName) ? "未知站点" : siteName.Trim()));
+
+        /// <summary>该站点的电影根：&lt;root&gt;/&lt;站点名&gt;/movies</summary>
+        public string MoviesRootFor(string siteName) => Path.Combine(SiteRoot(siteName), "movies");
+
+        /// <summary>该站点的剧集根：&lt;root&gt;/&lt;站点名&gt;/tv</summary>
+        public string TvRootFor(string siteName) => Path.Combine(SiteRoot(siteName), "tv");
 
         public string Root => _root;
 
@@ -115,7 +127,7 @@ namespace TvBox.Plugin.Core
             if (ep == null) return default;
 
             var folder = SafeName(TitleWithYear(item.Name, item.Year, item.Remarks));
-            var dir = Path.Combine(MoviesRoot, folder);
+            var dir = Path.Combine(MoviesRootFor(siteName), folder);
             var file = Path.Combine(dir, folder + ".strm");
             var outcome = WriteStrmFile(file, ep.Url);
             if (!string.IsNullOrEmpty(outcome.Path))
@@ -144,7 +156,7 @@ namespace TvBox.Plugin.Core
             if (baseSeason <= 0) baseSeason = SeasonFromText(item.Name);
             if (baseSeason <= 0) baseSeason = 1;
             var baseTitle = SafeName(TitleWithYear(item.Name, item.Year, item.Remarks));
-            var showDir = Path.Combine(TvRoot, baseTitle);
+            var showDir = Path.Combine(TvRootFor(siteName), baseTitle);
             var used = new Dictionary<int, HashSet<int>>();
 
             // 有真实分集时，跳过「正片 / 原片 / HD」这类整片别名：
@@ -321,8 +333,32 @@ namespace TvBox.Plugin.Core
 
         /// <summary>
         /// 删掉不再属于任何条目的 .strm，并顺手清空目录。
-        /// 只在我们自己的 movies/ tv/ 两个根下面操作，绝不碰别的地方。
+        /// 只在 movies/ tv/ 这两种目录下操作（新布局在站点层里的 movies/tv，旧布局在根下），
+        /// 其它位置一律不碰。
         /// </summary>
+        /// <summary>要清理的 movies/tv 根：站点层里的 + 旧布局根目录下的。</summary>
+        private List<string> CleanupRoots()
+        {
+            var list = new List<string>();
+            try
+            {
+                foreach (var site in Directory.GetDirectories(_root))
+                {
+                    var n = Path.GetFileName(site);
+                    if (string.IsNullOrEmpty(n) || n.StartsWith(".")) continue;
+                    foreach (var sub in new[] { "movies", "tv" })
+                    {
+                        var p = Path.Combine(site, sub);
+                        if (Directory.Exists(p)) list.Add(p);
+                    }
+                }
+            }
+            catch (Exception ex) { _log("枚举站点目录失败: " + ex.Message); }
+            foreach (var legacy in new[] { MoviesRoot, TvRoot })
+                if (Directory.Exists(legacy)) list.Add(legacy);
+            return list;
+        }
+
         public int CleanupOrphans(HashSet<string> keep, out int removedDirs)
         {
             removedDirs = 0;
@@ -332,7 +368,7 @@ namespace TvBox.Plugin.Core
             var owned = LoadManifest();
             bool useManifest = owned.Count > 0;
             var removed = 0;
-            foreach (var root in new[] { MoviesRoot, TvRoot })
+            foreach (var root in CleanupRoots())
             {
                 if (!Directory.Exists(root)) continue;
                 string[] files;

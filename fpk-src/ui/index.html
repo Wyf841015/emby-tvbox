@@ -568,7 +568,7 @@
         <div class="brand-text">
           <div class="brand-line">
             <h1>TvBox For Emby</h1>
-            <span class="ver">v0.5.8</span>
+            <span class="ver">v0.5.9</span>
           </div>
           <div class="sub"><span id="paneTitle">概览</span></div>
         </div>
@@ -576,8 +576,7 @@
         <div class="topbar-actions">
           <button class="tiny" onclick="showSponsorModal()" title="赞助作者"><span class="ico">💖</span><span class="btn-text">赞助</span></button>
           <button class="tiny" onclick="showContactModal()" title="联系作者"><span class="ico">💬</span><span class="btn-text">联系</span></button>
-          <button class="tiny" onclick="status()" title="刷新状态"><span class="ico">⟳</span><span class="btn-text">刷新</span></button>
-          <button class="tiny" id="themeBtn" title="切换主题" aria-label="切换主题"><span id="themeIcon">☀</span><span class="btn-text">主题</span></button>
+                    <button class="tiny" id="themeBtn" title="切换主题" aria-label="切换主题"><span id="themeIcon">☀</span><span class="btn-text">主题</span></button>
         </div>
       </div>
     </header>
@@ -652,7 +651,7 @@
       <div class="kv">
         <div class="k">① 采集</div><div class="v">读你的 TVBox 配置，把每个站点当成采集源（苹果 CMS 接口）。</div>
         <div class="k">② 同步</div><div class="v">按站点抓列表 + 详情，生成 <code>.strm</code> 文件（每部一个文件，内容是一行播放地址）。</div>
-        <div class="k">③ 扫描</div><div class="v">Emby 扫描输出目录的 <code>movies/</code> 和 <code>tv/</code>，把它们当成普通媒体库。</div>
+        <div class="k">③ 扫描</div><div class="v">每个站点一个目录，里面再分 <code>movies/</code> 和 <code>tv/</code>；把需要的目录加成 Emby 媒体库。</div>
         <div class="k">④ 播放</div><div class="v">Emby 播放时，插件按需补 Referer/UA、重写 HLS 分片地址，跳过防盗链。</div>
         <div class="k">不影响原库</div><div class="v">只在输出目录里写文件，不会改你已有的影视文件。</div>
       </div>
@@ -662,7 +661,7 @@
       <h2>常见问题</h2>
       <div class="kv">
         <div class="k">同步很慢</div><div class="v">源多就慢。先只勾 3-5 个 ✅ 站点试水，把「每分类抓取页数」调成 1-2。</div>
-        <div class="k">Emby 里没有片</div><div class="v">先确认同步跑完，再在 Emby 里给 <code>movies/</code>、<code>tv/</code> 分别加媒体库并「扫描媒体库」。</div>
+        <div class="k">Emby 里没有片</div><div class="v">先确认同步跑完，再把 <code>输出目录/站点/movies</code>、<code>…/tv</code> 加成媒体库并「扫描媒体库」。</div>
         <div class="k">播放 403 / 播不了</div><div class="v">该源要 Referer 或防盗链：在「配置」里填播放 Referer，并保持「播放走本机代理」打开。</div>
         <div class="k">站点变 ⛔</div><div class="v">源站挂了或改了接口。跳过它就行，别一个人折腾——站点是第三方提供的。</div>
         <div class="k">改了配置不生效</div><div class="v">插件配置改完要重启 Emby；hub 页面里的「保存」会直接写插件 XML。</div>
@@ -765,7 +764,7 @@
     <div class="panel">
       <h2>删除历史数据</h2>
       <div class="hint" style="margin:0 0 10px">
-        把输出目录里<b>由同步生成</b>的文件删掉，重新同步从零开始：
+        把输出目录下<b>所有站点目录里由同步生成</b>的文件删掉，重新同步从零开始：
         <code>.strm</code> / <code>.nfo</code> / 字幕 / 海报图。只删这几类扩展名，别的文件一律不碰。
         Emby 里的条目会在下次「扫描媒体库」后消失。
       </div>
@@ -1816,7 +1815,7 @@ var WZ_STEPS = [
         '⛔ 是当前不可用的源，跳过即可。'],
     go: 'sites' },
   { t: '第 3 步 · 设置输出目录',
-    l: ['在「配置」里指定 strm 输出目录，会生成 <code>movies/</code> 和 <code>tv/</code> 两个子目录。',
+    l: ['在「配置」里指定 strm 输出目录。同步时按站点建目录：<code>输出目录/站点/movies</code> 与 <code>…/tv</code>。',
         '默认放在 Emby 数据目录下的 <code>tvbox/</code>，也可以指到你自己的媒体盘。'],
     go: 'config' },
   { t: '第 4 步 · 安装 Emby 插件',
@@ -1825,7 +1824,7 @@ var WZ_STEPS = [
     go: 'emby' },
   { t: '第 5 步 · 跑一次同步',
     l: ['到「同步」点开始，等它跑完（第一次比较慢）。同步记录保存在 Emby 插件里，所以<b>插件没装/连不上时这里读不到记录</b>，不影响实际同步。',
-        '跑完后在 Emby 里把输出目录的 <code>movies/</code> 和 <code>tv/</code> 分别添加为媒体库，再「扫描媒体库」就能看到片子。'],
+        '跑完后把 <code>输出目录/站点/movies</code> 加成「电影」库、<code>…/tv</code> 加成「电视剧」库，再「扫描媒体库」就能看到片子。'],
     go: 'sync' },
   { t: '完成',
     l: ['配置好了。以后不会再自动弹这个向导。',
@@ -1887,7 +1886,7 @@ function guideRender() {
       desc: done.sync ? ('上次同步：' + String(cfg.LastSyncSummary || cfg.LastSyncUtc).slice(0, 60))
         : (_gs.pluginInstalled ? '还没同步过' : '读不到同步记录：插件未装或未连接（同步本身可能已跑过）'),
       go: 'sync' },
-    { ok: false, name: '在 Emby 里添加媒体库并播放', desc: '把输出目录的 movies/ 和 tv/ 加成媒体库 → 扫描媒体库 → 在首页就能看到片子（这步只能在 Emby 里做）', go: 'emby' }
+    { ok: false, name: '在 Emby 里添加媒体库并播放', desc: '把「输出目录/站点/movies」加成电影库、「输出目录/站点/tv」加成电视剧库 → 扫描媒体库（这步只能在 Emby 里做）', go: 'emby' }
   ];
   var alarm = [];
   if (!done.config) alarm.push('配置地址');
@@ -2662,6 +2661,7 @@ function purgeStatsHtml(d) {
   var parts = Object.keys(ext).map(function (k) { return '.' + k + ' ' + ext[k]; });
   return '<div class="kv">'
     + '<div class="k">输出目录</div><div class="v"><code>' + esc(d.root || '') + '</code></div>'
+    + '<div class="k">目录结构</div><div class="v">' + (d.layout === 'site' ? ('按站点分目录（' + (d.sites || 0) + ' 个站点）') : '旧布局（根下 movies/ tv/）') + '</div>'
     + '<div class="k">movies/</div><div class="v">' + (d.movies ? '有' : '没有') + '</div>'
     + '<div class="k">tv/</div><div class="v">' + (d.tv ? '有' : '没有') + '</div>'
     + '<div class="k">待删文件</div><div class="v"><b>' + (d.files || 0) + '</b> 个，共 ' + fmtBytes2(d.bytes) + '</div>'
@@ -2883,9 +2883,9 @@ function detectLibs() {
         '<td><button class="tiny" onclick="checkWritablePath(this.dataset.path,\'libWriteOut\')" data-path="' + esc(it.path) + '">测可写</button></td></tr>';
     });
     html += '</tbody></table>';
-    html += '<div class="hint">插件会把 strm 分到输出目录下的 <code>movies/</code> 和 <code>tv/</code> 两个子目录，' +
-      '所以 Emby 里要建两个库：电影 → <code>&lt;输出目录&gt;/movies</code>，' +
-      '电视剧 → <code>&lt;输出目录&gt;/tv</code>。选 movies 那个库，输出目录会自动取它的上一级。</div>';
+    html += '<div class="hint">同步按站点建目录：<code>输出目录/站点/movies</code> 与 <code>…/tv</code>。' +
+      'Emby 里给每个想看的站点建两个库（电影 / 电视剧）；' +
+      '选某个站点的 movies 目录时，输出目录会自动取它的上两级。</div>';
     html += '<div id="libWriteOut"></div>';
     box.innerHTML = html;
 
@@ -2909,6 +2909,8 @@ function onLibPick(sel) {
   //   库指向 .../movies 或 .../tv  → 输出目录取它的上一级（正好让两个库都覆盖到）
   //   库指向别的目录              → 在它下面建 tvbox/ 当输出目录
   var m = base.match(/^(.*)\/(movies|tv)$/i);
+  // 新布局是 输出目录/站点/movies|tv → 输出目录要再往上退一级
+  if (m) { var p2 = m[1].match(/^(.*)\/[^\/]+$/); if (p2) m = [m[0], p2[1], m[2]]; }
   if (m) {
     p = m[1];
   } else {
@@ -2918,7 +2920,7 @@ function onLibPick(sel) {
   var pcOut = document.getElementById('pcOutputRoot');
   if (pcOut) pcOut.value = p;
   document.getElementById('pluginHint').textContent =
-    '输出目录 ' + p + '（strm 会分到 ' + p + '/movies 和 ' + p + '/tv，Emby 里对应建两个库）';
+    '输出目录 ' + p + '（strm 分到 ' + p + '/站点/movies 和 …/tv，Emby 里按站点建库）';
   document.getElementById('pluginHint').style.color = 'var(--dim)';
 }
 

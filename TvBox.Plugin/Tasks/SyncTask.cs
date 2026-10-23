@@ -104,10 +104,29 @@ namespace TvBox.Plugin.Tasks
                     return;
                 }
 
+                // 目录现在是「站点/movies|tv」，逐个通知；旧的根下 movies/tv 也顺带通知
+                var targets = new System.Collections.Generic.List<string>();
+                try
+                {
+                    foreach (var site in System.IO.Directory.GetDirectories(outputRoot))
+                    {
+                        var n = System.IO.Path.GetFileName(site);
+                        if (string.IsNullOrEmpty(n) || n.StartsWith(".")) continue;
+                        foreach (var sub in new[] { "movies", "tv" })
+                        {
+                            var p = System.IO.Path.Combine(site, sub);
+                            if (System.IO.Directory.Exists(p)) targets.Add(p);
+                        }
+                    }
+                }
+                catch (Exception ex) { _logger.Warn("枚举站点目录失败: " + ex.Message); }
                 foreach (var sub in new[] { "movies", "tv" })
                 {
-                    var path = System.IO.Path.Combine(outputRoot, sub);
-                    if (!System.IO.Directory.Exists(path)) continue;
+                    var p = System.IO.Path.Combine(outputRoot, sub);
+                    if (System.IO.Directory.Exists(p)) targets.Add(p);
+                }
+                foreach (var path in targets)
+                {
                     try
                     {
                         monitor.ReportFileSystemChanged(path);

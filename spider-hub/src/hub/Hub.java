@@ -518,13 +518,31 @@ public class Hub {
             stats.put("blocked", true); stats.put("msg", "拒绝在这么靠上的目录里删文件：" + root); return files;
         }
         List<Path> bases = new ArrayList<>();
-        for (String sub : new String[]{"movies", "tv"}) {
+        int sites = 0;
+        for (String sub : new String[]{"movies", "tv"}) {          // 旧布局：根下直接 movies/tv
             Path p = root.resolve(sub);
             if (Files.isDirectory(p)) bases.add(p);
         }
+        // 新布局：<root>/<站点名>/movies | tv
+        try (java.util.stream.Stream<Path> ds = Files.list(root)) {
+            List<Path> subs = ds.sorted().collect(java.util.stream.Collectors.toList());
+            for (Path site : subs) {
+                String n = site.getFileName() == null ? "" : site.getFileName().toString();
+                if (n.isEmpty() || n.startsWith(".")) continue;
+                if (!Files.isDirectory(site)) continue;
+                boolean hit = false;
+                for (String sub : new String[]{"movies", "tv"}) {
+                    Path p = site.resolve(sub);
+                    if (Files.isDirectory(p)) { bases.add(p); hit = true; }
+                }
+                if (hit) sites++;
+            }
+        } catch (Exception ignore) {
+        }
+        stats.put("sites", sites);
         if (bases.isEmpty()) {
             stats.put("blocked", true);
-            stats.put("msg", "目录里没有 movies/ 或 tv/，看起来不是同步输出目录：" + root);
+            stats.put("msg", "目录里既没有 movies/ tv/，也没有「站点/movies」「站点/tv」，看起来不是同步输出目录：" + root);
             return files;
         }
         for (Path base : bases) {
@@ -565,6 +583,7 @@ public class Hub {
         stats.put("byExt", byExt);
         stats.put("movies", Files.isDirectory(root.resolve("movies")));
         stats.put("tv", Files.isDirectory(root.resolve("tv")));
+        stats.put("layout", sites > 0 ? "site" : "flat");
         return files;
     }
 
@@ -586,10 +605,25 @@ public class Hub {
                 if (firstErrors.size() < 5) firstErrors.add(f + "：" + explain(e));
             }
         }
-        // 顺手清掉空目录（只清 movies/tv 子树里的空目录，不动两个根目录本身）
+        // 顺手清掉空目录（只清 movies/tv 子树里的空目录，不动这些根目录本身）
         int removedDirs = 0;
+        List<Path> dirBases = new ArrayList<>();
         for (String sub : new String[]{"movies", "tv"}) {
-            Path base = root.resolve(sub);
+            Path p = root.resolve(sub);
+            if (Files.isDirectory(p)) dirBases.add(p);
+        }
+        try (java.util.stream.Stream<Path> ds = Files.list(root)) {
+            for (Path site : ds.sorted().collect(java.util.stream.Collectors.toList())) {
+                String n = site.getFileName() == null ? "" : site.getFileName().toString();
+                if (n.isEmpty() || n.startsWith(".") || !Files.isDirectory(site)) continue;
+                for (String sub : new String[]{"movies", "tv"}) {
+                    Path p = site.resolve(sub);
+                    if (Files.isDirectory(p)) dirBases.add(p);
+                }
+            }
+        } catch (Exception ignore) {
+        }
+        for (Path base : dirBases) {
             if (!Files.isDirectory(base)) continue;
             try {
                 List<Path> dirs = new ArrayList<>();
