@@ -213,6 +213,10 @@ namespace TvBox.Plugin.Api
     [Route("/TvBox/PushItem", "POST", Summary = "把某站点的一条内容立刻写进 Emby 库（搜索页一键推送）")]
     public class PushItem : IReturn<PushItemResult>
     {
+        /// <summary>站点显示名（hub 传上来），用来决定站点目录名；空则退回 site key。</summary>
+        public string SiteName { get; set; }
+
+
         public string Token { get; set; }
         public string Site { get; set; }
         public string Id { get; set; }
@@ -903,7 +907,7 @@ namespace TvBox.Plugin.Api
             var root = p.ResolveOutputRoot();
             try
             {
-                var r = await p.SyncService.PushOneAsync(cfg, req.Site, req.Id, root,
+                var r = await p.SyncService.PushOneAsync(cfg, req.Site, req.SiteName, req.Id, root,
                                                          p.ResolveEmbyBaseUrl(), CancellationToken.None)
                                              .ConfigureAwait(false);
                 return new PushItemResult

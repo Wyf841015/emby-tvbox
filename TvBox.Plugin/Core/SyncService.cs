@@ -118,7 +118,7 @@ namespace TvBox.Plugin.Core
         /// 所以推出来的东西跟同步出来的文件名、目录结构完全一致。
         /// </summary>
         public async Task<Dictionary<string, object>> PushOneAsync(
-            PluginConfiguration cfg, string siteKey, string itemId, string outputRoot,
+            PluginConfiguration cfg, string siteKey, string siteNameForDir, string itemId, string outputRoot,
             string embyBaseForProxy, CancellationToken ct)
         {
             var res = new Dictionary<string, object>();
@@ -135,10 +135,13 @@ namespace TvBox.Plugin.Core
             using var http = CreateClient(cfg);
             var client = new CmsClient(http, m => _log("     [push] " + m), cfg.Referer);
             // 站点对象直接指向 hub 的 MacCMS 适配层，不用再读一遍配置
+            // 站点目录名：优先用站点显示名（跟同步侧一致），没有才退回 key。
+            // 之前这里错把「片名」当站点名传下去，结果文件被写进 <输出目录>/<片名>/movies/…
+            var dirSite = string.IsNullOrWhiteSpace(siteNameForDir) ? siteKey : siteNameForDir.Trim();
             var site = new TvBoxSite
             {
                 Key = siteKey,
-                Name = siteKey,
+                Name = dirSite,
                 Api = hub + "/v/" + Uri.EscapeDataString(siteKey) + "/api.php/provide/vod/",
             };
 
@@ -198,12 +201,12 @@ namespace TvBox.Plugin.Core
             var paths = new List<string>();
             if (series)
             {
-                foreach (var o in writer.WriteSeries(name, detail, line))
+                foreach (var o in writer.WriteSeries(dirSite, detail, line))
                     if (!string.IsNullOrEmpty(o.Path)) paths.Add(o.Path);
             }
             else
             {
-                var o = writer.WriteMovie(name, detail, line);
+                var o = writer.WriteMovie(dirSite, detail, line);
                 if (!string.IsNullOrEmpty(o.Path)) paths.Add(o.Path);
             }
 

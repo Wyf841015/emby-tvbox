@@ -1419,6 +1419,15 @@ public class Hub {
                     Map<String, Object> payload = new LinkedHashMap<>();
                     payload.put("site", siteKey);
                     payload.put("id", itemId);
+                    // 目录名要用站点显示名（跟同步侧 site.DisplayName 一致），
+                    // 否则推送会把「片名」当成站点目录名写出去
+                    String siteName = "";
+                    try {
+                        for (SpiderPool.Site s : pool.allSites())
+                            if (siteKey.equals(s.key)) { siteName = s.name == null ? "" : s.name; break; }
+                    } catch (Exception ignore) {
+                    }
+                    payload.put("siteName", siteName);
                     String body = embyHttpJson("POST", base2 + "/TvBox/PushItem?token=" + embyToken(),
                             SpiderPool.Json.stringify(payload), 240);
                     Object r = SpiderPool.Json.parse(body);
