@@ -377,8 +377,16 @@ namespace TvBox.Plugin.Core
                         var real = uEl.GetString();
                         if (string.IsNullOrWhiteSpace(real)) return null;
                         var parse = root.TryGetProperty("parse", out var pEl) ? pEl.GetString() : null;
-                        Core.PlayLinkCache.Set(key, real.Trim(), parse);
-                        return real.Trim();
+                        var finalUrl = real.Trim();
+                        // 直链要写进 strm 给播放器直连：先自己拉一下。
+                        // 拉不动或拿到 HTML（源站报错页/防盗页）就当解析失败，别往库里写死链。
+                        if (cfg != null && cfg.DirectProbe && !ProbePlayable(finalUrl, site?.Referer, cfg))
+                        {
+                            _logOnce("[直链] 探测不通过，改走代理: " + finalUrl);
+                            return null;
+                        }
+                        Core.PlayLinkCache.Set(key, finalUrl, parse);
+                        return finalUrl;
                     }
                 }
             }
@@ -387,6 +395,47 @@ namespace TvBox.Plugin.Core
                 _logOnce("[直链] 解析失败 " + id + ": " + ex.Message);
                 return null;
             }
+        }
+
+        /// <summary>
+        /// 直链探测：Range 只取 1KB。
+        /// 判定通过 = 2xx/206 且首字节不是 '<'（HTML 错误页/防盗页一律算死链）。
+        /// </summary>
+        private bool ProbePlayable(string url, string referer, PluginConfiguration cfg)
+        {
+            if (string.IsNullOrWhiteSpace(url)) return false;
+            var sec = cfg != null && cfg.DirectProbeSeconds > 0 ? cfg.DirectProbeSeconds : 6;
+            try
+            {
+                using (var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(sec) })
+                {
+                    var req = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get, url);
+                    req.Headers.TryAddWithoutValidation("Range", "bytes=0-1023");
+                    req.Headers.TryAddWithoutValidation("User-Agent",
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36");
+                    var refUrl = !string.IsNullOrWhiteSpace(site_referer_or(cfg))
+                        ? site_referer_or(cfg) : referer;
+                    if (!string.IsNullOrWhiteSpace(refUrl)) req.Headers.TryAddWithoutValidation("Referer", refUrl);
+                    using (var resp = http.SendAsync(req, System.Net.Http.HttpCompletionOption.ResponseHeadersRead).GetAwaiter().GetResult())
+                    {
+                        if (!resp.IsSuccessStatusCode) return false;
+                        using (var st = resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult())
+                        {
+                            var buf = new byte[16];
+                            int n = st.Read(buf, 0, buf.Length);
+                            if (n <= 0) return true;      // 空响应也算能连（分片类可能为空）
+                            var head = System.Text.Encoding.ASCII.GetString(buf, 0, n).TrimStart();
+                            return head.Length == 0 || head[0] != '<';
+                        }
+                    }
+                }
+            }
+            catch { return false; }
+        }
+
+        private string site_referer_or(PluginConfiguration cfg)
+        {
+            return cfg == null ? null : (string.IsNullOrWhiteSpace(cfg.Referer) ? null : cfg.Referer);
         }
 
         private VodLine ResolvePrivateIds(VodLine line, TvBoxSite site, PluginConfiguration cfg)

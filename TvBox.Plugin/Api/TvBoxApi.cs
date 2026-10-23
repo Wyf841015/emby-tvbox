@@ -166,6 +166,8 @@ namespace TvBox.Plugin.Api
         public string StrmPlayMode { get; set; }
         public string StreamBaseUrl { get; set; }
         public int? DirectRefreshHours { get; set; }
+        public bool? DirectProbe { get; set; }
+        public int? DirectProbeSeconds { get; set; }
 
     }
 
@@ -238,6 +240,8 @@ namespace TvBox.Plugin.Api
         public string StrmPlayMode { get; set; }
         public string StreamBaseUrl { get; set; }
         public int DirectRefreshHours { get; set; }
+        public bool DirectProbe { get; set; }
+        public int DirectProbeSeconds { get; set; }
 
     }
 
@@ -797,6 +801,8 @@ namespace TvBox.Plugin.Api
                 StrmPlayMode = cfg.StrmPlayMode,
                 StreamBaseUrl = cfg.StreamBaseUrl,
                 DirectRefreshHours = cfg.DirectRefreshHours,
+                DirectProbe = cfg.DirectProbe,
+                DirectProbeSeconds = cfg.DirectProbeSeconds,
                 ConfigFilePath = p.ConfigurationFilePath,
                 ReadOnly = new[] { "ConfigFilePath" },
             };
@@ -867,6 +873,8 @@ namespace TvBox.Plugin.Api
             if (!string.IsNullOrWhiteSpace(req.StrmPlayMode)) { cfg.StrmPlayMode = req.StrmPlayMode.Trim().ToLowerInvariant(); changed++; }
             if (req.StreamBaseUrl != null) { cfg.StreamBaseUrl = req.StreamBaseUrl.Trim(); changed++; }
             if (req.DirectRefreshHours.HasValue) { cfg.DirectRefreshHours = Math.Clamp(req.DirectRefreshHours.Value, 1, 240); changed++; }
+            if (req.DirectProbe.HasValue) { cfg.DirectProbe = req.DirectProbe.Value; changed++; }
+            if (req.DirectProbeSeconds.HasValue) { cfg.DirectProbeSeconds = Math.Clamp(req.DirectProbeSeconds.Value, 2, 30); changed++; }
 
             try
             {

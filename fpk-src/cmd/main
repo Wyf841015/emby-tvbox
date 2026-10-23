@@ -36,7 +36,9 @@ if [ -n "$JRE_DIR" ] && [ -x "${APP}/ui/${JRE_DIR}/bin/java" ]; then
 fi
 [ -n "$JAVA" ] || [ ! -x "${APP}/ui/jre/bin/java" ] || JAVA="${APP}/ui/jre/bin/java"
 [ -n "$JAVA" ] || JAVA="$(command -v java 2>/dev/null)"
-log_msg "arch=${ARCH} jre=${JAVA:-none}"
+# 注意：fnOS 会每 30 秒调一次 `cmd/main start` 做健康检查，
+# 这行日志要放在「确认没在跑」之后，否则 info.log 被刷满 arch=…
+
 
 status() {
     if [ -f "${PID_FILE}" ]; then
@@ -55,6 +57,7 @@ status() {
 }
 
 start_process() {
+    log_msg "arch=${ARCH} jre=${JAVA:-none}"
     # 非正常退出后 socket 文件会残留，bind 必失败（靠 5 秒重启自愈太慢）
     [ -S "${SOCK}" ] && rm -f "${SOCK}"
 

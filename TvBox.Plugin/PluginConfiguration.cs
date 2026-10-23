@@ -119,6 +119,15 @@ namespace TvBox.Plugin
         public int DirectRefreshHours { get; set; } = 12;
 
         /// <summary>
+        /// 直链写入前先自己拉一下试试（Range 0-1KB）。拉不动 / 返回的是 HTML 页面
+        /// （源站报错页、防盗页）就不写直链 —— 否则库里全是点开就报错的死链。
+        /// </summary>
+        public bool DirectProbe { get; set; } = true;
+
+        /// <summary>直链探测超时（秒）。探测不计入播放，慢一点没关系</summary>
+        public int DirectProbeSeconds { get; set; } = 6;
+
+        /// <summary>
         /// 允许代理到内网/本机地址。默认关闭（防 SSRF）。
         /// 自建 CMS 源在内网时打开，否则播放会被「blocked host」拒掉。
         /// </summary>
