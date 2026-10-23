@@ -171,5 +171,159 @@ namespace TvBox.Plugin
         public int MaxDeletePerRun { get; set; } = 300;
 
         public List<string> DeadSites { get; set; } = new List<string>();
+
+        // ───────────── 播放链路（v0.2.0 新增）─────────────
+
+        /// <summary>
+        /// 播放直链缓存时长（分钟，0 = 关闭）。同步的逐集校验会顺手预热缓存，
+        /// 之后重播/换客户端/拖动重连直接命中，不用再打源站解析。
+        /// </summary>
+        public int PlayCacheMinutes { get; set; } = 25;
+
+        /// <summary>
+        /// strm 里播放地址的签名密钥（留空 = 自动生成）。
+        /// 配了之后 /TvBox/Stream 会校验 HMAC，防止有人拿到代理地址白嫖你的 NAS 刷源站。
+        /// </summary>
+        public string StreamSign { get; set; } = string.Empty;
+
+        /// <summary>
+        /// true = 没签名或签名不对一律拒绝。把 Emby 暴露到公网时务必打开；
+        /// 内网使用可以关（改密钥后老 strm 不用重同步）。
+        /// </summary>
+        public bool StreamSignRequired { get; set; }
+
+        // ───────────── 命名与过滤（v0.2.0 新增）─────────────
+
+        /// <summary>
+        /// 条目命名模板。占位符：{name} 片名、{year} 年份、{remarks} 备注、{site} 站点名。
+        /// 默认 "{name} ({year})"，与 Emby 规范一致（电影目录名 = 文件名）。
+        /// </summary>
+        public string NameTemplate { get; set; } = "{name} ({year})";
+
+        /// <summary>
+        /// 重命名规则（每行一条，格式 正则=>替换）。按顺序作用在片名上，
+        /// 用来清掉源站标题里的【高清】【中字】【未删减】这类装饰。
+        /// 例：\[.*?\]=>   或   【.*?】=>
+        /// </summary>
+        public string RenameRules { get; set; } = string.Empty;
+
+        /// <summary>命中这些关键词的条目不写入（逗号分隔，如 预告,花絮,抢先版）</summary>
+        public string SkipKeywords { get; set; } = string.Empty;
+
+        // ───────────── 元数据增强（v0.2.0 新增）─────────────
+
+        /// <summary>TMDB API Key（可选，留空 = 不做规范化）。填了会用「片名+年份」查 TMDB，写规范名与 tmdbid，显著提高刮削命中率</summary>
+        public string TmdbApiKey { get; set; } = string.Empty;
+
+        /// <summary>TMDB 语言（默认 zh-CN，中文名优先）</summary>
+        public string TmdbLanguage { get; set; } = "zh-CN";
+
+        /// <summary>落地源站提供的字幕（如果源里有 srt/ass/vtt 地址）</summary>
+        public bool DownloadSubtitle { get; set; } = true;
+
+        // ───────────── 增量与调度（v0.2.0 新增）─────────────
+
+        /// <summary>
+        /// 按条目更新时间戳增量（默认开）：只在 IncrementalHours 窗口内 且 vod_time 也没变时才跳过，
+        /// 避免纯时间窗口既漏更又白扫。
+        /// </summary>
+        public bool UseItemTimeCursor { get; set; } = true;
+
+        /// <summary>
+        /// 多条同步计划（每行一条）：时:分|站点key1,站点key2|full|incremental
+        /// 例  03:00||full   每天 3 点全量；每 6 小时那条用 SyncIntervalHours。
+        /// 留空 = 只用 SyncIntervalHours 的等间隔计划。
+        /// </summary>
+        public string SyncPlans { get; set; } = string.Empty;
+
+        /// <summary>站点连续失败多少次后自动移出同步（默认 5，0 = 不熔断）</summary>
+        public int SiteFailThreshold { get; set; } = 5;
+
+        /// <summary>
+        /// Webhook 令牌（自动生成）：外部工具/Emby 通知用
+        /// &lt;Emby 地址&gt;/TvBox/Webhook?token=… 触发生成或删除同步。
+        /// </summary>
+        public string WebhookToken { get; set; } = string.Empty;
+
+        /// <summary>Emby 里删除影片时，同步删掉我们的 strm 与清单记录（默认开）</summary>
+        public bool EmbyDeleteSync { get; set; } = true;
+
+        /// <summary>
+        /// 每条计划上次触发的时间（"计划行=yyyyMMddHHmm"，内部状态）。
+        /// 用 List&lt;string&gt; 而不是 Dictionary：Emby 的 XmlSerializer 不支持 Dictionary，
+        /// 加了 Dictionary 会让整份配置保存失败（"error reflecting type"）。
+        /// </summary>
+        public List<string> SyncPlanLastRun { get; set; } = new List<string>();
+
+        /// <summary>每个站点的连续失败次数（"站点key=次数"，内部状态）。同样不能用 Dictionary</summary>
+        public List<string> SiteFailStreak { get; set; } = new List<string>();
+
+        // ── List 形式的存取助手（XmlSerializer 只序列化属性，方法无所谓）──
+        public int GetFailStreak(string key)
+        {
+            if (string.IsNullOrEmpty(key) || SiteFailStreak == null) return 0;
+            var prefix = key + "=";
+            foreach (var it in SiteFailStreak)
+            {
+                if (it == null || !it.StartsWith(prefix, StringComparison.Ordinal)) continue;
+                int v;
+                if (int.TryParse(it.Substring(prefix.Length), out v)) return v;
+            }
+            return 0;
+        }
+
+        public int BumpFailStreak(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return 0;
+            if (SiteFailStreak == null) SiteFailStreak = new List<string>();
+            var now = GetFailStreak(key) + 1;
+            SetFailStreak(key, now);
+            return now;
+        }
+
+        public void SetFailStreak(string key, int value)
+        {
+            if (string.IsNullOrEmpty(key)) return;
+            if (SiteFailStreak == null) SiteFailStreak = new List<string>();
+            for (int i = 0; i < SiteFailStreak.Count; i++)
+            {
+                if (SiteFailStreak[i] != null && SiteFailStreak[i].StartsWith(key + "=", StringComparison.Ordinal))
+                {
+                    SiteFailStreak[i] = key + "=" + value;
+                    return;
+                }
+            }
+            SiteFailStreak.Add(key + "=" + value);
+        }
+
+        public void ResetFailStreak(string key)
+        {
+            if (string.IsNullOrEmpty(key) || SiteFailStreak == null) return;
+            SiteFailStreak.RemoveAll(it => it != null && it.StartsWith(key + "=", StringComparison.Ordinal));
+        }
+
+        public string GetPlanLastRun(string planLine)
+        {
+            if (string.IsNullOrEmpty(planLine) || SyncPlanLastRun == null) return null;
+            var prefix = planLine + "=";
+            foreach (var it in SyncPlanLastRun)
+                if (it != null && it.StartsWith(prefix, StringComparison.Ordinal)) return it.Substring(prefix.Length);
+            return null;
+        }
+
+        public void SetPlanLastRun(string planLine, string stamp)
+        {
+            if (string.IsNullOrEmpty(planLine)) return;
+            if (SyncPlanLastRun == null) SyncPlanLastRun = new List<string>();
+            for (int i = 0; i < SyncPlanLastRun.Count; i++)
+            {
+                if (SyncPlanLastRun[i] != null && SyncPlanLastRun[i].StartsWith(planLine + "=", StringComparison.Ordinal))
+                {
+                    SyncPlanLastRun[i] = planLine + "=" + stamp;
+                    return;
+                }
+            }
+            SyncPlanLastRun.Add(planLine + "=" + stamp);
+        }
     }
 }

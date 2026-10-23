@@ -568,7 +568,7 @@
         <div class="brand-text">
           <div class="brand-line">
             <h1>TvBox For Emby</h1>
-            <span class="ver">v0.1.1</span>
+            <span class="ver">v0.2.0</span>
           </div>
           <div class="sub"><span id="paneTitle">概览</span></div>
         </div>
@@ -876,6 +876,26 @@
       <div class="chk"><label><input type="checkbox" id="pcIncremental"> 增量同步（N 小时内没更新的站点跳过）</label></div>
       <div class="f"><label>增量窗口(小时)</label><input type="number" id="pcIncrementalHours" min="0"></div>
       <div class="f"><label>单次最多删除条目</label><input type="number" id="pcMaxDelete" min="0"></div>
+
+      <h2 style="margin-top:22px">播放与安全</h2>
+      <div class="f"><label>播放直链缓存(分钟，0=关闭)</label><input type="number" id="pcPlayCache" min="0" max="720"></div>
+      <div class="chk"><label><input type="checkbox" id="pcSignRequired"> 强制校验播放签名（把 Emby 暴露到公网时务必打开）</label></div>
+      <div class="f"><label>播放签名密钥</label><input type="text" id="pcStreamSign" placeholder="留空自动生成；改了这个值老 strm 需要重新同步"></div>
+      <div class="f"><label>Webhook 地址（外部触发 / Emby 删除同步）</label><input type="text" id="pcWebhookUrl" readonly onclick="this.select()" placeholder="先跑一次同步后生成"></div>
+
+      <h2 style="margin-top:22px">命名与过滤</h2>
+      <div class="f"><label>命名模板</label><input type="text" id="pcNameTpl" placeholder="{name} ({year})"></div>
+      <div class="f"><label>重命名规则（每行 正则=&gt;替换）</label><textarea id="pcRenameRules" rows="3" placeholder="【.*?】=&gt;&#10;\[.*?\]=&gt;"></textarea></div>
+      <div class="f"><label>跳过关键词（逗号分隔）</label><input type="text" id="pcSkipKeywords" placeholder="预告,花絮,抢先版"></div>
+      <div class="chk"><label><input type="checkbox" id="pcDownloadSub"> 落地源站字幕（源提供时才生效）</label></div>
+
+      <h2 style="margin-top:22px">元数据与调度</h2>
+      <div class="f"><label>TMDB API Key（可选）</label><input type="text" id="pcTmdbKey" placeholder="留空 = 不做 TMDB 规范化"></div>
+      <div class="f"><label>TMDB 语言</label><input type="text" id="pcTmdbLang" placeholder="zh-CN"></div>
+      <div class="chk"><label><input type="checkbox" id="pcTimeCursor"> 按条目更新时间增量（源更新时间变了就重拉详情）</label></div>
+      <div class="chk"><label><input type="checkbox" id="pcDeleteSync"> Emby 里删片时同步删掉 strm</label></div>
+      <div class="f"><label>站点失败熔断(次，0=关闭)</label><input type="number" id="pcFailThreshold" min="0"></div>
+      <div class="f"><label>多条同步计划（每行 HH:mm|站点key|full）</label><textarea id="pcSyncPlans" rows="3" placeholder="03:00||full&#10;15:30|金牌影视|"></textarea></div>
       <div class="row">
         <button class="primary" onclick="pcSave()" id="btnPcSave">保存配置</button>
         <button onclick="pcLoad()">重新读取</button>
@@ -2309,18 +2329,29 @@ var PC_FIELDS = {
   MaxPagesPerCategory: 'pcPages', MaxItemsPerRun: 'pcMaxItems',
   Concurrency: 'pcConc', TimeoutSeconds: 'pcTimeout', RequestDelayMs: 'pcDelay',
   OutputRoot: 'pcOutputRoot', EmbyBaseUrl: 'pcEmbyBase',
-  Referer: 'pcReferer', UserAgent: 'pcUA', SyncIntervalHours: 'pcInterval'
+  Referer: 'pcReferer', UserAgent: 'pcUA', SyncIntervalHours: 'pcInterval',
+  PlayCacheMinutes: 'pcPlayCache', StreamSign: 'pcStreamSign',
+  NameTemplate: 'pcNameTpl', RenameRules: 'pcRenameRules', SkipKeywords: 'pcSkipKeywords',
+  TmdbApiKey: 'pcTmdbKey', TmdbLanguage: 'pcTmdbLang',
+  SiteFailThreshold: 'pcFailThreshold', SyncPlans: 'pcSyncPlans'
 };
 var PC_CHECKS = {
   WriteNfo: 'pcWriteNfo', DownloadPoster: 'pcDownloadPoster', VerifyPlayUrl: 'pcVerifyPlay',
   ResolveIndirectUrl: 'pcResolveIndirect', IncrementalSync: 'pcIncremental',
   ExcludeCloudDrive: 'pcExcludeNd', UseProxy: 'pcUseProxy',
   AllowPrivateHosts: 'pcAllowPrivate', CleanupOrphans: 'pcCleanup',
-  EnableScheduledSync: 'pcSched'
+  EnableScheduledSync: 'pcSched',
+  StreamSignRequired: 'pcSignRequired', DownloadSubtitle: 'pcDownloadSub',
+  UseItemTimeCursor: 'pcTimeCursor', EmbyDeleteSync: 'pcDeleteSync'
 };
 
 function pcLoad() {
   var badge = document.getElementById('pcSource');
+  // Webhook 地址（走插件，局域网可达；用于外部触发与 Emby 删除同步）
+  api('api/webhook').then(function (w) {
+    var el = document.getElementById('pcWebhookUrl');
+    if (el && w) el.value = w.ok ? (w.url || '') : (w.msg || '');
+  }).catch(function () { });
   api('api/config').then(function (d) {
     var c = d.config || {};
     var plugin = d.source === 'plugin';

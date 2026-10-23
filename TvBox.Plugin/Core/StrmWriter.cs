@@ -53,6 +53,24 @@ namespace TvBox.Plugin.Core
         /// <summary>单次同步最多删多少个 strm（防误删保险，0 = 不限）。</summary>
         public int MaxDeletePerRun { get; set; } = 300;
 
+        /// <summary>命名模板（占位符 {name} {year} {remarks} {site}）。</summary>
+        public string NameTemplate { get; set; } = "{name} ({year})";
+
+        /// <summary>重命名规则，每条形如「正则=&gt;替换」，按顺序作用在片名上。</summary>
+        public List<string> RenameRules { get; set; } = new List<string>();
+
+        /// <summary>命中这些关键词的条目跳过（预告/花絮/抢先版…）。</summary>
+        public List<string> SkipKeywords { get; set; } = new List<string>();
+
+        /// <summary>TMDB 规范化得到的 tmdb id（写进 nfo 的 uniqueid，刮削更准）。</summary>
+        public string TmdbId { get; set; }
+
+        /// <summary>TMDB 查询钩子（item, 是否剧集）→ 命中信息。由 SyncService 注入，未配置 Key 时为 null。</summary>
+        public Func<VodItem, bool, TmdbHit?> TmdbLookup { get; set; }
+
+        /// <summary>是否落地源站字幕（vod_sub）。</summary>
+        public bool DownloadSubtitle { get; set; } = true;
+
         /// <summary>本次因超上限而没删的数量（给同步汇总提示用）。</summary>
         public int DeletesSkipped { get; private set; }
 
@@ -64,6 +82,91 @@ namespace TvBox.Plugin.Core
 
         /// <summary>最近一次写失败的原因（给同步汇总用，避免「同步成功但没文件」）。</summary>
         public string LastError { get; private set; }
+
+        /// <summary>
+        /// 按模板构造条目名：先把源站标题洗干净，再套 RenameRules，最后套模板。
+        /// 模板里 {year} 为空时会把留下的空括号一并去掉，免得出现「片名 ()」。
+        /// </summary>
+        public string BuildEntryName(string siteName, VodItem item)
+        {
+            var raw = CleanTitle(item.Name ?? string.Empty);
+            raw = ApplyRenameRules(raw);
+            var year = ExtractYear(item.Year) ?? YearFromTitle(item.Name) ?? string.Empty;
+            var tpl = string.IsNullOrWhiteSpace(NameTemplate) ? "{name} ({year})" : NameTemplate;
+            var s = tpl.Replace("{name}", raw)
+                       .Replace("{year}", year)
+                       .Replace("{remarks}", item.Remarks ?? string.Empty)
+                       .Replace("{site}", siteName ?? string.Empty);
+            // 清掉空括号 / 多余空格
+            s = System.Text.RegularExpressions.Regex.Replace(s, @"[（(]\s*[)）]|\[\s*\]", " ");
+            s = System.Text.RegularExpressions.Regex.Replace(s, @"\s{2,}", " ").Trim(' ', '-', '_', '.');
+            if (s.Length == 0) s = raw.Length > 0 ? raw : (item.Id ?? "未命名");
+            return SafeName(s);
+        }
+
+        /// <summary>按 SkipKeywords 判断这条要不要整个跳过（名字或备注命中即跳过）。</summary>
+        public bool ShouldSkip(VodItem item)
+        {
+            if (SkipKeywords == null || SkipKeywords.Count == 0) return false;
+            var hay = ((item?.Name ?? "") + " " + (item?.Remarks ?? "")).ToLowerInvariant();
+            foreach (var kw in SkipKeywords)
+            {
+                var k = (kw ?? string.Empty).Trim().ToLowerInvariant();
+                if (k.Length == 0) continue;
+                if (hay.Contains(k)) return true;
+            }
+            return false;
+        }
+
+        private TmdbHit? LookupTmdb(VodItem item, bool isSeries)
+        {
+            if (TmdbLookup == null) return null;
+            try { return TmdbLookup(item, isSeries); }
+            catch (Exception ex) { _log("TMDB 查询异常: " + ex.Message); return null; }
+        }
+
+        private string ApplyRenameRules(string name)
+        {
+            if (RenameRules == null || RenameRules.Count == 0 || string.IsNullOrEmpty(name)) return name;
+            var s = name;
+            foreach (var rule in RenameRules)
+            {
+                if (string.IsNullOrWhiteSpace(rule)) continue;
+                var idx = rule.IndexOf("=>", StringComparison.Ordinal);
+                if (idx <= 0) continue;
+                var pattern = rule.Substring(0, idx);
+                var repl = rule.Substring(idx + 2);
+                try { s = System.Text.RegularExpressions.Regex.Replace(s, pattern, repl); }
+                catch (Exception ex) { _log("重命名规则无效 " + rule + ": " + ex.Message); }
+            }
+            return s.Trim();
+        }
+
+        /// <summary>落地源站字幕（vod_sub）。源站不给就什么也不做。</summary>
+        private void EnsureSubtitle(string dir, string subUrl, string baseName)
+        {
+            if (!DownloadSubtitle || string.IsNullOrWhiteSpace(subUrl) || string.IsNullOrWhiteSpace(dir)) return;
+            try
+            {
+                var ext = ".srt";
+                var q = subUrl.IndexOf('?');
+                var pathOnly = q >= 0 ? subUrl.Substring(0, q) : subUrl;
+                var dot = pathOnly.LastIndexOf('.');
+                if (dot > 0)
+                {
+                    var e = pathOnly.Substring(dot).ToLowerInvariant();
+                    if (e == ".srt" || e == ".ass" || e == ".ssa" || e == ".vtt") ext = e;
+                }
+                var file = Path.Combine(dir, SafeName(baseName) + ext);
+                if (File.Exists(file) && new FileInfo(file).Length > 0) return;
+                if (FetchImage == null) return;
+                var bytes = FetchImage(subUrl);
+                if (bytes == null || bytes.Length < 16) return;
+                Directory.CreateDirectory(dir);
+                File.WriteAllBytes(file, bytes);
+            }
+            catch (Exception ex) { _log("下载字幕失败 " + subUrl + ": " + ex.Message); }
+        }
 
         /// <summary>旧布局（不带站点层）的电影/剧集根，只用于清理历史文件。</summary>
         public string MoviesRoot => Path.Combine(_root, "movies");
@@ -126,14 +229,16 @@ namespace TvBox.Plugin.Core
             var ep = line?.Episodes?.FirstOrDefault();
             if (ep == null) return default;
 
-            var folder = SafeName(TitleWithYear(item.Name, item.Year, item.Remarks));
+            if (ShouldSkip(item)) return default;
+            var folder = BuildEntryName(siteName, item);
             var dir = Path.Combine(MoviesRootFor(siteName), folder);
             var file = Path.Combine(dir, folder + ".strm");
             var outcome = WriteStrmFile(file, ep.Url);
             if (!string.IsNullOrEmpty(outcome.Path))
             {
-                EnsureNfo(dir, item, false);
+                EnsureNfo(dir, item, false, LookupTmdb(item, false));
                 EnsurePoster(dir, item.Pic);
+                EnsureSubtitle(dir, item.SubUrl, folder);
             }
             return outcome;
         }
@@ -155,7 +260,8 @@ namespace TvBox.Plugin.Core
             int baseSeason = SeasonFromText(item.Remarks);
             if (baseSeason <= 0) baseSeason = SeasonFromText(item.Name);
             if (baseSeason <= 0) baseSeason = 1;
-            var baseTitle = SafeName(TitleWithYear(item.Name, item.Year, item.Remarks));
+            if (ShouldSkip(item)) return results;
+            var baseTitle = BuildEntryName(siteName, item);
             var showDir = Path.Combine(TvRootFor(siteName), baseTitle);
             var used = new Dictionary<int, HashSet<int>>();
 
@@ -189,8 +295,9 @@ namespace TvBox.Plugin.Core
 
             if (results.Any(r => !string.IsNullOrEmpty(r.Path)))
             {
-                EnsureNfo(showDir, item, true);
+                EnsureNfo(showDir, item, true, LookupTmdb(item, true));
                 EnsurePoster(showDir, item.Pic);
+                EnsureSubtitle(showDir, item.SubUrl, baseTitle);
             }
             return results;
         }
@@ -202,13 +309,16 @@ namespace TvBox.Plugin.Core
         /// 元数据，不再依赖 TMDB 按中文名匹配 —— tvbox 源的名字常带「丨蓝光秒播」
         /// 这种装饰，刮削失败概率很高，nfo 是最稳的兜底。
         /// </summary>
-        private void EnsureNfo(string dir, VodItem item, bool isSeries)
+        private void EnsureNfo(string dir, VodItem item, bool isSeries, TmdbHit? hit = null)
         {
             if (!WriteNfo || string.IsNullOrWhiteSpace(dir)) return;
             try
             {
                 var title = CleanTitle(item.Name);
                 var year = ExtractYear(item.Year) ?? YearFromTitle(item.Name);
+                // TMDB 命中就用规范名/年份（Emby 拿 nfo 匹配，比脏目录名靠谱）
+                if (hit.HasValue && !string.IsNullOrWhiteSpace(hit.Value.Title)) title = hit.Value.Title;
+                if (hit.HasValue && !string.IsNullOrWhiteSpace(hit.Value.Year)) year = hit.Value.Year;
                 var sb = new StringBuilder();
                 sb.Append("<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n");
                 sb.Append(isSeries ? "<tvshow>\n" : "<movie>\n");
@@ -232,6 +342,9 @@ namespace TvBox.Plugin.Core
                 {
                     sb.Append("  <actor><name>").Append(Xml(a)).Append("</name></actor>\n");
                 }
+                var tmdbId = (hit.HasValue && !string.IsNullOrWhiteSpace(hit.Value.Id)) ? hit.Value.Id : TmdbId;
+                if (!string.IsNullOrWhiteSpace(tmdbId))
+                    sb.Append("  <uniqueid type=\"tmdb\" default=\"false\">").Append(Xml(tmdbId)).Append("</uniqueid>\n");
                 // 标记来源，便于日后排查「这条是哪个站来的」
                 sb.Append("  <uniqueid type=\"tvbox\" default=\"true\">")
                   .Append(Xml("tvbox-" + (item.Id ?? ""))).Append("</uniqueid>\n");
@@ -357,6 +470,54 @@ namespace TvBox.Plugin.Core
             foreach (var legacy in new[] { MoviesRoot, TvRoot })
                 if (Directory.Exists(legacy)) list.Add(legacy);
             return list;
+        }
+
+        /// <summary>
+        /// 忘掉一个文件：从清单移除 + 删掉文件 + 清空目录（到 movies/tv 那层为止）。
+        /// Emby 删除同步走这里 —— 用户在 Emby 里删片，我们就别再守着那条记录了。
+        /// 安全边界：必须在输出根目录之内，且路径里含 movies 或 tv 这一层。
+        /// </summary>
+        public bool ForgetFile(string filePath, out string msg)
+        {
+            msg = null;
+            try
+            {
+                if (string.IsNullOrWhiteSpace(filePath)) { msg = "缺少 path"; return false; }
+                var full = Path.GetFullPath(filePath.Trim());
+                var rootFull = Path.GetFullPath(_root);
+                if (!full.StartsWith(rootFull, StringComparison.Ordinal)) { msg = "路径不在输出目录内，拒绝"; return false; }
+
+                var parts = full.Substring(rootFull.Length).Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
+                bool underMedia = parts.Any(p => p.Equals("movies", StringComparison.OrdinalIgnoreCase) || p.Equals("tv", StringComparison.OrdinalIgnoreCase));
+                if (!underMedia) { msg = "路径不在 movies/tv 子树内，拒绝"; return false; }
+
+                // 从清单移除（清理逻辑以清单为准，删文件后不同步清单会留下死记录）
+                try
+                {
+                    var keep = LoadManifest();
+                    if (keep.RemoveWhere(p => string.Equals(p, full, StringComparison.OrdinalIgnoreCase)) > 0)
+                        SaveManifest(keep);
+                }
+                catch (Exception ex) { _log("ForgetFile 更新清单失败: " + ex.Message); }
+
+                if (File.Exists(full)) File.Delete(full);
+                // 顺手清空目录（保留 movies / tv 两层基目录）
+                var dir = Path.GetDirectoryName(full);
+                int guard = 0;
+                while (!string.IsNullOrEmpty(dir) && guard++ < 6)
+                {
+                    var baseName = Path.GetFileName(dir);
+                    if (baseName.Equals("movies", StringComparison.OrdinalIgnoreCase)
+                        || baseName.Equals("tv", StringComparison.OrdinalIgnoreCase)) break;
+                    if (!Directory.Exists(dir)) { dir = Path.GetDirectoryName(dir); continue; }
+                    if (Directory.EnumerateFileSystemEntries(dir).Any()) break;
+                    try { Directory.Delete(dir); } catch { break; }
+                    dir = Path.GetDirectoryName(dir);
+                }
+                msg = "已删除 " + full;
+                return true;
+            }
+            catch (Exception ex) { msg = "删除失败: " + ex.Message; return false; }
         }
 
         public int CleanupOrphans(HashSet<string> keep, out int removedDirs)

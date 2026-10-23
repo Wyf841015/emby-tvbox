@@ -146,6 +146,24 @@ namespace TvBox.Plugin.Api
         public bool? IncrementalSync { get; set; }
         public int? IncrementalHours { get; set; }
         public int? MaxDeletePerRun { get; set; }
+        // ── v0.2.0 新增（播放/命名/元数据/调度）──
+        public int? PlayCacheMinutes { get; set; }
+        public string StreamSign { get; set; }
+        public bool? StreamSignRequired { get; set; }
+        public string NameTemplate { get; set; }
+        public string RenameRules { get; set; }
+        public string SkipKeywords { get; set; }
+        public string TmdbApiKey { get; set; }
+        public string TmdbLanguage { get; set; }
+        public bool? DownloadSubtitle { get; set; }
+        public bool? UseItemTimeCursor { get; set; }
+        public string SyncPlans { get; set; }
+        public int? SiteFailThreshold { get; set; }
+        public string WebhookToken { get; set; }
+        public bool? EmbyDeleteSync { get; set; }
+        /// <summary>hub ↔ 插件共享令牌（hub 写进来，插件所有免登录路由校验它）</summary>
+        public string HubToken { get; set; }
+
     }
 
     /// <summary>
@@ -198,6 +216,22 @@ namespace TvBox.Plugin.Api
         public string ConfigFilePath { get; set; }
         /// <summary>只读字段（由安装器/运行环境决定）。</summary>
         public string[] ReadOnly { get; set; }
+        // v0.2.0
+        public int PlayCacheMinutes { get; set; }
+        public string StreamSign { get; set; }
+        public bool StreamSignRequired { get; set; }
+        public string NameTemplate { get; set; }
+        public string RenameRules { get; set; }
+        public string SkipKeywords { get; set; }
+        public string TmdbApiKey { get; set; }
+        public string TmdbLanguage { get; set; }
+        public bool DownloadSubtitle { get; set; }
+        public bool UseItemTimeCursor { get; set; }
+        public string SyncPlans { get; set; }
+        public int SiteFailThreshold { get; set; }
+        public string WebhookToken { get; set; }
+        public bool EmbyDeleteSync { get; set; }
+
     }
 
     [Unauthenticated]
@@ -233,6 +267,26 @@ namespace TvBox.Plugin.Api
     }
 
     [Unauthenticated]
+    [Route("/TvBox/Webhook", "POST,GET", Summary = "Webhook：外部工具/Emby 通知触发生成或删除同步")]
+    public class WebhookHook : IReturn<SimpleResult>
+    {
+        public string Token { get; set; }
+        /// <summary>sync / sync_item / emby_item_removed（留空按参数推断）</summary>
+        public string Event { get; set; }
+        public string Site { get; set; }
+        public string SiteName { get; set; }
+        public string Id { get; set; }
+        public string Path { get; set; }
+    }
+
+    [Route("/TvBox/Forget", "POST,GET", Summary = "Emby 删除同步：删掉对应的 strm 并移出清单")]
+    public class ForgetItem : IReturn<SimpleResult>
+    {
+        public string Token { get; set; }
+        /// <summary>Emby 通知里的文件路径（必须在输出目录的 movies/tv 子树内）。</summary>
+        public string Path { get; set; }
+    }
+
     [Route("/TvBox/Live", "GET", Summary = "直播源：把 hub /live/<站点> 的 M3U 转出来，Emby Live TV 直接填这个地址")]
     public class LiveProxy : IReturnVoid
     {
@@ -251,6 +305,8 @@ namespace TvBox.Plugin.Api
         /// <summary>spider 的私有分集 id（如 146660@1314815）。</summary>
         public string Id { get; set; }
         public string Token { get; set; }
+        /// <summary>签名（配了 StreamSign 时必带；StreamSignRequired 打开后无签名一律拒绝）</summary>
+        public string S { get; set; }
     }
 
     [Unauthenticated]   // 播放器/ffmpeg 拉分片不会带 Emby token，缺这个整条播放链 401
@@ -273,6 +329,12 @@ namespace TvBox.Plugin.Api
         /// 没有它整条播放链 401/403。分片重写时也要带着走。
         /// </summary>
         public string H { get; set; }
+
+        /// <summary>
+        /// 签名（HMAC-SHA256 前 8 字节 hex）。写进 strm 里，防止有人拿到代理地址
+        /// 后拿你的 NAS 当白嫖代理刷源站。密钥不填时本字段不参与校验。
+        /// </summary>
+        public string S { get; set; }
     }
 
     // ───────────────────── 返回模型 ─────────────────────
@@ -295,6 +357,11 @@ namespace TvBox.Plugin.Api
         public int Errors { get; set; }
         public string LastError { get; set; }
         public string OutputRoot { get; set; }
+        public int PlayCacheCount { get; set; }
+        public int PlayCacheHits { get; set; }
+        public int PlayCacheMisses { get; set; }
+        public bool StreamSignRequired { get; set; }
+        public int TmdbCacheCount { get; set; }
         public string LastSyncUtc { get; set; }
         public string LastSyncSummary { get; set; }
 
@@ -553,6 +620,11 @@ namespace TvBox.Plugin.Api
                     TimeoutSeconds = cfg.TimeoutSeconds,
                     ExcludeCloudDrive = cfg.ExcludeCloudDrive,
                     NetdiskExcluded = cfg.LastSyncSummary != null && cfg.LastSyncSummary.Contains("网盘") ? 1 : 0,
+                    PlayCacheCount = Core.PlayLinkCache.Count,
+                    PlayCacheHits = Core.PlayLinkCache.Hits,
+                    PlayCacheMisses = Core.PlayLinkCache.Misses,
+                    StreamSignRequired = cfg.StreamSignRequired,
+                    TmdbCacheCount = Core.TmdbClient.CacheCount,
                 };
             }
         }
@@ -701,6 +773,20 @@ namespace TvBox.Plugin.Api
                 IncrementalSync = cfg.IncrementalSync,
                 IncrementalHours = cfg.IncrementalHours,
                 MaxDeletePerRun = cfg.MaxDeletePerRun,
+                PlayCacheMinutes = cfg.PlayCacheMinutes,
+                StreamSign = cfg.StreamSign,
+                StreamSignRequired = cfg.StreamSignRequired,
+                NameTemplate = cfg.NameTemplate,
+                RenameRules = cfg.RenameRules,
+                SkipKeywords = cfg.SkipKeywords,
+                TmdbApiKey = cfg.TmdbApiKey,
+                TmdbLanguage = cfg.TmdbLanguage,
+                DownloadSubtitle = cfg.DownloadSubtitle,
+                UseItemTimeCursor = cfg.UseItemTimeCursor,
+                SyncPlans = cfg.SyncPlans,
+                SiteFailThreshold = cfg.SiteFailThreshold,
+                WebhookToken = cfg.WebhookToken,
+                EmbyDeleteSync = cfg.EmbyDeleteSync,
                 ConfigFilePath = p.ConfigurationFilePath,
                 ReadOnly = new[] { "ConfigFilePath" },
             };
@@ -752,6 +838,22 @@ namespace TvBox.Plugin.Api
             if (req.IncrementalSync.HasValue) { cfg.IncrementalSync = req.IncrementalSync.Value; changed++; }
             if (req.IncrementalHours.HasValue) { cfg.IncrementalHours = Math.Clamp(req.IncrementalHours.Value, 0, 720); changed++; }
             if (req.MaxDeletePerRun.HasValue) { cfg.MaxDeletePerRun = Math.Clamp(req.MaxDeletePerRun.Value, 0, 100000); changed++; }
+            // v0.2.0：播放链路 / 命名过滤 / 元数据 / 调度
+            if (req.PlayCacheMinutes.HasValue) { cfg.PlayCacheMinutes = Math.Clamp(req.PlayCacheMinutes.Value, 0, 720); changed++; }
+            if (req.StreamSign != null) { cfg.StreamSign = req.StreamSign.Trim(); changed++; }
+            if (req.StreamSignRequired.HasValue) { cfg.StreamSignRequired = req.StreamSignRequired.Value; changed++; }
+            if (req.NameTemplate != null && req.NameTemplate.Trim().Length > 0) { cfg.NameTemplate = req.NameTemplate.Trim(); changed++; }
+            if (req.RenameRules != null) { cfg.RenameRules = req.RenameRules; changed++; }
+            if (req.SkipKeywords != null) { cfg.SkipKeywords = req.SkipKeywords; changed++; }
+            if (req.TmdbApiKey != null) { cfg.TmdbApiKey = req.TmdbApiKey.Trim(); changed++; }
+            if (!string.IsNullOrWhiteSpace(req.TmdbLanguage)) { cfg.TmdbLanguage = req.TmdbLanguage.Trim(); changed++; }
+            if (req.DownloadSubtitle.HasValue) { cfg.DownloadSubtitle = req.DownloadSubtitle.Value; changed++; }
+            if (req.UseItemTimeCursor.HasValue) { cfg.UseItemTimeCursor = req.UseItemTimeCursor.Value; changed++; }
+            if (req.SyncPlans != null) { cfg.SyncPlans = req.SyncPlans; changed++; }
+            if (req.SiteFailThreshold.HasValue) { cfg.SiteFailThreshold = Math.Clamp(req.SiteFailThreshold.Value, 0, 100); changed++; }
+            if (req.WebhookToken != null) { cfg.WebhookToken = req.WebhookToken.Trim(); changed++; }
+            if (req.EmbyDeleteSync.HasValue) { cfg.EmbyDeleteSync = req.EmbyDeleteSync.Value; changed++; }
+            if (req.HubToken != null) { cfg.HubToken = req.HubToken.Trim(); changed++; }
 
             try
             {
@@ -928,6 +1030,106 @@ namespace TvBox.Plugin.Api
         }
 
         /// <summary>
+        /// Webhook：SmartStrm 式的「存即入库 / 删即清理」。
+        /// 三种事件：
+        ///   sync            触发整轮同步（等价于点「开始同步」）
+        ///   sync_item       单条推送（site + id），转存/追剧通知用
+        ///   emby_item_removed  删除同步（path），Emby「设置→通知→Webhook」勾媒体删除即可
+        /// 令牌来自配置 WebhookToken（自动生成），不走 Emby 登录态 —— 外部工具才有法调。
+        /// </summary>
+        public object Any(WebhookHook req)
+        {
+            var p = P;
+            if (p == null) return new SimpleResult { Success = false, Message = "插件未初始化" };
+            var cfg = p.Configuration;
+            var expect = (p.EnsureWebhookToken() ?? string.Empty).Trim();
+            if (expect.Length == 0)
+                return new SimpleResult { Success = false, Message = "Webhook 令牌尚未就绪，稍后重试" };
+            if (!string.Equals((req?.Token ?? string.Empty).Trim(), expect, StringComparison.Ordinal))
+                return new SimpleResult { Success = false, Message = "webhook 令牌不正确" };
+
+            var ev = (req?.Event ?? string.Empty).Trim().ToLowerInvariant();
+            // 只认 query / DTO 参数：Emby 的删除同步改由 LibraryWatcher 直接监听事件，
+            // 不依赖它的通知报文结构（那玩意儿随版本变，解析必碎）。
+            var pathArg = (req?.Path ?? string.Empty).Trim();
+            if (ev.Length == 0)
+                ev = pathArg.Length > 0 ? "emby_item_removed"
+                   : (string.IsNullOrWhiteSpace(req?.Site) ? "sync" : "sync_item");
+
+            try
+            {
+                if (ev == "sync" || ev == "sync_all")
+                {
+                    if (p.SyncService.IsRunning) return new SimpleResult { Success = true, Message = "已有同步在运行" };
+                    var outputRoot = p.ResolveOutputRoot();
+                    var baseUrl = p.ResolveEmbyBaseUrl();
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await p.SyncService.RunAsync(cfg, outputRoot, CancellationToken.None,
+                                () => p.SaveConfiguration(), baseUrl).ConfigureAwait(false);
+                        }
+                        catch (Exception ex)
+                        {
+                            try { p.Logger.Error("[webhook] 同步失败: " + ex.Message); } catch { }
+                        }
+                    });
+                    try { p.Logger.Info("[webhook] 触发整轮同步"); } catch { }
+                    return new SimpleResult { Success = true, Message = "已触发同步" };
+                }
+
+                if (ev == "sync_item" || ev == "push")
+                {
+                    if (string.IsNullOrWhiteSpace(req?.Site) || string.IsNullOrWhiteSpace(req.Id))
+                        return new SimpleResult { Success = false, Message = "缺少 site / id" };
+                    var root = p.ResolveOutputRoot();
+                    var r = p.SyncService.PushOneAsync(cfg, req.Site, req.SiteName, req.Id, root,
+                                                       p.ResolveEmbyBaseUrl(), CancellationToken.None)
+                                           .GetAwaiter().GetResult();
+                    bool ok = r.TryGetValue("ok", out var okv) && okv is bool b && b;
+                    var msg = r.TryGetValue("msg", out var m) ? m as string : (ok ? "已推送" : "推送失败");
+                    try { p.Logger.Info("[webhook] 单条推送 " + req.Site + " " + req.Id + " → " + (ok ? "OK" : msg)); } catch { }
+                    return new SimpleResult { Success = ok, Message = msg };
+                }
+
+                if (ev == "emby_item_removed" || ev == "item_removed" || ev == "delete")
+                {
+                    if (pathArg.Length == 0) return new SimpleResult { Success = false, Message = "缺少 path" };
+                    var w = new TvBox.Plugin.Core.StrmWriter(p.ResolveOutputRoot(), m =>
+                    {
+                        try { p.Logger.Info("[webhook] " + m); } catch { }
+                    });
+                    var ok = w.ForgetFile(pathArg, out var msg);
+                    try { p.Logger.Info("[webhook] 删除同步 " + (ok ? "OK " : "跳过 ") + pathArg + " " + (msg ?? "")); } catch { }
+                    return new SimpleResult { Success = ok, Message = msg };
+                }
+
+                return new SimpleResult { Success = false, Message = "未知 event: " + ev };
+            }
+            catch (Exception ex)
+            {
+                try { p.Logger.Error("[webhook] 异常: " + ex); } catch { }
+                return new SimpleResult { Success = false, Message = "webhook 执行异常: " + ex.Message };
+            }
+        }
+
+        /// <summary>Emby 删除同步：用户在 Emby 里删片 → 我们删 strm + 移出清单。</summary>
+        public object Any(ForgetItem req)
+        {
+            var p = P;
+            if (!HubOkStrict(req?.Token)) return new SimpleResult { Success = false, Message = "token 无效或未配置" };
+            var root = p.ResolveOutputRoot();
+            var w = new TvBox.Plugin.Core.StrmWriter(root, m =>
+            {
+                try { p.Logger.Info("[forget] " + m); } catch { }
+            });
+            var ok = w.ForgetFile(req.Path, out var msg);
+            try { p.Logger.Info("[forget] " + (ok ? "OK " : "跳过 ") + (req.Path ?? "") + " " + (msg ?? "")); } catch { }
+            return new SimpleResult { Success = ok, Message = msg };
+        }
+
+        /// <summary>
         /// 直播：hub 的 /live/&lt;key&gt; 已经产出标准 M3U，这里原样转出去（顺带处理 key 省略时合并多站）。
         /// Emby 的「Live TV → 添加 M3U tuner」填 http://&lt;lan&gt;:8096/TvBox/Live?key=网络直播 即可。
         /// </summary>
@@ -1016,12 +1218,37 @@ namespace TvBox.Plugin.Api
         public object Any(PlayResolve req)
         {
             var cfg = P?.Configuration;
+            // 与 Stream 同一套签名策略：配了密钥，带签名必须对；没签名只有在强制模式下才拒
+            try { SetStreamSign(cfg?.StreamSign, cfg?.StreamSignRequired == true); } catch { }
+            if (!string.IsNullOrEmpty(StreamSignSecret))
+            {
+                var expect = SignPlay(req.Site, req.Flag, req.Id);
+                var got = (req.S ?? string.Empty).Trim();
+                bool okSign = got.Length > 0 && string.Equals(got, expect, StringComparison.OrdinalIgnoreCase);
+                if (!okSign && (got.Length > 0 || StreamSignRequiredFlag))
+                    return PlainText(403, "signature mismatch");
+            }
             var hub = (cfg?.SpiderHubUrl ?? string.Empty).Trim().TrimEnd('/');
             if (hub.Length == 0) return PlainText(400, "插件里没配 hub 地址");
             if (string.IsNullOrWhiteSpace(req?.Id)) return PlainText(400, "缺少 id");
 
             try
             {
+                // ── 直链缓存 ──
+                // 同步的逐集校验会走一遍这个路由，等于顺手把地址预热进缓存；
+                // 之后重播 / 换客户端 / 拖动重连都能直接命中，不再打源站。
+                var cacheKey = Core.PlayLinkCache.Key(req.Site, req.Flag, req.Id);
+                if (Core.PlayLinkCache.TryGet(cacheKey, out var cached))
+                {
+                    P?.Logger.Debug("[play] 缓存命中 " + cacheKey);
+                    var cachedReq = new StreamProxy
+                    {
+                        U = SyncService.Base64UrlEncode(cached.Url),
+                        R = SyncService.Base64UrlEncode(_lastPlayReferer),
+                    };
+                    return GetCore(cachedReq);
+                }
+
                 var url = hub + "/play/" + Uri.EscapeDataString(req.Site ?? string.Empty)
                         + "?flag=" + Uri.EscapeDataString(req.Flag ?? string.Empty)
                         + "&id=" + Uri.EscapeDataString(req.Id) + "&json=1";
@@ -1045,6 +1272,7 @@ namespace TvBox.Plugin.Api
                     return PlainText(502, "解析失败: " + (msg ?? "hub 没给出地址"));
                 }
                 P?.Logger.Info("[play] " + req.Site + " " + req.Id + " → " + real + " (parse=" + parse + ")");
+                Core.PlayLinkCache.Set(cacheKey, real, parse);
 
                 // 不走 302：Emby 的 IHttpResult.StatusCode 实测设不进响应（客户端拿到的是 200 + Location），
                 // 播放器和校验都会把空 body 当成 text/plain 判死。直接复用 Stream 的代理逻辑，
@@ -1097,6 +1325,27 @@ namespace TvBox.Plugin.Api
 
         private object GetCore(StreamProxy req)
         {
+            // ── 签名校验 ──
+            // 没配密钥 → 不签名也不校验（老用户升级后 strm 里的地址照旧能播）。
+            // 配了密钥 → 带签名的必须对；没带签名的，只有开了 StreamSignRequired 才拒绝。
+            try
+            {
+                var cfgForSign = P?.Configuration;
+                SetStreamSign(cfgForSign?.StreamSign, cfgForSign?.StreamSignRequired == true);
+            }
+            catch { }
+            if (!string.IsNullOrEmpty(StreamSignSecret))
+            {
+                var expect = SignParams(req?.U, req?.R, req?.H);
+                var got = (req?.S ?? string.Empty).Trim();
+                bool okSign = got.Length > 0 && string.Equals(got, expect, StringComparison.OrdinalIgnoreCase);
+                if (!okSign && (got.Length > 0 || StreamSignRequiredFlag))
+                {
+                    try { P?.Logger.Warn("[stream] 签名不匹配，拒绝。required=" + StreamSignRequiredFlag); } catch { }
+                    return PlainText(403, "signature mismatch");
+                }
+            }
+
             var rawUrl = SyncService.Base64UrlDecode(req?.U);
             if (string.IsNullOrWhiteSpace(rawUrl) ||
                 !(rawUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
@@ -1251,6 +1500,58 @@ namespace TvBox.Plugin.Api
         }
 
         /// <summary>把原始地址包装成带扩展名的代理路径，例如 /TvBox/Stream/seg0.ts?u=...</summary>
+        /// <summary>当前生效的签名密钥（空 = 不签名/不校验）。由 SyncService / 配置读取处写入。</summary>
+        public static volatile string StreamSignSecret = string.Empty;
+
+        /// <summary>true = 没有签名或签名不对一律拒绝（公网暴露时必须开）。</summary>
+        public static volatile bool StreamSignRequiredFlag = false;
+
+        public static void SetStreamSign(string secret, bool required)
+        {
+            StreamSignSecret = (secret ?? string.Empty).Trim();
+            StreamSignRequiredFlag = required;
+        }
+
+        /// <summary>对 /TvBox/Play 的（站点|线路|分集id）签名。私有分集 id 走这个路由，也要防白嫖。</summary>
+        public static string SignPlay(string site, string flag, string id)
+        {
+            var secret = StreamSignSecret;
+            if (string.IsNullOrEmpty(secret)) return string.Empty;
+            try
+            {
+                using (var mac = new System.Security.Cryptography.HMACSHA256(
+                           System.Text.Encoding.UTF8.GetBytes(secret)))
+                {
+                    var raw = mac.ComputeHash(System.Text.Encoding.UTF8.GetBytes(
+                        "play|" + (site ?? "") + "|" + (flag ?? "") + "|" + (id ?? "")));
+                    var sb = new System.Text.StringBuilder(16);
+                    for (int i = 0; i < 8; i++) sb.Append(raw[i].ToString("x2"));
+                    return sb.ToString();
+                }
+            }
+            catch { return string.Empty; }
+        }
+
+        /// <summary>对播放/分片参数做签名，返回 16 位 hex；没配密钥返回空串。</summary>
+        public static string SignParams(string u, string r, string h)
+        {
+            var secret = StreamSignSecret;
+            if (string.IsNullOrEmpty(secret)) return string.Empty;
+            try
+            {
+                using (var mac = new System.Security.Cryptography.HMACSHA256(
+                           System.Text.Encoding.UTF8.GetBytes(secret)))
+                {
+                    var raw = mac.ComputeHash(System.Text.Encoding.UTF8.GetBytes(
+                        (u ?? "") + "|" + (r ?? "") + "|" + (h ?? "")));
+                    var sb = new System.Text.StringBuilder(16);
+                    for (int i = 0; i < 8; i++) sb.Append(raw[i].ToString("x2"));
+                    return sb.ToString();
+                }
+            }
+            catch { return string.Empty; }
+        }
+
         public static string BuildProxyPath(string originalUrl, string referer = null, string headerB64 = null)
         {
             string name = "stream";
@@ -1283,6 +1584,10 @@ namespace TvBox.Plugin.Api
                 path += "&r=" + SyncService.Base64UrlEncode(referer);
             if (!string.IsNullOrWhiteSpace(headerB64))
                 path += "&h=" + headerB64;      // 分片也得带同一份 header，不然一样被拒
+            var uEnc = SyncService.Base64UrlEncode(originalUrl);
+            var rEnc = string.IsNullOrWhiteSpace(referer) ? null : SyncService.Base64UrlEncode(referer);
+            var sig = SignParams(uEnc, rEnc, headerB64);
+            if (sig.Length > 0) path += "&s=" + sig;
             return path;
         }
 

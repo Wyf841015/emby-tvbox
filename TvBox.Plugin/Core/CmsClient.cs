@@ -48,6 +48,10 @@ namespace TvBox.Plugin.Core
         public string Content { get; set; }
         public string Actor { get; set; }
         public string Director { get; set; }
+        /// <summary>源站更新的时间戳（vod_time 原样保留，增量游标用它判断是否变化）。</summary>
+        public string Time { get; set; }
+        /// <summary>整片字幕地址（vod_sub，多数源不提供；有就落地成 srt/ass）。</summary>
+        public string SubUrl { get; set; }
         public List<VodLine> Lines { get; set; } = new List<VodLine>();
 
         /// <summary>总集数（所有线路里最多的那条）。</summary>
@@ -270,6 +274,8 @@ namespace TvBox.Plugin.Core
                 Actor = GetStringFlexible(el, "vod_actor", "actor"),
                 Director = GetStringFlexible(el, "vod_director", "director"),
                 Remarks = GetStringFlexible(el, "vod_remarks", "remarks", "note"),
+                Time = GetStringFlexible(el, "vod_time", "time", "last"),
+                SubUrl = GetStringFlexible(el, "vod_sub", "sub", "subtitle"),
                 Year = GetStringFlexible(el, "vod_year", "year"),
                 Area = GetStringFlexible(el, "vod_area", "area"),
                 TypeName = GetStringFlexible(el, "vod_class", "type_name", "class"),
@@ -447,6 +453,8 @@ namespace TvBox.Plugin.Core
                 Name = ChildVal(v, "vod_name"),
                 Pic = ChildVal(v, "vod_pic"),
                 Remarks = ChildVal(v, "vod_remarks"),
+                Time = ChildVal(v, "vod_time"),
+                SubUrl = FirstNonEmpty(ChildVal(v, "vod_sub"), ChildVal(v, "vod_subtitle")),
                 Year = ChildVal(v, "vod_year"),
                 Area = ChildVal(v, "vod_area"),
                 TypeName = ChildVal(v, "vod_class"),
@@ -454,6 +462,13 @@ namespace TvBox.Plugin.Core
             };
             item.Lines = PlayUrlParser.Parse(ChildVal(v, "vod_play_from"), ChildVal(v, "vod_play_url"));
             return item;
+        }
+
+        private static string FirstNonEmpty(params string[] vals)
+        {
+            foreach (var v in vals)
+                if (!string.IsNullOrWhiteSpace(v)) return v.Trim();
+            return string.Empty;
         }
 
         private static string ChildVal(XElement e, string name)

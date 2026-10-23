@@ -131,6 +131,15 @@ namespace TvBox.Plugin.Core
 
             // 关键：私有分集 id 要改写成 /TvBox/Play 地址，必须知道 Emby 的局域网地址
             _embyBase = (embyBaseForProxy ?? string.Empty).Trim().TrimEnd('/');
+            // 单条推送也要用同一套签名密钥，否则推出来的地址播不了
+            if (string.IsNullOrWhiteSpace(cfg.StreamSign))
+            {
+                var lazySign = Plugin.Instance?.EnsureStreamSign();
+                if (!string.IsNullOrWhiteSpace(lazySign)) cfg.StreamSign = lazySign;
+            }
+            TvBox.Plugin.Api.TvBoxApi.SetStreamSign(cfg.StreamSign, cfg.StreamSignRequired);
+            Core.PlayLinkCache.TtlMinutes = Math.Max(0, cfg.PlayCacheMinutes);
+
 
             using var http = CreateClient(cfg);
             var client = new CmsClient(http, m => _log("     [push] " + m), cfg.Referer);
@@ -185,6 +194,11 @@ namespace TvBox.Plugin.Core
             writer.DownloadPoster = cfg.DownloadPoster;
             writer.PosterMaxBytes = Math.Max(0, cfg.PosterMaxMb) * 1024 * 1024;
             writer.MaxDeletePerRun = 0;                       // 单条推送绝不做清理
+            writer.NameTemplate = cfg.NameTemplate;
+            writer.RenameRules = ParseLineList(cfg.RenameRules);
+            writer.SkipKeywords = SplitCsv(cfg.SkipKeywords);
+            writer.DownloadSubtitle = cfg.DownloadSubtitle;
+            AttachTmdb(writer, cfg);
             if (cfg.DownloadPoster)
             {
                 var imgHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(Math.Max(5, cfg.TimeoutSeconds)) };
@@ -224,6 +238,36 @@ namespace TvBox.Plugin.Core
         private void Update(Action<SyncProgress> mutate)
         {
             lock (_stateLock) mutate(Progress);
+        }
+
+
+        /// <summary>把 TMDB 查询钩子挂到 writer 上（没配 Key 就什么都不做）。</summary>
+        private void AttachTmdb(StrmWriter writer, PluginConfiguration cfg)
+        {
+            if (writer == null) return;
+            if (string.IsNullOrWhiteSpace(cfg.TmdbApiKey)) return;
+            var key = cfg.TmdbApiKey.Trim();
+            var lang = cfg.TmdbLanguage;
+            writer.TmdbLookup = (item, isSeries) =>
+            {
+                var q = StrmWriter.CleanTitle(item?.Name ?? string.Empty);
+                if (string.IsNullOrWhiteSpace(q)) return null;
+                return TmdbClient.Search(key, lang, q, item?.Year, isSeries, m => _log(m));
+            };
+            _log("TMDB 规范化: 开（语言 " + (string.IsNullOrWhiteSpace(lang) ? "zh-CN" : lang) + "，只改 nfo 元数据不改目录名）");
+        }
+
+        /// <summary>按行切分成列表（用于 RenameRules / SyncPlans 这类多行配置）。</summary>
+        internal static List<string> ParseLineList(string text)
+        {
+            var list = new List<string>();
+            if (string.IsNullOrWhiteSpace(text)) return list;
+            foreach (var raw in text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
+            {
+                var t = raw.Trim();
+                if (t.Length > 0 && !t.StartsWith("#", StringComparison.Ordinal)) list.Add(t);
+            }
+            return list;
         }
 
         public static HttpClient CreateClient(PluginConfiguration cfg, string forUserAgent = null)
@@ -289,7 +333,10 @@ namespace TvBox.Plugin.Core
                            || u.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
                 if (isHttp) { eps.Add(ep); continue; }
                 changed = true;
-                eps.Add(new VodEpisode { Name = ep.Name, Url = head + Uri.EscapeDataString(u), Resolved = true });
+                var playUrl = head + Uri.EscapeDataString(u);
+                var psig = TvBox.Plugin.Api.TvBoxApi.SignPlay(site?.Key, line.Name, u);
+                if (psig.Length > 0) playUrl += "&s=" + psig;
+                eps.Add(new VodEpisode { Name = ep.Name, Url = playUrl, Resolved = true });
             }
             if (!changed) return line;
             _logOnce("[私有格式] " + (site?.Name ?? site?.Key) + " 的 " + line.Name
@@ -498,6 +545,15 @@ namespace TvBox.Plugin.Core
                     writer.DownloadPoster = cfg.DownloadPoster;
                     writer.PosterMaxBytes = Math.Max(0, cfg.PosterMaxMb) * 1024 * 1024;
                     writer.MaxDeletePerRun = cfg.MaxDeletePerRun;
+                    writer.NameTemplate = cfg.NameTemplate;
+                    writer.RenameRules = ParseLineList(cfg.RenameRules);
+                    writer.SkipKeywords = SplitCsv(cfg.SkipKeywords);
+                    writer.DownloadSubtitle = cfg.DownloadSubtitle;
+                    if (writer.SkipKeywords.Count > 0)
+                        _log("跳过关键词: " + string.Join(" / ", writer.SkipKeywords));
+                    if (!string.IsNullOrWhiteSpace(cfg.NameTemplate) && cfg.NameTemplate != "{name} ({year})")
+                        _log("命名模板: " + cfg.NameTemplate);
+                    AttachTmdb(writer, cfg);
                     if (cfg.DownloadPoster)
                     {
                         // 海报下载：独立 HttpClient（短超时），失败不影响 strm 写入
@@ -512,6 +568,29 @@ namespace TvBox.Plugin.Core
                         _log("元数据: nfo=" + (cfg.WriteNfo ? "开" : "关")
                              + " 海报=" + (cfg.DownloadPoster ? "开" : "关"));
                     }
+                    // ── 播放链路初始化（直链缓存 + 签名）──
+                    Core.PlayLinkCache.TtlMinutes = Math.Max(0, cfg.PlayCacheMinutes);
+                    Core.PlayLinkCache.Clear();
+                    var signSecret = (cfg.StreamSign ?? string.Empty).Trim();
+                    if (signSecret.Length == 0)
+                    {
+                        signSecret = Guid.NewGuid().ToString("N");
+                        cfg.StreamSign = signSecret;
+                        try { saveConfig?.Invoke(); } catch { }
+                        _log("已生成播放签名密钥（StreamSign），strm 里的地址将带签名");
+                    }
+                    TvBox.Plugin.Api.TvBoxApi.SetStreamSign(signSecret, cfg.StreamSignRequired);
+                    if (string.IsNullOrWhiteSpace(cfg.WebhookToken))
+                    {
+                        cfg.WebhookToken = Guid.NewGuid().ToString("N");
+                        try { saveConfig?.Invoke(); } catch { }
+                        _log("已生成 Webhook 令牌（外部触发 / Emby 删除同步用）");
+                    }
+                    if (cfg.PlayCacheMinutes > 0)
+                        _log("播放直链缓存: " + cfg.PlayCacheMinutes + " 分钟");
+                    if (cfg.StreamSignRequired)
+                        _log("播放签名: 强制校验（无签名请求将被拒绝）");
+
                     // 站点级 Referer：每个站点单独取，写进代理地址里，播放时才会带对 Referer
                     string siteReferer = null;
                     _embyBase = (embyBaseUrlForProxy ?? string.Empty).Trim().TrimEnd('/');
@@ -561,6 +640,8 @@ namespace TvBox.Plugin.Core
                             // 站点级检查点，正在跑的逐集校验还要等满 TimeoutSeconds 才退出。
                             var n = await SyncOneSiteAsync(site, cfg, writer, keep, token, summary).ConfigureAwait(false);
                             _log($"   {site.DisplayName}: {n} 个条目");
+                            // 成功一轮把失败计数清零
+                            try { cfg.ResetFailStreak(site.Key); } catch { }
                             if (n > 0) await ReportSiteAsync(cfg, site.Key, true, ct).ConfigureAwait(false);
                         }
                         catch (OperationCanceledException) when (ct.IsCancellationRequested || token.IsCancellationRequested || _stopRequested) { throw; }
@@ -575,6 +656,24 @@ namespace TvBox.Plugin.Core
                             summary.SitesFailed++;
                             summary.Errors++;
                             _log($"   站点失败: {ex.Message}");
+                            // ── 站点熔断：连续失败到阈值就自动停用，别再每轮都白等超时 ──
+                            if (cfg.SiteFailThreshold > 0)
+                            {
+                                try
+                                {
+                                    var streak = cfg.BumpFailStreak(site.Key);
+                                    _log($"   连续失败 {streak}/{cfg.SiteFailThreshold} 次");
+                                    if (streak >= cfg.SiteFailThreshold)
+                                    {
+                                        if (cfg.DeadSites == null) cfg.DeadSites = new List<string>();
+                                        if (!cfg.DeadSites.Contains(site.Key, StringComparer.OrdinalIgnoreCase))
+                                            cfg.DeadSites.Add(site.Key);
+                                        _log($"⛔ 站点「{site.DisplayName}」连续失败 {streak} 次，已自动移出同步（配置页可一键恢复）");
+                                        try { saveConfig?.Invoke(); } catch { }
+                                    }
+                                }
+                                catch { }
+                            }
                             await ReportSiteAsync(cfg, site.Key, false, ct).ConfigureAwait(false);
                             Update(p => { p.Errors++; p.LastError = site.DisplayName + ": " + ex.Message; });
                         }
@@ -1054,7 +1153,8 @@ namespace TvBox.Plugin.Core
         {
             if (_state == null || !cfg.IncrementalSync || listed == null || string.IsNullOrEmpty(listed.Id))
                 return false;
-            if (!_state.TrySkip(site.Key, listed.Id, SyncState.Signature(listed), cfg.IncrementalHours, out var cached))
+            if (!_state.TrySkip(site.Key, listed.Id, SyncState.Signature(listed), cfg.IncrementalHours, out var cached,
+                                listed.Time, cfg.UseItemTimeCursor))
                 return false;
             foreach (var cp in cached) keep.Add(cp);
             summary.Items++;
@@ -1071,7 +1171,7 @@ namespace TvBox.Plugin.Core
             if (baseItem == null || string.IsNullOrEmpty(baseItem.Id)) return;
             var paths = (outs ?? Enumerable.Empty<WriteOutcome>())
                         .Where(o => !string.IsNullOrEmpty(o.Path)).Select(o => o.Path);
-            _state.Record(site.Key, baseItem.Id, SyncState.Signature(baseItem), paths);
+            _state.Record(site.Key, baseItem.Id, SyncState.Signature(baseItem), paths, baseItem.Time);
         }
 
         /// <summary>

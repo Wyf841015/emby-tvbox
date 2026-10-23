@@ -1402,6 +1402,25 @@ public class Hub {
                 sendJson(ex, 200, out);
                 return;
             }
+            case "/api/webhook": {   // GET：给出可直接配到外部工具里的 Webhook 地址（走插件，局域网可达）
+                Map<String, Object> pc = pluginConfig();
+                String tok = pc == null ? "" : str(pc.getOrDefault("WebhookToken", ""));
+                String base2 = embyBase();
+                Map<String, Object> m = new LinkedHashMap<>();
+                if (base2 == null || tok == null || tok.isBlank()) {
+                    m.put("ok", false);
+                    m.put("msg", base2 == null ? "还没连上 Emby" : "插件里还没生成 Webhook 令牌（先同步一次）");
+                } else {
+                    m.put("ok", true);
+                    m.put("url", base2 + "/TvBox/Webhook?token=" + tok);
+                    m.put("hint", "POST JSON：{\"event\":\"sync_item\",\"site\":\"站点key\",\"id\":\"条目id\"} / "
+                            + "{\"event\":\"sync\"} / {\"event\":\"emby_item_removed\",\"path\":\"/输出目录/movies/...\"}；"
+                            + "也支持 GET ?event=…&site=…&id=… 。Emby 里「设置→通知→添加 Webhook」填这个地址即可做删除同步。");
+                }
+                sendJson(ex, 200, m);
+                return;
+            }
+
             case "/api/push": {   // 一键推送：把一条内容写进 Emby 库（由插件负责写 strm）
                 if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { sendJson(ex, 200, fail("需要 POST")); return; }
                 String bodyText = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
@@ -2485,8 +2504,14 @@ public class Hub {
             // 下面 12 项以前漏在白名单外：Emby 插件页能改，hub 界面改了会被静默忽略
             "VerifyPlayUrl", "VerifyMaxEpisodes", "DetailBatchSize", "ResolveIndirectUrl",
             "WriteNfo", "DownloadPoster", "PosterMaxMb", "IncrementalSync", "IncrementalHours",
-            "StreamMode", "RedirectHosts", "MaxDeletePerRun"
-    };
+            "StreamMode", "RedirectHosts", "MaxDeletePerRun",
+            // v0.2.0：播放链路 / 命名过滤 / 元数据 / 调度（14 项）
+            "PlayCacheMinutes", "StreamSign", "StreamSignRequired",
+            "NameTemplate", "RenameRules", "SkipKeywords",
+            "TmdbApiKey", "TmdbLanguage", "DownloadSubtitle",
+            "UseItemTimeCursor", "SyncPlans", "SiteFailThreshold",
+            "WebhookToken", "EmbyDeleteSync",
+            "HubToken"};
 
     /**
      * 重启 Emby 的进度。前端弹窗「正在重启 Emby 服务器」靠它决定何时关闭 ——

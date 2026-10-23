@@ -28,6 +28,8 @@ namespace TvBox.Plugin.Core
             [JsonPropertyName("at")] public long At { get; set; }          // Unix 秒
             [JsonPropertyName("sig")] public string Sig { get; set; } = ""; // 列表侧指纹
             [JsonPropertyName("paths")] public List<string> Paths { get; set; } = new List<string>();
+            /// <summary>记录时源侧的 vod_time（增量游标：源更新了就别再跳过）。</summary>
+            [JsonPropertyName("t")] public string Time { get; set; } = "";
         }
 
         private readonly string _path;
@@ -75,12 +77,17 @@ namespace TvBox.Plugin.Core
         /// <summary>
         /// 能不能跳过这个条目。返回 true 时 paths 里是上次写出来的、**当前仍然存在**的文件。
         /// </summary>
-        public bool TrySkip(string siteKey, string id, string sig, int hours, out List<string> paths)
+        public bool TrySkip(string siteKey, string id, string sig, int hours, out List<string> paths,
+                            string srcTime = null, bool useTimeCursor = false)
         {
             paths = null;
             if (hours <= 0 || string.IsNullOrEmpty(id)) return false;
             if (!_items.TryGetValue(Key(siteKey, id), out var e)) return false;
             if (!string.Equals(e.Sig, sig, StringComparison.Ordinal)) return false;
+            // 源侧更新时间变了 → 有新集/换线路，必须重新拉详情
+            if (useTimeCursor && !string.IsNullOrWhiteSpace(srcTime)
+                && !string.Equals(e.Time ?? "", srcTime.Trim(), StringComparison.Ordinal))
+                return false;
 
             var age = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - e.At;
             if (age < 0 || age > hours * 3600L) return false;
@@ -93,13 +100,14 @@ namespace TvBox.Plugin.Core
             return true;
         }
 
-        public void Record(string siteKey, string id, string sig, IEnumerable<string> paths)
+        public void Record(string siteKey, string id, string sig, IEnumerable<string> paths, string srcTime = null)
         {
             if (string.IsNullOrEmpty(id)) return;
             _items[Key(siteKey, id)] = new Entry
             {
                 At = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
                 Sig = sig ?? "",
+                Time = (srcTime ?? "").Trim(),
                 Paths = (paths ?? Enumerable.Empty<string>()).Where(p => !string.IsNullOrEmpty(p)).ToList(),
             };
             _dirty = true;

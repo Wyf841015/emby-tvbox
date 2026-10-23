@@ -52,6 +52,7 @@ namespace TvBox.Plugin
             _logger = logManager.GetLogger("TvBox");
 
             SyncService = new SyncService(msg => _logger.Info(msg));
+
             _logger.Info("TvBox 插件已加载");
         }
 
@@ -67,6 +68,53 @@ namespace TvBox.Plugin
         public string PluginsPath => _paths?.PluginsPath;
 
         public SyncService SyncService { get; }
+
+        /// <summary>
+        /// 保证 Webhook 令牌存在并返回它。
+        /// 不能在构造函数里做 —— 那时 Configuration 还没加载（实测 NRE）。
+        /// 由 LibraryWatcher.Run（启动后）与 Webhook/Status 请求懒生成。
+        /// </summary>
+        /// <summary>
+        /// 保证播放签名密钥存在（懒生成）。写 strm 之前必须调到，
+        /// 否则单条推送写出来的地址不带签名，开了 StreamSignRequired 就播不了。
+        /// </summary>
+        public string EnsureStreamSign()
+        {
+            try
+            {
+                var cfg = Configuration;
+                if (cfg == null) return string.Empty;
+                if (!string.IsNullOrWhiteSpace(cfg.StreamSign)) return cfg.StreamSign;
+                cfg.StreamSign = Guid.NewGuid().ToString("N");
+                SaveConfiguration();
+                _logger.Info("已生成播放签名密钥（StreamSign）");
+                return cfg.StreamSign;
+            }
+            catch (Exception ex)
+            {
+                try { _logger.Warn("生成签名密钥失败: " + ex.Message); } catch { }
+                return string.Empty;
+            }
+        }
+
+        public string EnsureWebhookToken()
+        {
+            try
+            {
+                var cfg = Configuration;
+                if (cfg == null) return string.Empty;
+                if (!string.IsNullOrWhiteSpace(cfg.WebhookToken)) return cfg.WebhookToken;
+                cfg.WebhookToken = Guid.NewGuid().ToString("N");
+                SaveConfiguration();
+                _logger.Info("已生成 Webhook 令牌（外部触发 / Emby 删除同步用）");
+                return cfg.WebhookToken;
+            }
+            catch (Exception ex)
+            {
+                try { _logger.Warn("生成 Webhook 令牌失败: " + ex.Message); } catch { }
+                return string.Empty;
+            }
+        }
 
         public ILogger Logger => _logger;
 

@@ -36,15 +36,46 @@ namespace TvBox.Plugin.Tasks
             if (cfg == null || !cfg.EnableScheduledSync)
                 return Array.Empty<TaskTriggerInfo>();
 
+            // 配了多计划时每 5 分钟醒一次（用来匹配 HH:mm），否则按小时间隔跑
+            var hasPlans = !string.IsNullOrWhiteSpace(cfg.SyncPlans);
             return new[]
             {
                 new TaskTriggerInfo
                 {
                     // Emby 的 TaskTriggerInfo.Type 是字符串，不是枚举
                     Type = "IntervalTrigger",
-                    IntervalTicks = TimeSpan.FromHours(Math.Max(1, cfg.SyncIntervalHours)).Ticks,
+                    IntervalTicks = hasPlans
+                        ? TimeSpan.FromMinutes(5).Ticks
+                        : TimeSpan.FromHours(Math.Max(1, cfg.SyncIntervalHours)).Ticks,
                 },
             };
+        }
+
+        /// <summary>
+        /// 多计划调度：每行一条「HH:mm|站点key1,站点key2|full|incremental」。
+        /// 站点留空 = 全部；第三段 full = 本次强制全量（临时关掉增量）。
+        /// 同一条计划当天同一分钟只触发一次（记在 SyncPlanLastRun）。
+        /// 返回 null = 现在不该跑。
+        /// </summary>
+        private string PickDuePlan(PluginConfiguration cfg)
+        {
+            if (string.IsNullOrWhiteSpace(cfg.SyncPlans)) return null;
+            var now = DateTime.Now;
+            var hhmm = now.ToString("HH:mm");
+            var stamp = now.ToString("yyyyMMddHHmm");
+            foreach (var raw in cfg.SyncPlans.Replace("\r\n", "\n").Split('\n'))
+            {
+                var line = raw.Trim();
+                if (line.Length == 0 || line.StartsWith("#")) continue;
+                var parts = line.Split('|');
+                var when = parts.Length > 0 ? parts[0].Trim() : "";
+                if (when.Length != 5 || when != hhmm) continue;
+                if (cfg.GetPlanLastRun(line) == stamp) continue;
+                // 同一分钟只跑一条
+                cfg.SetPlanLastRun(line, stamp);
+                return line;
+            }
+            return null;
         }
 
         public async Task Execute(CancellationToken cancellationToken, IProgress<double> progress)
@@ -59,17 +90,46 @@ namespace TvBox.Plugin.Tasks
                 return;
             }
 
+            // ── 多计划：命中哪条就按哪条的站点子集/模式跑一轮 ──
+            var plan = PickDuePlan(cfg);
+            var savedWhite = cfg.SiteWhitelist;
+            var savedInc = cfg.IncrementalSync;
+            if (plan != null)
+            {
+                var parts = plan.Split('|');
+                var sites = parts.Length > 1 ? parts[1].Trim() : string.Empty;
+                var mode = parts.Length > 2 ? parts[2].Trim().ToLowerInvariant() : string.Empty;
+                if (sites.Length > 0) cfg.SiteWhitelist = sites;
+                if (mode == "full") cfg.IncrementalSync = false;
+                _logger.Info($"[计划] 命中「{plan}」：站点={(sites.Length > 0 ? sites : "全部")} 模式={(mode.Length > 0 ? mode : "默认")}");
+            }
+            else if (!string.IsNullOrWhiteSpace(cfg.SyncPlans))
+            {
+                _logger.Info("该时刻没有到期的同步计划，跳过");
+                return;
+            }
+
             var outputRoot = plugin.ResolveOutputRoot();
             _logger.Info($"开始同步，输出目录: {outputRoot}");
 
             progress?.Report(0);
 
-            var ran = await plugin.SyncService.RunAsync(
-                cfg,
-                outputRoot,
-                cancellationToken,
-                () => plugin.SaveConfiguration(),
-                plugin.ResolveEmbyBaseUrl()).ConfigureAwait(false);
+            bool ran;
+            try
+            {
+                ran = await plugin.SyncService.RunAsync(
+                    cfg,
+                    outputRoot,
+                    cancellationToken,
+                    () => plugin.SaveConfiguration(),
+                    plugin.ResolveEmbyBaseUrl()).ConfigureAwait(false);
+            }
+            finally
+            {
+                // 计划里的临时覆盖必须还原，否则会污染用户配置
+                cfg.SiteWhitelist = savedWhite;
+                cfg.IncrementalSync = savedInc;
+            }
 
             if (!ran)
             {
