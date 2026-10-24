@@ -568,7 +568,7 @@
         <div class="brand-text">
           <div class="brand-line">
             <h1>TvBox For Emby</h1>
-            <span class="ver">v0.6.1</span>
+            <span class="ver">v0.6.2</span>
           </div>
           <div class="sub"><span id="paneTitle">概览</span></div>
         </div>
@@ -750,6 +750,7 @@
       <div id="syncBarWrap" style="display:none;margin-top:16px">
         <div class="pbar"><div class="pbar-in" id="syncBar"></div></div>
         <div class="hint" id="syncBarText"></div>
+        <div class="hint" id="syncElapsed" style="font-size:12px;opacity:.8"></div>
       </div>
       <div class="hint" id="syncTip"></div>
     </div>
@@ -3193,15 +3194,18 @@ function applySyncStatus(d) {
       var total = s.SiteTotal || 0, idx = s.SiteIndex || 0;
       var pct = total > 0 ? Math.min(100, Math.round(idx * 100 / total)) : 0;
       document.getElementById('syncBar').style.width = pct + '%';
-      document.getElementById('syncBarText').textContent =
-        '第 ' + idx + '/' + total + ' 个站点' +
+      var bt = '第 ' + idx + '/' + total + ' 个站点' +
         (s.CurrentSite ? ' · 当前：' + s.CurrentSite : '') +
+        (s.CurrentItem ? ' · 处理中：《' + s.CurrentItem + '》' : '') +
         ' · 条目 ' + (s.ItemsWritten || 0) + ' · 错误 ' + (s.Errors || 0);
+      document.getElementById('syncBarText').textContent = bt;
+      syncElapsedStart(s.StartedUtc);
       document.getElementById('btnSyncStart').disabled = true;
       document.getElementById('btnSyncStop').disabled = false;
       if (!syncEs) syncPollStart();
     } else {
       setSyncPill(s.LastSyncUtc ? '空闲' : '从未同步', s.LastSyncUtc ? '' : 'bad');
+      syncElapsedStop();
       document.getElementById('tabSyncDot').style.display = 'none';
       document.getElementById('btnSyncStart').disabled = false;
       document.getElementById('btnSyncStop').disabled = true;
@@ -3227,6 +3231,24 @@ function refreshSyncStatus() {
     document.getElementById('syncStage').textContent = String(e);
     syncPollStop();
   });
+}
+
+// ── 已运行时长：每秒跳一次（纯前端），免得两个条目之间计数器不动，看着像卡死 ──
+var syncElapsedTimer = null, syncStartMs = 0;
+function syncElapsedStart(startedUtc) {
+  syncStartMs = startedUtc ? Date.parse(String(startedUtc).replace(' ', 'T') + 'Z') || 0 : 0;
+  if (syncElapsedTimer || !syncStartMs) return;
+  var el = document.getElementById('syncElapsed');
+  if (!el) return;
+  syncElapsedTimer = setInterval(function () {
+    var sec = Math.max(0, Math.floor((Date.now() - syncStartMs) / 1000));
+    el.textContent = '已运行 ' + Math.floor(sec / 60) + ':' + ('0' + sec % 60).slice(-2);
+  }, 1000);
+}
+function syncElapsedStop() {
+  if (syncElapsedTimer) { clearInterval(syncElapsedTimer); syncElapsedTimer = null; }
+  var el = document.getElementById('syncElapsed');
+  if (el) el.textContent = '';
 }
 
 // ── SSE：同步状态有变化 hub 主动推，不用 1.5s 轮询（学 qmediasync 的 WS 事件中心）──

@@ -397,6 +397,8 @@ namespace TvBox.Plugin.Api
         public bool Running { get; set; }
         public string Stage { get; set; }
         public string CurrentSite { get; set; }
+        public string CurrentItem { get; set; }
+        public string StartedUtc { get; set; }
         public int SiteIndex { get; set; }
         public int SiteTotal { get; set; }
         public int ItemsWritten { get; set; }
@@ -662,6 +664,8 @@ namespace TvBox.Plugin.Api
                     Running = pr.Running,
                     Stage = pr.Stage,
                     CurrentSite = pr.CurrentSite,
+                    CurrentItem = pr.CurrentItem,
+                    StartedUtc = pr.StartedUtc == DateTime.MinValue ? "" : pr.StartedUtc.ToString("u"),
                     SiteIndex = pr.SiteIndex,
                     SiteTotal = pr.SiteTotal,
                     ItemsWritten = pr.ItemsWritten,

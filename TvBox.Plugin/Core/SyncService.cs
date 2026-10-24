@@ -15,6 +15,8 @@ namespace TvBox.Plugin.Core
         public bool Running { get; set; }
         public string Stage { get; set; } = "";
         public string CurrentSite { get; set; } = "";
+        /// <summary>正在处理的条目名（界面靠它显示「活着」，否则两个条目之间计数器不动，看着像卡了）</summary>
+        public string CurrentItem { get; set; } = "";
         public int SiteIndex { get; set; }
         public int SiteTotal { get; set; }
         public int ItemsWritten { get; set; }
@@ -1093,6 +1095,7 @@ namespace TvBox.Plugin.Core
                     ThrowIfStopped(ct);
                     if (cfg.MaxItemsPerRun > 0 && summary.Items >= cfg.MaxItemsPerRun) { summary.Truncated = true; break; }
                     if (string.IsNullOrWhiteSpace(item.Id)) continue;
+                    Update(p => p.CurrentItem = item.Name ?? item.Id ?? "");
                     seen++;
                     // 增量：列表侧指纹没变且还在有效期内 → 详情都不拉
                     if (TrySkipByIncremental(cfg, site, item, keep, summary)) continue;
@@ -1730,6 +1733,7 @@ namespace TvBox.Plugin.Core
 
                         foreach (var item in details)
                         {
+                            Update(p => p.CurrentItem = item.Name ?? item.Id ?? "");
                             var line = PlayUrlParser.PickBestLine(item);
                             if (line == null) continue;
                             // 有分类的主路径之前漏了这一步：私有分集 id（146660@1314815 这类）
