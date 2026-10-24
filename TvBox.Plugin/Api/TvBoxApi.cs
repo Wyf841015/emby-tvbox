@@ -164,6 +164,7 @@ namespace TvBox.Plugin.Api
         /// <summary>hub ↔ 插件共享令牌（hub 写进来，插件所有免登录路由校验它）</summary>
         public string HubToken { get; set; }
         public string StrmPlayMode { get; set; }
+        public bool? ValidateCachedLink { get; set; }
         public string StreamBaseUrl { get; set; }
         public int? DirectRefreshHours { get; set; }
         public bool? DirectProbe { get; set; }
@@ -246,6 +247,7 @@ namespace TvBox.Plugin.Api
         public int DirectProbeSeconds { get; set; }
         public bool CrossSiteFallback { get; set; }
         public int CrossSiteMaxCandidates { get; set; }
+        public bool ValidateCachedLink { get; set; }
 
     }
 
@@ -311,8 +313,14 @@ namespace TvBox.Plugin.Api
 
     [Unauthenticated]   // 播放器/Emby 校验都不会带 token
     [Route("/TvBox/Play", "GET,HEAD", Summary = "把 spider 的私有分集 id 解析成真地址（内部走 hub /play/）")]
+    // 带 .m3u8 后缀的写法：ffmpeg 的 HLS 解复用器认「扩展名或 mime」，
+    // /TvBox/Play?… 两者都不满足会被判成 "Not detecting m3u8/hls" —— Emby 直接播不了。
+    [Route("/TvBox/Play/{Name}", "GET,HEAD", Summary = "同上；路径段带媒体扩展名（如 v.m3u8），兼容 ffmpeg 的 HLS 探测")]
     public class PlayResolve : IReturnVoid
     {
+        /// <summary>路径段（如 v.m3u8），只为让 ffmpeg/Emby 认出媒体类型，不参与逻辑。</summary>
+        public string Name { get; set; }
+
         /// <summary>站点 key（hub 里的站点标识）。</summary>
         public string Site { get; set; }
         /// <summary>线路名（vod_play_from，如「在线播放」「高清」）。</summary>
@@ -803,6 +811,7 @@ namespace TvBox.Plugin.Api
                 WebhookToken = cfg.WebhookToken,
                 EmbyDeleteSync = cfg.EmbyDeleteSync,
                 StrmPlayMode = cfg.StrmPlayMode,
+                ValidateCachedLink = cfg.ValidateCachedLink,
                 StreamBaseUrl = cfg.StreamBaseUrl,
                 DirectRefreshHours = cfg.DirectRefreshHours,
                 DirectProbe = cfg.DirectProbe,
@@ -876,7 +885,13 @@ namespace TvBox.Plugin.Api
             if (req.WebhookToken != null) { cfg.WebhookToken = req.WebhookToken.Trim(); changed++; }
             if (req.EmbyDeleteSync.HasValue) { cfg.EmbyDeleteSync = req.EmbyDeleteSync.Value; changed++; }
             if (req.HubToken != null) { cfg.HubToken = req.HubToken.Trim(); changed++; }
-            if (!string.IsNullOrWhiteSpace(req.StrmPlayMode)) { cfg.StrmPlayMode = req.StrmPlayMode.Trim().ToLowerInvariant(); changed++; }
+            if (!string.IsNullOrWhiteSpace(req.StrmPlayMode))
+            {
+                var m0 = req.StrmPlayMode.Trim().ToLowerInvariant();
+                if (m0 == "proxy" || m0 == "direct" || m0 == "direct_fallback" || m0 == "redirect")
+                { cfg.StrmPlayMode = m0; changed++; }
+            }
+            if (req.ValidateCachedLink.HasValue) { cfg.ValidateCachedLink = req.ValidateCachedLink.Value; changed++; }
             if (req.StreamBaseUrl != null) { cfg.StreamBaseUrl = req.StreamBaseUrl.Trim(); changed++; }
             if (req.DirectRefreshHours.HasValue) { cfg.DirectRefreshHours = Math.Clamp(req.DirectRefreshHours.Value, 1, 240); changed++; }
             if (req.DirectProbe.HasValue) { cfg.DirectProbe = req.DirectProbe.Value; changed++; }
@@ -1270,12 +1285,27 @@ namespace TvBox.Plugin.Api
                 if (Core.PlayLinkCache.TryGet(cacheKey, out var cached))
                 {
                     P?.Logger.Debug("[play] 缓存命中 " + cacheKey);
-                    var cachedReq = new StreamProxy
+                    // 缓存的链接先验活（学 qmediasync）：源站可能提前掐掉 auth_key，
+                    // 与其让播放器吃 403，不如这里 Range 探测一下，失效就重解析一次。
+                    if ((cfg?.ValidateCachedLink ?? true) && !ProbeQuick(cached.Url, _lastPlayReferer))
                     {
-                        U = SyncService.Base64UrlEncode(cached.Url),
-                        R = SyncService.Base64UrlEncode(_lastPlayReferer),
-                    };
-                    return GetCore(cachedReq);
+                        Core.PlayLinkCache.Invalidate(cacheKey);
+                        P?.Logger.Info("[play] 缓存链接已失效，重新解析 " + cacheKey);
+                    }
+                    else
+                    {
+                        if (RedirectRequested(cfg))
+                        {
+                            P?.Logger.Info("[play] 302 → " + cached.Url);
+                            return Factory().GetRedirectResult(cached.Url);
+                        }
+                        var cachedReq = new StreamProxy
+                        {
+                            U = SyncService.Base64UrlEncode(cached.Url),
+                            R = SyncService.Base64UrlEncode(_lastPlayReferer),
+                        };
+                        return GetCore(cachedReq);
+                    }
                 }
 
                 var url = hub + "/play/" + Uri.EscapeDataString(req.Site ?? string.Empty)
@@ -1303,8 +1333,16 @@ namespace TvBox.Plugin.Api
                 P?.Logger.Info("[play] " + req.Site + " " + req.Id + " → " + real + " (parse=" + parse + ")");
                 Core.PlayLinkCache.Set(cacheKey, real, parse);
 
-                // 不走 302：Emby 的 IHttpResult.StatusCode 实测设不进响应（客户端拿到的是 200 + Location），
-                // 播放器和校验都会把空 body 当成 text/plain 判死。直接复用 Stream 的代理逻辑，
+                // 302 模式：用 Emby 4.10 官方的 IHttpResultFactory.GetRedirectResult 回真 3xx
+                // （以前自拼 StatusCode 会变成 200+Location，那是 4.9 的坑；这个工厂方法 4.10 才有，
+                //  部署后用 curl -i 验证状态行真的是 30x 才算数）
+                if (RedirectRequested(cfg))
+                {
+                    P?.Logger.Info("[play] 302 → " + real);
+                    return Factory().GetRedirectResult(real);
+                }
+
+                // 代理模式：直接复用 Stream 的代理逻辑，
                 // 顺带还能补 Referer、重写 HLS 分片地址。
                 var proxyReq = new StreamProxy
                 {
@@ -1331,6 +1369,31 @@ namespace TvBox.Plugin.Api
                 try { P?.Logger.Error("StreamProxy 失败: " + ex); } catch { }
                 return PlainText(500, "StreamProxy error: " + ex);
             }
+        }
+
+        /// <summary>当前配置是否要求播放走 302 重定向。</summary>
+        private static bool RedirectRequested(PluginConfiguration cfg)
+            => string.Equals((cfg?.StrmPlayMode ?? "proxy").Trim(), "redirect", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// 缓存直链的轻量验活：Range 0-0 拉一下，只看状态码（学 qmediasync 的「链接有效性检测」）。
+        /// 416 也算活（Range 不满足但资源存在）；超时按失效处理，宁可多解析一次也别让播放器吃 403。
+        /// </summary>
+        private static bool ProbeQuick(string url, string referer)
+        {
+            if (string.IsNullOrWhiteSpace(url)) return false;
+            try
+            {
+                var hm = new HttpRequestMessage(HttpMethod.Get, url);
+                try { hm.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 0); } catch { }
+                if (!string.IsNullOrEmpty(referer))
+                    try { hm.Headers.Referrer = new Uri(referer); } catch { }
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(4) };
+                using var resp = http.Send(hm, HttpCompletionOption.ResponseHeadersRead);
+                var sc = (int)resp.StatusCode;
+                return sc < 400 || sc == 416;
+            }
+            catch (Exception) { return false; }
         }
 
         /// <summary>判断 URL 的 host 是否在逗号分隔的域名清单里（支持子域后缀匹配）。</summary>

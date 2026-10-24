@@ -1,5 +1,41 @@
 # emby-tvbox
 
+## v0.6.0 — 302 播放模式 + 直链缓存自适应（学 qmediasync）
+
+**302 重定向模式（StrmPlayMode=redirect）**
+
+学的是 qmediasync 的 emby302：strm 里写本机地址，播放时实时解析、回真 3xx 给播放器。
+对照原有两种方式：
+
+| 模式 | strm 写什么 | 直链过期 | NAS 流量 |
+|---|---|---|---|
+| proxy（原有） | 本机代理 | 无 | 全走 NAS |
+| direct（原有） | 源站直链 | **会过期**，靠定时重刷 | 不走 |
+| **redirect（新增）** | 本机地址 | **永不过期**（播放时才解析） | **不走** |
+
+实现要点（都是踩过坑才这么写的）：
+- Emby 4.9 自拼 StatusCode 会变成 200+Location（pitfall 42），4.10 有官方
+  `IHttpResultFactory.GetRedirectResult()` —— 用它，部署后 `curl -i` 实测状态行真是 **302 Found**
+- **路由必须带媒体扩展名**：ffmpeg 的 HLS 解复用器认「扩展名或 mime」，
+  `/TvBox/Play?…` 两者都不满足会被判 `Not detecting m3u8/hls`，Emby 直接播不了；
+  新增 `/TvBox/Play/{Name}` 路由，strm 写 `/TvBox/Play/v.m3u8?…`（老地址继续可用）
+- `ffmpeg -t 5` 走新路由解码 **exit=0** ✅；缓存命中再播同样 302（0.38s）
+
+**直链缓存自适应（PlayLinkCache）**
+
+- **TTL 贴着链接真实有效期**（学 qmediasync：115 缓存 50 分钟=有效期 60 分钟留 10 分钟）：
+  从 URL 签名解析真实过期时间（`auth_key=起-止`、`keyTime=起-止`、`expires=/deadline=`、
+  `X-Amz-Date+X-Amz-Expires`），取「配置 TTL」与「真实剩余 − 2 分钟」的较小者
+- **缓存命中先验活**（`ValidateCachedLink`，默认开）：Range 0-0 探测 4 秒，失效自动重解析一次
+  —— 源站经常提前掐 auth_key，与其让播放器吃 403，不如这里多一次探测
+
+**修了一个 v0.5.0 的潜伏 bug**：hub 的 `PLUGIN_CFG_KEYS` 白名单漏了
+`CrossSiteFallback` / `CrossSiteMaxCandidates` —— 界面上改了会被**静默忽略**，
+一直在用默认值跑（好在默认值就是想要的值，没出过事）。这次补上，连同
+`DirectProbe` / `DirectProbeSeconds` / `ValidateCachedLink` 一起入白名单；
+实测 `crossSiteMaxCandidates=4` 保存后能正确回读。
+
+
 ## v0.5.0 — 跨站换源（对外版本号 0.5.0，合并 0.3.0–0.3.5 六轮改动）
 
 **为什么做这个**

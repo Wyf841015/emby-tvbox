@@ -568,7 +568,7 @@
         <div class="brand-text">
           <div class="brand-line">
             <h1>TvBox For Emby</h1>
-            <span class="ver">v0.5.1</span>
+            <span class="ver">v0.6.0</span>
           </div>
           <div class="sub"><span id="paneTitle">概览</span></div>
         </div>
@@ -878,12 +878,14 @@
       <div class="f"><label>单次最多删除条目</label><input type="number" id="pcMaxDelete" min="0"></div>
 
       <h2 style="margin-top:22px">播放与安全</h2>
-      <div class="f"><label>播放直链缓存(分钟，0=关闭)</label><input type="number" id="pcPlayCache" min="0" max="720"></div>
+      <div class="f"><label>播放直链缓存(分钟，0=关闭；会自动贴着链接真实有效期缩短)</label><input type="number" id="pcPlayCache" min="0" max="720"></div>
+      <div class="chk"><label><input type="checkbox" id="pcValidateCache"> 缓存命中先验活（Range 探测 4 秒，失效自动重解析，不让播放器吃 403）</label></div>
       <div class="f"><label>strm 播放地址方式</label>
         <select id="pcStrmMode">
           <option value="proxy">代理（内网可播，外网要能免登录访问 Emby）</option>
           <option value="direct">直链（写源站地址，外网可直接播）</option>
           <option value="direct_fallback">直链优先（解析不出时退回代理）</option>
+          <option value="redirect">302 重定向（strm 写本机地址，播放时实时解析回源站直链，不用定时重刷）</option>
         </select>
       </div>
       <div class="f"><label>播放地址基址（留空=Emby 地址）</label><input type="text" id="pcStreamBase" placeholder="如 https://tv.example.com:8096"></div>
@@ -2357,6 +2359,7 @@ var PC_FIELDS = {
   Referer: 'pcReferer', UserAgent: 'pcUA', SyncIntervalHours: 'pcInterval',
   PlayCacheMinutes: 'pcPlayCache', StreamSign: 'pcStreamSign',
   StrmPlayMode: 'pcStrmMode', StreamBaseUrl: 'pcStreamBase', DirectRefreshHours: 'pcDirectRefresh',
+  ValidateCachedLink: 'pcValidateCache',
   NameTemplate: 'pcNameTpl', RenameRules: 'pcRenameRules', SkipKeywords: 'pcSkipKeywords',
   TmdbApiKey: 'pcTmdbKey', TmdbLanguage: 'pcTmdbLang',
   SiteFailThreshold: 'pcFailThreshold', SyncPlans: 'pcSyncPlans',

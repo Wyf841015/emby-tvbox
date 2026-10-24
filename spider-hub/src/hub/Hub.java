@@ -2627,7 +2627,12 @@ public class Hub {
             "WebhookToken", "EmbyDeleteSync",
             "HubToken",
             // v0.3.0：外网播放（strm 写什么地址）
-            "StrmPlayMode", "StreamBaseUrl", "DirectRefreshHours"};
+            "StrmPlayMode", "StreamBaseUrl", "DirectRefreshHours",
+            // v0.5.x：直链探测 / 跨站换源 / 缓存验活（v0.5.0 时 CrossSite 两项漏在白名单外，
+            // 界面上改了会被静默忽略 —— 一直是默认值在跑，这次一并补上）
+            "DirectProbe", "DirectProbeSeconds",
+            "CrossSiteFallback", "CrossSiteMaxCandidates",
+            "ValidateCachedLink"};
 
     /**
      * 重启 Emby 的进度。前端弹窗「正在重启 Emby 服务器」靠它决定何时关闭 ——

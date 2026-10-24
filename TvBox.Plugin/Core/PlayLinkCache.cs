@@ -56,7 +56,7 @@ namespace TvBox.Plugin.Core
             {
                 Url = url.Trim(),
                 Parse = parse,
-                ExpireAtTicks = DateTime.UtcNow.AddMinutes(Math.Min(TtlMinutes, 720)).Ticks,
+                ExpireAtTicks = DateTime.UtcNow.AddSeconds(EffectiveTtlSeconds(url)).Ticks,
             };
             // 顺手清过期项，避免无限增长（缓存量级 = 条目数，几千级，扫一遍很便宜）
             if (_map.Count > 20000)
@@ -65,6 +65,76 @@ namespace TvBox.Plugin.Core
                 foreach (var kv in _map) if (kv.Value.ExpireAtTicks <= now) _map.TryRemove(kv.Key, out _);
             }
             _map[key] = e;
+        }
+
+        /// <summary>把指定条目立刻作废（缓存命中但探测失败时用）。</summary>
+        public static void Invalidate(string key)
+        {
+            if (!string.IsNullOrEmpty(key)) _map.TryRemove(key, out _);
+        }
+
+        /// <summary>
+        /// 计算这条直链的有效缓存秒数：配置 TTL 与「URL 签名里的真实过期时间 − 2 分钟提前量」取小。
+        /// 学 qmediasync 的做法（115 缓存 50 分钟 = 有效期 60 分钟留 10 分钟余量）：
+        /// 固定 TTL 的坑是「缓存还没到 25 分钟、源站的 auth_key 先到期」，开播直接失败。
+        /// </summary>
+        static long EffectiveTtlSeconds(string url)
+        {
+            var cap = Math.Min(TtlMinutes, 720) * 60L;
+            var real = SecondsUntilExpiry(url);
+            if (!real.HasValue) return cap;
+            var eff = (long)real.Value - 120;                 // 留 2 分钟提前量
+            if (eff < 15) eff = Math.Min(Math.Max((long)real.Value, 0), 15);   // 快过期的也短存，别负数
+            return Math.Max(0, Math.Min(cap, eff));
+        }
+
+        /// <summary>
+        /// 从直链 URL 的签名参数里解析真实过期时间，返回距过期还有多少秒；解析不出返回 null。
+        /// 覆盖常见形态：
+        ///   auth_key=起始-结束-…（阿里云系）      keyTime=起始-结束（腾讯系）
+        ///   expires=epoch / deadline=epoch（秒/毫秒自适应）
+        ///   X-Amz-Date=YYYYMMDDTHHMMSSZ + X-Amz-Expires=秒（S3 预签名）
+        /// </summary>
+        public static int? SecondsUntilExpiry(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url)) return null;
+            const System.Text.RegularExpressions.RegexOptions O = System.Text.RegularExpressions.RegexOptions.IgnoreCase;
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            try
+            {
+                foreach (var k in new[] { "auth_key", "keyTime" })
+                {
+                    var m = System.Text.RegularExpressions.Regex.Match(url, k + @"=(\d{10,13})-(\d{10,13})", O);
+                    if (!m.Success) continue;
+                    long s = long.Parse(m.Groups[1].Value), e = long.Parse(m.Groups[2].Value);
+                    if (s > 1_000_000_000_000L) { s /= 1000; e /= 1000; }
+                    if (e > now) return (int)Math.Min(int.MaxValue, e - now);
+                    return 0;
+                }
+                var me = System.Text.RegularExpressions.Regex.Match(url, @"[?&](?:expires|deadline)=(\d{10,13})", O);
+                if (me.Success)
+                {
+                    long v = long.Parse(me.Groups[1].Value);
+                    if (v > 1_000_000_000_000L) v /= 1000;
+                    if (v > now) return (int)Math.Min(int.MaxValue, v - now);
+                    return 0;
+                }
+                var amzE = System.Text.RegularExpressions.Regex.Match(url, @"X-Amz-Expires=(\d+)", O);
+                var amzD = System.Text.RegularExpressions.Regex.Match(url, @"X-Amz-Date=(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z", O);
+                if (amzE.Success && amzD.Success)
+                {
+                    var dt = new DateTime(int.Parse(amzD.Groups[1].Value), int.Parse(amzD.Groups[2].Value),
+                                          int.Parse(amzD.Groups[3].Value), int.Parse(amzD.Groups[4].Value),
+                                          int.Parse(amzD.Groups[5].Value), int.Parse(amzD.Groups[6].Value),
+                                          DateTimeKind.Utc);
+                    long end = new DateTimeOffset(dt, TimeSpan.Zero).ToUnixTimeSeconds()
+                               + long.Parse(amzE.Groups[1].Value);
+                    if (end > now) return (int)Math.Min(int.MaxValue, end - now);
+                    return 0;
+                }
+            }
+            catch { }
+            return null;
         }
 
         public static void Clear()

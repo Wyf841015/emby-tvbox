@@ -133,6 +133,12 @@ namespace TvBox.Plugin
         /// </summary>
         public bool CrossSiteFallback { get; set; } = true;
 
+        /// <summary>
+        /// 播放命中直链缓存时先轻量验活（Range 0-0，4 秒超时），失效就重新解析一次。
+        /// 源站的 auth_key 经常比缓存 TTL 先过期，与其让播放器吃 403，不如这里多一次探测。
+        /// </summary>
+        public bool ValidateCachedLink { get; set; } = true;
+
         /// <summary>跨站换源每次最多试几个候选站点</summary>
         public int CrossSiteMaxCandidates { get; set; } = 3;
 

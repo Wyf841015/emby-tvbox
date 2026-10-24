@@ -325,16 +325,21 @@ namespace TvBox.Plugin.Core
         /// 而走 fnOS 网关的域名又要登录态，播放器拿不到 cookie —— 所以给出直链模式：
         /// 直接把源站地址写进 strm，客户端连源站（不经过 NAS）。
         /// </summary>
+        /// <summary>proxy 和 redirect 两种模式写进 strm 的地址形态一致（都指向 /TvBox/Play）。</summary>
+        private static bool ProxyStyle(string mode) => mode == "proxy" || mode == "redirect";
+
         private void SetupPlayMode(PluginConfiguration cfg, string embyBaseForProxy)
         {
             var mode = (cfg?.StrmPlayMode ?? "proxy").Trim().ToLowerInvariant();
-            if (mode != "direct" && mode != "direct_fallback") mode = "proxy";
+            if (mode != "direct" && mode != "direct_fallback" && mode != "redirect") mode = "proxy";
             _playMode = mode;
 
             var explicitBase = (cfg?.StreamBaseUrl ?? string.Empty).Trim();
             _embyBase = (explicitBase.Length > 0 ? explicitBase : (embyBaseForProxy ?? string.Empty)).Trim().TrimEnd('/');
 
-            if (mode == "proxy")
+            if (mode == "redirect")
+                _log("播放地址策略: 302 重定向（strm 写本机地址，播放时实时解析回 307 源站直链，直链过期不再需要重刷 strm）");
+            else if (mode == "proxy")
             {
                 if (explicitBase.Length > 0) _log("播放地址基址: " + _embyBase);
             }
@@ -454,7 +459,7 @@ namespace TvBox.Plugin.Core
             var baseUrl = (_embyBase ?? string.Empty).Trim().TrimEnd('/');
             // 直链模式不需要插件基址（解析成功就不写代理地址）；
             // 但 direct_fallback 的退回分支需要，缺基址时直接按 direct 处理。
-            if (baseUrl.Length == 0 && _playMode == "proxy") return line;
+            if (baseUrl.Length == 0 && ProxyStyle(_playMode)) return line;
 
             var head = baseUrl + "/TvBox/Play?site=" + Uri.EscapeDataString(site?.Key ?? string.Empty)
                      + "&flag=" + Uri.EscapeDataString(line.Name ?? string.Empty) + "&id=";
@@ -463,7 +468,7 @@ namespace TvBox.Plugin.Core
             // ── 直链模式要逐集问 hub（每个 id 一次 playerContent），串行会慢到没法用 ──
             // 先并行解析出「私有 id → 真实地址」，再按原顺序组装，保持分集顺序不乱。
             Dictionary<string, string> realMap = null;
-            if (_playMode != "proxy")
+            if (!ProxyStyle(_playMode))
             {
                 var need = line.Episodes
                     .Where(e => e != null)
@@ -513,7 +518,7 @@ namespace TvBox.Plugin.Core
                 if (isHttp) { eps.Add(ep); continue; }
 
                 // ── 直链模式：把私有 id 换成源站真实地址直接写 ──
-                if (_playMode != "proxy")
+                if (!ProxyStyle(_playMode))
                 {
                     string realUrl = null;
                     realMap?.TryGetValue(u, out realUrl);
@@ -798,7 +803,7 @@ namespace TvBox.Plugin.Core
                     // 站点级 Referer：每个站点单独取，写进代理地址里，播放时才会带对 Referer
                     string siteReferer = null;
                     SetupPlayMode(cfg, embyBaseUrlForProxy);
-                    if (_playMode != "proxy")
+                    if (!ProxyStyle(_playMode))
                     {
                         // 直链：源站地址原样写进 strm，播放器直连源站，外网也能播
                         writer.UrlRewriter = u => u;
@@ -1332,7 +1337,7 @@ namespace TvBox.Plugin.Core
                     writer2.SkipKeywords = SplitCsv(cfg.SkipKeywords);
                     writer2.DownloadSubtitle = cfg.DownloadSubtitle;
                     AttachTmdb(writer2, cfg);
-                    if (_playMode != "proxy") writer2.UrlRewriter = u => u;
+                    if (!ProxyStyle(_playMode)) writer2.UrlRewriter = u => u;
                     else if (cfg.UseProxy && !string.IsNullOrWhiteSpace(_embyBase))
                     {
                         var bu = _embyBase;
