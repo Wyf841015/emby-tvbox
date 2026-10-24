@@ -568,7 +568,7 @@
         <div class="brand-text">
           <div class="brand-line">
             <h1>TvBox For Emby</h1>
-            <span class="ver">v0.6.0</span>
+            <span class="ver">v0.6.1</span>
           </div>
           <div class="sub"><span id="paneTitle">概览</span></div>
         </div>
@@ -804,6 +804,12 @@
       <div id="syncSummary" class="empty">还没有同步记录</div>
       <div class="hint" id="syncLastErr"></div>
     </div>
+
+    <div class="panel">
+      <h2>同步记录 <button class="ghost" style="float:right" onclick="loadSyncRecords()">刷新</button></h2>
+      <div class="hint" style="margin:0 0 6px">最近 400 条条目级记录（写入 / 跳过 / 失败 / 换源），重启后清零</div>
+      <div id="syncRecordsBox" class="empty">点「刷新」加载</div>
+    </div>
   </div>
 
   <!-- ══════════ 配置 ══════════ -->
@@ -925,6 +931,10 @@
       <div class="f"><label>多条同步计划（每行 HH:mm|站点key|full）</label><textarea id="pcSyncPlans" rows="3" placeholder="03:00||full&#10;15:30|金牌影视|"></textarea></div>
       <div class="row">
         <button class="primary" onclick="pcSave()" id="btnPcSave">保存配置</button>
+        <button onclick="exportConfig()">导出配置</button>
+        <button onclick="document.getElementById('pcImportFile').click()">导入配置</button>
+        <input type="file" id="pcImportFile" accept="application/json,.json" style="display:none"
+               onchange="importConfig(this)" />
         <button onclick="pcLoad()">重新读取</button>
         <span class="hint" id="pcMsg" style="margin:0"></span>
       </div>
@@ -2045,7 +2055,7 @@ function switchTab(name, el) {
   if (name === 'logs') loadLogs();
   if (name === 'overview') loadRecent();
   if (name === 'emby' && !document.getElementById('embyList').dataset.loaded) detectEmby();
-  if (name === 'sync') refreshSyncStatus();
+  if (name === 'sync') { syncFeedStart(); refreshSyncStatus(); }
   else if (typeof syncPollStop === 'function') syncPollStop();
   try { localStorage.setItem('tvboxhub.tab', name); } catch (e) {}
 }
@@ -2469,6 +2479,41 @@ function pcLoad() {
       }
     }).catch(function () {});
   });
+}
+
+// ── 配置导出/导入 ──
+function exportConfig() {
+  api('api/export').then(function (d) {
+    // fnOS WebView 里 <a download> 会被拦，必须 fetch + Blob + 临时 a.click()
+    var blob = new Blob([JSON.stringify(d, null, 2)], { type: 'application/json' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'tvboxhub-config-' + new Date().toISOString().slice(0, 10) + '.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 3000);
+    toast('配置已导出（含令牌等敏感字段，别放公开处）', 'ok');
+  }).catch(function (e) { toast('导出失败: ' + e, 'bad'); });
+}
+
+function importConfig(input) {
+  var f = input.files && input.files[0];
+  if (!f) return;
+  var rd = (f.text ? f.text() : new Response(f).text());
+  rd.then(function (t) {
+    return api('api/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: t });
+  }).then(function (d) {
+    var msg = d.ok
+      ? ('导入完成：插件 ' + (d.pluginApplied || 0) + ' 项，hub ' + (d.hubApplied || 0) + ' 项'
+         + (d.ignored && d.ignored.length ? '，忽略 ' + d.ignored.length + ' 项' : '')
+         + (d.pluginSaved === false ? '（插件侧未连上，仅 hub 生效）' : ''))
+      : ('导入失败: ' + (d.msg || '格式不对'));
+    toast(msg, d.ok ? 'ok' : 'bad');
+    if (d.ok) { try { pcLoad(); } catch (e) {} try { loadParseCapability(); } catch (e) {} }
+  }).catch(function (e) {
+    toast('导入失败: ' + e, 'bad');
+  }).then(function () { input.value = ''; });
 }
 
 function pcSave() {
@@ -3111,8 +3156,8 @@ function setSyncPill(text, kind) {
   el.className = 'pill' + (kind ? ' ' + kind : '');
 }
 
-function refreshSyncStatus() {
-  return api('api/emby/sync/status').then(function (d) {
+function applySyncStatus(d) {
+  {
     if (!d.ok) {
       setSyncPill('连不上 Emby', 'bad');
       document.getElementById('syncStage').textContent = d.msg || '连不上';
@@ -3154,7 +3199,7 @@ function refreshSyncStatus() {
         ' · 条目 ' + (s.ItemsWritten || 0) + ' · 错误 ' + (s.Errors || 0);
       document.getElementById('btnSyncStart').disabled = true;
       document.getElementById('btnSyncStop').disabled = false;
-      syncPollStart();
+      if (!syncEs) syncPollStart();
     } else {
       setSyncPill(s.LastSyncUtc ? '空闲' : '从未同步', s.LastSyncUtc ? '' : 'bad');
       document.getElementById('tabSyncDot').style.display = 'none';
@@ -3171,11 +3216,68 @@ function refreshSyncStatus() {
       s.LastSyncSummary ? '' : 'empty';
     document.getElementById('syncLastErr').textContent =
       s.LastError ? ('最近错误：' + s.LastError) : '';
+  }
+}
+
+function refreshSyncStatus() {
+  return api('api/emby/sync/status').then(function (d) {
+    applySyncStatus(d);
   }).catch(function (e) {
     setSyncPill('接口异常', 'bad');
     document.getElementById('syncStage').textContent = String(e);
     syncPollStop();
   });
+}
+
+// ── SSE：同步状态有变化 hub 主动推，不用 1.5s 轮询（学 qmediasync 的 WS 事件中心）──
+var syncEs = null;
+function syncSseStart() {
+  if (syncEs) return;
+  if (typeof EventSource === 'undefined') { syncPollStart(); return; }
+  var base = apiBase || '';
+  if (!base) { syncPollStart(); return; }   // 还不知道前缀时先轮询，等 api() 成功一次再来
+  try { syncEs = new EventSource(base + 'api/sync-events'); } catch (e) { syncPollStart(); return; }
+  syncEs.onmessage = function (ev) {
+    var d;
+    try { d = JSON.parse(ev.data); } catch (e) { return; }
+    if (d.ok) syncPollStop();               // SSE 活着就不轮询
+    applySyncStatus(d);
+  };
+  syncEs.onerror = function () {
+    // 断开就关掉退回轮询；EventSource 自己会重连，主动 close 避免双连接
+    try { syncEs.close(); } catch (e) {}
+    syncEs = null;
+    syncPollStart();
+  };
+}
+
+// 打开同步相关页面时调用：优先 SSE，失败退回轮询
+function syncFeedStart() { syncSseStart(); if (!syncEs) syncPollStart(); loadSyncRecords(); }
+
+// 同步记录表：新事件在前，状态着色（written 绿 / skipped 灰 / error 红 / 换源 蓝）
+function loadSyncRecords() {
+  var box = document.getElementById('syncRecordsBox');
+  if (!box) return;
+  api('api/emby/records').then(function (d) {
+    if (!d.ok) { box.textContent = d.msg || '加载失败'; box.className=''; return; }
+    var rs = d.records || [];
+    if (!rs.length) { box.textContent = '还没有条目记录（跑一次同步后出现）'; box.className='empty'; return; }
+    var color = { written: 'var(--ok,#2f9e44)', error: 'var(--bad,#c92a2a)', '换源': '#1971c2' };
+    var rows = rs.map(function (r) {
+      var t = new Date(r.Ts);
+      var hh = ('0'+t.getHours()).slice(-2) + ':' + ('0'+t.getMinutes()).slice(-2) + ':' + ('0'+t.getSeconds()).slice(-2);
+      return '<tr><td>' + hh + '</td>' +
+        '<td style="color:' + (color[r.Status] || 'var(--dim,#888)') + '">' + esc(r.Status) + '</td>' +
+        '<td>' + esc(r.Site) + '</td>' +
+        '<td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(r.Name) + '">' + esc(r.Name) + '</td>' +
+        '<td style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(r.Info) + '">' + esc(r.Info) + '</td></tr>';
+    }).join('');
+    box.className = '';
+    box.innerHTML = '<table style="width:100%;font-size:13px;border-collapse:collapse">' +
+      '<thead><tr style="text-align:left;color:var(--dim,#888)">' +
+      '<th style="padding:4px 8px">时间</th><th style="padding:4px 8px">状态</th><th style="padding:4px 8px">站点</th><th style="padding:4px 8px">条目</th><th style="padding:4px 8px">说明</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody></table>';
+  }).catch(function (e) { box.textContent = '加载失败: ' + e; box.className=''; });
 }
 
 function startSync() {

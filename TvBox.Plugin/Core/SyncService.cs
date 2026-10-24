@@ -1100,7 +1100,7 @@ namespace TvBox.Plugin.Core
                     {
                         var details = await client.GetDetailAsync(site, new[] { item.Id }, ct).ConfigureAwait(false);
                         var detail = details != null && details.Count > 0 ? details[0] : null;
-                        if (detail == null) { summary.Skipped++; Update(p => p.ItemsSkipped++); continue; }
+                        if (detail == null) { summary.Skipped++; Update(p => p.ItemsSkipped++); Record("skipped", name, item.Name, "拉不到详情"); continue; }
 
                         var line = detail.Lines != null && detail.Lines.Count > 0 ? detail.Lines[0] : null;
                         if (line?.Episodes == null || line.Episodes.Count == 0)
@@ -1163,6 +1163,7 @@ namespace TvBox.Plugin.Core
                                         continue;
                                     }
                                     summary.Skipped++; Update(p => p.ItemsSkipped++);
+                                    Record("skipped", name, item.Name, line.Episodes.Count + " 集全部不可用" + FormatReasons(reasons));
                                     _log("     [" + (item.Name ?? item.Id) + "] 跳过：" + line.Episodes.Count + " 集全部不可用" + FormatReasons(reasons));
                                     if (cfg.RequestDelayMs > 0) await Task.Delay(cfg.RequestDelayMs, ct).ConfigureAwait(false);
                                     continue;
@@ -1175,6 +1176,7 @@ namespace TvBox.Plugin.Core
                             foreach (var o in outs) if (!string.IsNullOrEmpty(o.Path)) keep.Add(o.Path);
                             RecordIncremental(site, item, detail, outs);
                             int added = outs.Count(o => o.Created || o.Updated);
+                            Record("written", name, item.Name, added + " 集");
                             summary.Episodes += added;
                             summary.Unchanged += outs.Count(o => !string.IsNullOrEmpty(o.Path) && !o.Created && !o.Updated);
                             summary.Items++;
@@ -1201,6 +1203,7 @@ namespace TvBox.Plugin.Core
                                         continue;
                                     }
                                     summary.Skipped++; Update(p => p.ItemsSkipped++);
+                                    Record("skipped", name, item.Name, "播放地址不可用（" + why + "）");
                                     _log("     [" + (item.Name ?? item.Id) + "] 跳过：播放地址不可用（" + why + "）");
                                     if (cfg.RequestDelayMs > 0) await Task.Delay(cfg.RequestDelayMs, ct).ConfigureAwait(false);
                                     continue;
@@ -1209,6 +1212,7 @@ namespace TvBox.Plugin.Core
                             var o = writer.WriteMovie(name, detail, line);
                             if (!string.IsNullOrEmpty(o.Path)) keep.Add(o.Path);
                             RecordIncremental(site, item, detail, new[] { o });
+                            Record("written", name, item.Name, "电影");
                             if (o.Created || o.Updated)
                             {
                                 summary.Items++;
@@ -1223,6 +1227,7 @@ namespace TvBox.Plugin.Core
                     catch (Exception ex)
                     {
                         summary.Errors++;
+                        Record("error", name, item.Name, ex.Message);
                         _log("     [" + (item.Name ?? item.Id) + "] 失败: " + ex.Message);
                     }
                     if (cfg.RequestDelayMs > 0) await Task.Delay(cfg.RequestDelayMs, ct).ConfigureAwait(false);
@@ -1232,6 +1237,31 @@ namespace TvBox.Plugin.Core
             }
             _log("     没分类但直接拉到 " + seen + " 条，写入 " + written + " 条");
             return written;
+        }
+
+        // ── 同步记录（界面「同步记录」页的数据源）────────────────────
+        // 只记最近 400 条（环形队列），进程内存态：重启清零，但不影响同步本身
+        public sealed class SyncRec
+        {
+            public long Ts;          // epoch ms
+            public string Site;     // 站点显示名
+            public string Name;     // 条目名
+            public string Status;   // written / skipped / error / 换源
+            public string Info;     // 一句话详情
+        }
+
+        static readonly System.Collections.Concurrent.ConcurrentQueue<SyncRec> _records =
+            new System.Collections.Concurrent.ConcurrentQueue<SyncRec>();
+        public static System.Collections.Concurrent.ConcurrentQueue<SyncRec> Records => _records;
+
+        static void Record(string status, string site, string name, string info)
+        {
+            _records.Enqueue(new SyncRec
+            {
+                Ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                Site = site ?? "", Name = name ?? "", Status = status ?? "", Info = info ?? "",
+            });
+            while (_records.Count > 400) _records.TryDequeue(out _);
         }
 
         /// <summary>片名归一化：去括号里的内容、去年份、只留字母数字（中文按字母算），统一小写。</summary>
@@ -1359,6 +1389,7 @@ namespace TvBox.Plugin.Core
                     if (added > 0)
                     {
                         _log("     [换源] " + (name ?? det.Name) + " → 换到「" + cand.siteName + "」写入 " + added + " 集");
+                        Record("换源", cand.siteName, name ?? det.Name, "原站解不出，换源写入 " + added + " 集");
                         return added;
                     }
                 }
@@ -1742,6 +1773,7 @@ namespace TvBox.Plugin.Core
                                         summary.Items++;
                                         summary.Skipped++;
                                         Update(p => p.ItemsSkipped++);
+                                        Record("skipped", site.DisplayName, item.Name, line.Episodes.Count + " 集全部不可用" + FormatReasons(reasons));
                                         _log("     [" + (item.Name ?? item.Id) + "] 跳过：" + line.Episodes.Count + " 集全部不可用" + FormatReasons(reasons));
                                         continue;
                                     }
@@ -1761,6 +1793,7 @@ namespace TvBox.Plugin.Core
                                 {
                                     written++;
                                     summary.Items++;
+                                    Record("written", site.DisplayName, item.Name, added + " 集" + (same > 0 ? "（" + same + " 未变）" : ""));
                                     summary.Episodes += added;
                                     summary.Unchanged += same;
                                     Update(p => { p.ItemsWritten++; p.EpisodesWritten += added; });
@@ -1769,6 +1802,7 @@ namespace TvBox.Plugin.Core
                                 {
                                     summary.Items++;
                                     { summary.Skipped++; Update(p => p.ItemsSkipped++); if (!string.IsNullOrEmpty(writer.LastError)) _lastWriteError = writer.LastError; }
+                                    Record("skipped", site.DisplayName, item.Name, "写入 0 文件" + (string.IsNullOrEmpty(writer.LastError) ? "" : "：" + writer.LastError));
                                 }
                             }
                             else
@@ -1783,6 +1817,7 @@ namespace TvBox.Plugin.Core
                                         summary.Items++;
                                         summary.Skipped++;
                                         Update(p => p.ItemsSkipped++);
+                                        Record("skipped", site.DisplayName, item.Name, "播放地址不可用（" + mwhy + "）");
                                         _log("     [" + (item.Name ?? item.Id) + "] 跳过：播放地址不可用（" + mwhy + "）");
                                         if (cfg.RequestDelayMs > 0) await Task.Delay(cfg.RequestDelayMs, ct).ConfigureAwait(false);
                                         continue;
@@ -1797,12 +1832,14 @@ namespace TvBox.Plugin.Core
                                     written++;
                                     summary.Items++;
                                     summary.Episodes++;
+                                    Record("written", site.DisplayName, item.Name, "电影");
                                     Update(p => { p.ItemsWritten++; p.EpisodesWritten++; });
                                 }
                                 else
                                 {
                                     summary.Items++;
                                     { summary.Skipped++; Update(p => p.ItemsSkipped++); if (!string.IsNullOrEmpty(writer.LastError)) _lastWriteError = writer.LastError; }
+                                    Record("skipped", site.DisplayName, item.Name, "写入 0 文件" + (string.IsNullOrEmpty(writer.LastError) ? "" : "：" + writer.LastError));
                                 }
                             }
 

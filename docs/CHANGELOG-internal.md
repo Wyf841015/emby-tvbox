@@ -1,5 +1,35 @@
 # emby-tvbox
 
+## v0.6.1 — SSE 进度推送 + 同步记录页 + 配置导出导入（继续学 qmediasync）
+
+**SSE 同步进度推送**（`/api/sync-events`）
+
+- 学 qmediasync 的 WebSocket 事件中心（v0.14.19 用它替代前端轮询），我们用更轻的 SSE：
+  hub 每 2 秒读一次插件 `/TvBox/Status`，**有变化才推**，没变化发 `: ping` 心跳
+- fnOS 环境的三个关键点都按 netwatch 实测过的经验来：`X-Accel-Buffering: no`（网关 nginx
+  默认缓冲响应，没有它前端收不到）、`retry: 3000`、10 分钟主动断（EventSource 自动重连）
+- 前端 `applySyncStatus()` 与轮询共用同一份处理逻辑；SSE 活着就停轮询，断了自动退回轮询
+
+**同步记录页**（插件 + hub + UI 三层）
+
+- 插件：同步过程在「写入 / 跳过 / 失败 / 换源」四类判定点写入环形队列（400 条，重启清零），
+  新增 `/TvBox/Records` 路由（`[Unauthenticated]` + token 校验，与 /TvBox/Status 同一套）
+- hub：`/api/emby/records` 代理
+- UI：同步页新增「同步记录」面板，按状态着色（written 绿 / skipped 灰 / error 红 / 换源 蓝）
+- 实测（真实同步 3 分钟）：55 条记录，状态分布 written 10 / skipped 45，
+  skipped 带原因聚合如「9 集全部不可用（原因：404×8）」
+
+**配置导出 / 导入**（`/api/export` + `/api/import`）
+
+- 导出：插件全部 54 个白名单键 + hub 侧（同步名单 / VIP 关键字 / 解析接口 / 主题），
+  UI 用 fetch+Blob 下载（fnOS WebView 会拦 `<a download>`，这是踩过的坑）
+- 导入：插件键走 `PLUGIN_CFG_KEYS` 白名单，未知键回显在 `ignored`；hub 键分别落位
+- 实测回放：`pluginApplied:54, pluginSaved:true（52 项已保存）, hubApplied:2, ignored:[]`
+
+**顺带修**：`/TvBox/Records` 初版漏了 `[Unauthenticated]`，Emby 直接回
+「Access token is invalid or expired」——与 /TvBox/Status 同款坑，hub 是带 token 参数调用的。
+
+
 ## v0.6.0 — 302 播放模式 + 直链缓存自适应（学 qmediasync）
 
 **302 重定向模式（StrmPlayMode=redirect）**

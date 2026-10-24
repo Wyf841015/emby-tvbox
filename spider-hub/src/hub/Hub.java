@@ -821,6 +821,110 @@ public class Hub {
                 }
                 return;
             }
+            case "/api/sync-events": {   // SSE：同步状态有变化就推，前端不用 1.5s 轮询
+                sseSyncEvents(ex);
+                return;
+            }
+            case "/api/export": {        // 配置导出：插件全部键 + hub 侧名单/解析能力，一键备份
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("app", "tvboxhub");
+                m.put("exportedAt", java.time.Instant.now().toString());
+                Map<String, Object> pcfg = pluginConfig();
+                Map<String, Object> plugin = new LinkedHashMap<>();
+                if (pcfg != null) {
+                    for (String k : PLUGIN_CFG_KEYS) {
+                        if (pcfg.containsKey(k)) plugin.put(k, pcfg.get(k));
+                    }
+                }
+                m.put("plugin", plugin);
+                m.put("pluginReachable", pcfg != null);
+                Map<String, Object> hub = new LinkedHashMap<>();
+                hub.put("syncSites", new ArrayList<>(syncSiteKeys()));
+                Object vf = settings.get("vipFlags");
+                if (vf != null) hub.put("vipFlags", vf);
+                hub.put("parseApis", String.join("\n", parseApiTemplates()));
+                Object th = settings.get("theme");
+                if (th != null) hub.put("theme", th);
+                m.put("hub", hub);
+                m.put("hint", "含播放签名/Webhook 令牌等敏感字段，妥善保管");
+                sendJson(ex, 200, m);
+                return;
+            }
+            case "/api/import": {        // 配置导入：与 /api/export 配套。插件键走白名单，未知键回显在 ignored
+                String body = readBody(ex);
+                Object ob = SpiderPool.Json.parse(body);
+                if (!(ob instanceof Map)) { sendJson(ex, 200, fail("格式不对，要 {plugin:{...}, hub:{...}}")); return; }
+                Map<?, ?> root = (Map<?, ?>) ob;
+                Map<String, Object> m = new LinkedHashMap<>();
+                java.util.List<String> ignoredKeys = new ArrayList<>();
+
+                Object pluginRaw = root.get("plugin");
+                Map<String, Object> pluginPayload = new LinkedHashMap<>();
+                if (pluginRaw instanceof Map) {
+                    for (Map.Entry<?, ?> e : ((Map<?, ?>) pluginRaw).entrySet()) {
+                        String k = str(e.getKey());
+                        if (k == null || k.isEmpty()) continue;
+                        String cap = Character.toUpperCase(k.charAt(0)) + k.substring(1);
+                        if (java.util.Arrays.asList(PLUGIN_CFG_KEYS).contains(k)) pluginPayload.put(k, e.getValue());
+                        else if (java.util.Arrays.asList(PLUGIN_CFG_KEYS).contains(cap)) pluginPayload.put(cap, e.getValue());
+                        else ignoredKeys.add(k);
+                    }
+                }
+                boolean pluginOk = false; String pluginMsg = null;
+                if (!pluginPayload.isEmpty()) {
+                    try {
+                        if (embyBase() == null) throw new Exception("找不到 Emby 地址");
+                        String resp = pushPluginConfig(pluginPayload);
+                        Object ro = SpiderPool.Json.parse(resp);
+                        pluginOk = ro instanceof Map && Boolean.TRUE.equals(((Map<?, ?>) ro).get("Success"));
+                        pluginMsg = ro instanceof Map ? str(((Map<?, ?>) ro).get("Message")) : resp;
+                        // 与 /api/save 一致：这两个键 hub 本地也留一份
+                        Object cu = pluginPayload.get("ConfigUrl");
+                        if (cu != null && !str(cu).isEmpty()) { settings.put("configUrl", str(cu)); }
+                        Object eb = pluginPayload.get("EmbyBaseUrl");
+                        if (eb != null && !str(eb).isEmpty()) { settings.put("embyBaseUrl", str(eb)); }
+                        saveSettings();
+                    } catch (Exception pe) {
+                        pluginMsg = "推给插件失败: " + (pe.getMessage() == null ? pe.getClass().getSimpleName() : pe.getMessage());
+                    }
+                }
+                m.put("pluginApplied", pluginPayload.size());
+                m.put("pluginSaved", pluginOk);
+                if (pluginMsg != null) m.put("pluginMsg", pluginMsg);
+
+                int hubApplied = 0;
+                Object hubRaw = root.get("hub");
+                if (hubRaw instanceof Map) {
+                    Map<?, ?> hp = (Map<?, ?>) hubRaw;
+                    if (hp.get("syncSites") instanceof List) {
+                        java.util.LinkedHashSet<String> set = new java.util.LinkedHashSet<>();
+                        for (Object o : (List<?>) hp.get("syncSites")) {
+                            String k = str(o);
+                            if (k != null && !k.isBlank()) set.add(k.trim());
+                        }
+                        settings.put("syncSites", new ArrayList<>(set));
+                        hubApplied++;
+                    }
+                    if (hp.get("vipFlags") instanceof List) {
+                        java.util.List<String> vf = new ArrayList<>();
+                        for (Object o : (List<?>) hp.get("vipFlags")) if (str(o).trim().length() > 0) vf.add(str(o).trim());
+                        settings.put("vipFlags", vf);
+                        hubApplied++;
+                    }
+                    Object pa = hp.get("parseApis");
+                    if (pa != null) {
+                        try { java.nio.file.Files.write(dataDir.resolve("parse-apis.txt"), str(pa).getBytes(StandardCharsets.UTF_8)); hubApplied++; } catch (Exception ignore) { }
+                    }
+                    if (hp.get("theme") != null) { settings.put("theme", str(hp.get("theme"))); hubApplied++; }
+                    saveSettings();
+                }
+                m.put("hubApplied", hubApplied);
+                m.put("ignored", ignoredKeys);
+                m.put("ok", pluginPayload.isEmpty() || pluginOk || hubApplied > 0);
+                if (!pluginOk && !pluginPayload.isEmpty()) m.put("msg", pluginMsg);
+                sendJson(ex, 200, m);
+                return;
+            }
             case "/api/prefs": {   // 界面偏好（主题等）：存服务端，localStorage 不可用时也能记住
                 String body = readBody(ex);
                 if (body != null && !body.isBlank() && !"null".equals(body.trim())) {
@@ -1425,6 +1529,22 @@ public class Hub {
                     } catch (Exception ignore) {
                         m.put("raw", body);
                     }
+                } catch (Exception e) {
+                    m.put("ok", false);
+                    m.put("msg", "连不上 Emby: " + explain(e));
+                }
+                sendJson(ex, 200, m);
+                return;
+            }
+            case "/api/emby/records": {   // 同步记录：插件环形 400 条，新事件在前
+                String base = embyBase();
+                if (base == null) { sendJson(ex, 200, fail("还没连上 Emby（先在「Emby 插件」页点一次检测）")); return; }
+                Map<String, Object> m = new LinkedHashMap<>();
+                try {
+                    String body = embyHttp("GET", base + "/TvBox/Records?token=" + embyToken());
+                    m.put("ok", true);
+                    Object parsed = SpiderPool.Json.parse(body);
+                    if (parsed instanceof Map) m.put("records", ((Map<?, ?>) parsed).get("Records"));
                 } catch (Exception e) {
                     m.put("ok", false);
                     m.put("msg", "连不上 Emby: " + explain(e));
@@ -3191,6 +3311,56 @@ public class Hub {
         try (OutputStream os = ex.getResponseBody()) {
             os.write(b);
         }
+    }
+
+    /**
+     * SSE：把插件 /TvBox/Status 的变化推给前端（学 qmediasync 的 WebSocket 事件中心，
+     * 我们用更轻的 SSE）。要点都是 fnOS 环境实测过的：
+     *   - X-Accel-Buffering: no —— 网关 nginx 默认缓冲响应，没有它前端收不到任何事件
+     *   - retry: 3000 + : ping 心跳 —— 防中间层/WebView 把空闲连接掐掉
+     *   - 最长 10 分钟主动断 —— EventSource 会自动重连；不占着 http 线程不放
+     */
+    static void sseSyncEvents(HttpExchange ex) throws java.io.IOException {
+        ex.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
+        ex.getResponseHeaders().set("Cache-Control", "no-cache");
+        ex.getResponseHeaders().set("X-Accel-Buffering", "no");
+        ex.sendResponseHeaders(200, 0);
+        java.io.OutputStream os = ex.getResponseBody();
+        String last = null;
+        long start = System.currentTimeMillis();
+        try {
+            os.write("retry: 3000\n\n".getBytes(StandardCharsets.UTF_8));
+            os.write(": connected\n\n".getBytes(StandardCharsets.UTF_8));
+            os.flush();
+            while (System.currentTimeMillis() - start < 10 * 60_000L) {
+                String snap = null;
+                String base = embyBase();
+                if (base != null) {
+                    try {
+                        String body = embyHttp("GET", base + "/TvBox/Status?token=" + embyToken());
+                        if (body != null && !body.isBlank())
+                            snap = "{\"ok\":true,\"emby\":" + SpiderPool.Json.stringify(base) + ",\"status\":" + body + "}";
+                    } catch (Exception e) {
+                        String msg = String.valueOf(explain(e)).replace("\"", "'");
+                        snap = "{\"ok\":false,\"msg\":\"" + msg + "\"}";
+                    }
+                }
+                if (snap == null) snap = "{\"ok\":false,\"msg\":\"Emby 未连接\"}";
+                if (!snap.equals(last)) {
+                    os.write(("data: " + snap + "\n\n").getBytes(StandardCharsets.UTF_8));
+                    last = snap;
+                } else {
+                    os.write(": ping\n\n".getBytes(StandardCharsets.UTF_8));
+                }
+                os.flush();
+                Thread.sleep(2000);
+            }
+        } catch (java.io.IOException ioe) {
+            // 客户端断开（关页面/切标签），正常结束
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
+        try { os.close(); } catch (Exception ignore) { }
     }
 
     static void sendJson(HttpExchange ex, int code, Object o) throws Exception {

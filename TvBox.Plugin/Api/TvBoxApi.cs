@@ -22,6 +22,30 @@ namespace TvBox.Plugin.Api
         public string Token { get; set; }
     }
 
+    [Unauthenticated]   // hub 用 token 参数调用（同 /TvBox/Status），不能走 Emby 登录态
+    [Route("/TvBox/Records", "GET", Summary = "最近的同步条目记录（环形 400 条，重启清零）")]
+    public class GetRecords : IReturn<RecordsResult>
+    {
+        public string Token { get; set; }
+    }
+
+    /// <summary>单条同步记录（界面上「同步记录」表格的一行）。</summary>
+    public class RecordItem
+    {
+        public long Ts { get; set; }
+        public string Site { get; set; }
+        public string Name { get; set; }
+        public string Status { get; set; }   // written / skipped / error / 换源
+        public string Info { get; set; }
+    }
+
+    public class RecordsResult
+    {
+        public System.Collections.Generic.List<RecordItem> Records { get; set; } =
+            new System.Collections.Generic.List<RecordItem>();
+        public int Count => Records?.Count ?? 0;
+    }
+
     [Unauthenticated]
     [Route("/TvBox/Sources", "GET", Summary = "解析配置并列出所有站点")]
     public class GetSources : IReturn<SourcesResult>
@@ -608,6 +632,19 @@ namespace TvBox.Plugin.Api
         {
             using var sha = System.Security.Cryptography.SHA256.Create();
             return Convert.ToHexString(sha.ComputeHash(b)).ToLowerInvariant();
+        }
+
+        // ── 同步记录：新事件在前（环形队列是旧的在前，倒过来给前端）──
+        public object Get(GetRecords req)
+        {
+            var p = P;
+            if (p == null) return new RecordsResult();
+            if (!HubOk(req.Token)) return new RecordsResult();
+            var outList = new System.Collections.Generic.List<RecordItem>();
+            foreach (var r in SyncService.Records)
+                outList.Add(new RecordItem { Ts = r.Ts, Site = r.Site, Name = r.Name, Status = r.Status, Info = r.Info });
+            outList.Reverse();
+            return new RecordsResult { Records = outList };
         }
 
         // ── 状态 ──
