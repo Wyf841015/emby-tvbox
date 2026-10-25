@@ -207,6 +207,7 @@ public class Hub {
                 : configFile.toAbsolutePath().getParent().resolve("history.json");
         loadSettings();
         loadHistory();
+        initPanAccounts();
 
         // spider classpath：优先用参数，其次读配置
         List<File> jars = new ArrayList<>();
@@ -403,7 +404,9 @@ public class Hub {
     static final java.util.Set<String> DESTRUCTIVE_APIS = java.util.Set.of(
             "/api/emby/install", "/api/emby/uninstall", "/api/emby/prepare-output",
             "/api/emby/probe-as-emby", "/api/save", "/api/reload", "/api/cache/clear",
-            "/api/sync/purge");
+            "/api/sync/purge",
+            // 网盘凭证：会写/移用户账号凭据，按破坏性接口对待（必须带令牌或网关头）
+            "/api/pan/login", "/api/pan/logout", "/api/pan/raw", "/api/pan/enable", "/api/pan/qr");
 
     /** 本地令牌：首次启动生成，注入到页面 <meta>，用于挡住「本机别的进程」和跨站 CSRF。 */
     static String localToken() {
@@ -962,6 +965,162 @@ public class Hub {
                 m.put("allowNetdisk", pool.allowNetdisk);
                 m.put("netdiskCount", pool.netdiskCount);
                 sendJson(ex, 200, m);
+                return;
+            }
+
+            // ───────────── 网盘账号（登录 / 记住凭证 / 启用 / 验活） ─────────────
+            case "/api/pan": {               // 9 个网盘的总览 + 当前启用状态
+                Map<String, Object> m = ok("");
+                java.util.List<Object> drives = new ArrayList<>();
+                java.util.Set<String> picked = syncSiteKeys();
+                for (PanAccounts.Drive d : PanAccounts.DRIVES) {
+                    Map<String, Object> row = PanAccounts.status(d);
+                    row.put("inConfig", pool.site(d.siteKey) != null);
+                    row.put("inSync", picked.contains(d.siteKey));
+                    row.put("verify", panVerifyCache.get(d.id));
+                    row.put("qr", PanQr.supports(d.id));      // 是否支持扫码登录
+                    drives.add(row);
+                }
+                m.put("drives", drives);
+                m.put("allowNetdisk", pool.allowNetdisk);
+                m.put("panDir", PanAccounts.root().toString());
+                m.put("vault", PanAccounts.vaultEnabled());
+                m.put("netdiskCount", pool.netdiskCount);
+                sendJson(ex, 200, m);
+                return;
+            }
+            case "/api/pan/login": {         // 保存凭证（写文件）→ 立刻验活
+                String body = readBody(ex);
+                Object ob = SpiderPool.Json.parse(body);
+                if (!(ob instanceof Map)) { sendJson(ex, 200, fail("请求体必须是 JSON 对象")); return; }
+                Map<?, ?> b = (Map<?, ?>) ob;
+                PanAccounts.Drive d = PanAccounts.drive(str(b.get("drive")));
+                if (d == null) { sendJson(ex, 200, fail("未知网盘: " + str(b.get("drive")))); return; }
+                try {
+                    long t0 = System.currentTimeMillis();
+                    java.util.List<String> written = PanAccounts.save(d, str(b.get("main")), str(b.get("sub")));
+                    Map<String, Object> v = verifyPan(d);
+                    record("网盘登录", d.label, Boolean.TRUE.equals(v.get("logged")),
+                            "写入 " + String.join(",", written), System.currentTimeMillis() - t0);
+                    Map<String, Object> m = ok("凭证已保存");
+                    m.put("drive", PanAccounts.status(d));
+                    m.put("written", written);
+                    m.put("verify", v);
+                    sendJson(ex, 200, m);
+                } catch (Exception e) {
+                    sendJson(ex, 200, fail("保存失败：" + e.getMessage()));
+                }
+                return;
+            }
+            case "/api/pan/logout": {        // 清除凭证（移到 .trash，不真删）
+                String body = readBody(ex);
+                Object ob = SpiderPool.Json.parse(body);
+                if (!(ob instanceof Map)) { sendJson(ex, 200, fail("请求体必须是 JSON 对象")); return; }
+                PanAccounts.Drive d = PanAccounts.drive(str(((Map<?, ?>) ob).get("drive")));
+                if (d == null) { sendJson(ex, 200, fail("未知网盘")); return; }
+                try {
+                    java.util.List<String> moved = PanAccounts.forget(d);
+                    panVerifyCache.remove(d.id);
+                    record("网盘退出", d.label, true, "移出 " + moved.size() + " 个文件", 0);
+                    Map<String, Object> m = ok("已清除凭证（文件移到 .trash，没有删除）");
+                    m.put("moved", moved);
+                    m.put("drive", PanAccounts.status(d));
+                    sendJson(ex, 200, m);
+                } catch (Exception e) {
+                    sendJson(ex, 200, fail("清除失败：" + e.getMessage()));
+                }
+                return;
+            }
+            case "/api/pan/raw": {           // 高级模式：直接读写 spider 真正读到的文件
+                if ("GET".equalsIgnoreCase(ex.getRequestMethod())) {
+                    PanAccounts.Drive d = PanAccounts.drive(q.get("drive"));
+                    if (d == null) { sendJson(ex, 200, fail("未知网盘")); return; }
+                    try {
+                        Map<String, Object> m = ok("");
+                        m.put("drive", d.id);
+                        m.put("files", PanAccounts.readRaw(d));
+                        m.put("root", PanAccounts.root().toString());
+                        sendJson(ex, 200, m);
+                    } catch (Exception e) {
+                        sendJson(ex, 200, fail(e.getMessage()));
+                    }
+                    return;
+                }
+                String body = readBody(ex);
+                Object ob = SpiderPool.Json.parse(body);
+                if (!(ob instanceof Map)) { sendJson(ex, 200, fail("请求体必须是 JSON 对象")); return; }
+                Map<?, ?> b = (Map<?, ?>) ob;
+                PanAccounts.Drive d = PanAccounts.drive(str(b.get("drive")));
+                if (d == null) { sendJson(ex, 200, fail("未知网盘")); return; }
+                try {
+                    PanAccounts.writeRaw(d, str(b.get("file")), str(b.get("content")));
+                    Map<String, Object> m = ok("已写入");
+                    m.put("verify", verifyPan(d));
+                    sendJson(ex, 200, m);
+                } catch (Exception e) {
+                    sendJson(ex, 200, fail("写入失败：" + e.getMessage()));
+                }
+                return;
+            }
+            case "/api/pan/verify": {        // 单独验活（界面上的「检测」按钮）
+                PanAccounts.Drive d = PanAccounts.drive(q.get("drive"));
+                if (d == null) { sendJson(ex, 200, fail("未知网盘")); return; }
+                Map<String, Object> m = ok("");
+                m.put("verify", verifyPan(d));
+                sendJson(ex, 200, m);
+                return;
+            }
+            case "/api/pan/enable": {        // 一键启用：打开网盘源 + 把「我的网盘」加入同步名单
+                String body = readBody(ex);
+                Object ob = spiderJsonOrEmpty(body);
+                boolean on = true;
+                if (ob instanceof Map) {
+                    Object v = ((Map<?, ?>) ob).get("on");
+                    on = v == null || "1".equals(String.valueOf(v)) || "true".equalsIgnoreCase(String.valueOf(v));
+                }
+                pool.allowNetdisk = on;
+                java.util.LinkedHashSet<String> set = syncSiteKeys();
+                java.util.List<String> added = new ArrayList<>();
+                java.util.List<String> missing = new ArrayList<>();
+                for (PanAccounts.Drive d : PanAccounts.DRIVES) {
+                    if (pool.site(d.siteKey) == null) { missing.add(d.label); continue; }
+                    if (on && set.add(d.siteKey)) added.add(d.siteKey);
+                }
+                settings.put("syncSites", new ArrayList<>(set));
+                saveSettings();
+                record("网盘源", on ? "启用" : "关闭", true,
+                        on ? ("新增同步站点 " + added.size() + " 个") : "只关闭开关，站点名单不变", 0);
+                Map<String, Object> m = ok(on ? "网盘源已启用" : "网盘源已关闭");
+                m.put("allowNetdisk", pool.allowNetdisk);
+                m.put("added", added);
+                m.put("missing", missing);      // 配置里没有的网盘（换配置后可能出现）
+                m.put("syncSites", new ArrayList<>(syncSiteKeys()));
+                sendJson(ex, 200, m);
+                return;
+            }
+            case "/api/pan/qr": {            // 网盘扫码登录（统一入口，各网盘实现在 PanQr）
+                String action = str(q.get("action"));
+                if (action == null) action = "start";
+                PanAccounts.Drive d = PanAccounts.drive(str(q.get("drive")));
+                if (d == null) { sendJson(ex, 200, fail("缺少 drive 参数")); return; }
+                try {
+                    Map<String, Object> m;
+                    if ("start".equals(action)) {
+                        m = PanQr.start(d.id, pool.loader());
+                    } else {
+                        m = PanQr.poll(d.id, str(q.get("sid")));
+                        if (Boolean.TRUE.equals(m.get("logged"))) {
+                            record("网盘扫码登录", d.label, true, "扫码成功", 0);
+                            m.put("verify", verifyPan(d));
+                        }
+                    }
+                    sendJson(ex, 200, m);
+                } catch (Throwable t) {
+                    Map<String, Object> m = fail("扫码登录失败：" + panRootMsg(t));
+                    m.put("fallback", "cookie");
+                    m.put("action", action);
+                    sendJson(ex, 200, m);
+                }
                 return;
             }
             case "/api/config": {           // 配置镜像：插件可达就读插件，否则用本地缓存
@@ -2643,6 +2802,190 @@ public class Hub {
             for (Object o : (List<Object>) v) if (o != null) set.add(String.valueOf(o));
         }
         return set;
+    }
+
+    // ══════════ 网盘账号：验活 ══════════
+    /** 各网盘最近一次验活结果（重启清空，界面显示「未检测」）。 */
+    static final Map<String, Map<String, Object>> panVerifyCache = new ConcurrentHashMap<>();
+
+    /**
+     * 网盘凭证初始化：生成/读取 AES 密钥 → 确保目录存在 → 从加密备份还原明文。
+     *
+     * 密钥存在 hub.json 的 panKey 里（首次启动自动生成 64 位 hex = 256-bit）。
+     * vault（pan-vault.enc）是给「重启恢复 / 换机迁移 / 备份带走」用的加密副本；
+     * spider 运行期必须读到明文，所以工作文件本身是明文（0600）。
+     */
+    static void initPanAccounts() {
+        try {
+            // 凭证目录不靠启动参数（supervisor 里加 -D 在升级时可能不生效），
+            // 直接用 hub.json 旁边的 data/pan —— 也就是 ${PKGVAR}/data/pan。
+            String cur = System.getProperty("tvbox.panDir");
+            if (cur == null || cur.isBlank()) {
+                System.setProperty("tvbox.panDir", dataDir.resolve("pan").toString());
+            }
+            String key = str(settings.get("panKey"));
+            if (key == null || key.length() < 64 || !key.matches("[0-9a-fA-F]+")) {
+                StringBuilder sb = new StringBuilder();
+                for (byte b : java.security.SecureRandom.getSeed(32)) sb.append(String.format("%02x", b));
+                key = sb.toString();
+                settings.put("panKey", key);
+                saveSettings();
+            }
+            PanAccounts.setVaultKey(key);
+            Files.createDirectories(PanAccounts.root());
+            PanAccounts.materializeFromVault();
+            System.out.println("[pan] 凭证目录 " + PanAccounts.root()
+                    + "  vault=" + (Files.isRegularFile(PanAccounts.vaultFile()) ? "有" : "无"));
+        } catch (Exception e) {
+            System.out.println("[pan] 初始化失败: " + e.getMessage());
+        }
+    }
+
+    /** 宽松解析 body：空串/坏 JSON 都当作「没有内容」，别让 /api/pan/enable 因为空 body 报错。 */
+    static Object spiderJsonOrEmpty(String body) {
+        if (body == null || body.isBlank()) return null;
+        try {
+            return SpiderPool.Json.parse(body);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 验活：调该网盘的 homeContent，看有没有分类/条目。
+     *
+     * 为什么不只看文件存在：凭证过期、cookie 写错格式、账号被风控，表现都是
+     * 「homeContent 调通了但列表是空的」——只看文件会让用户以为已经登录成功。
+     */
+    static Map<String, Object> verifyPan(PanAccounts.Drive d) {
+        Map<String, Object> r = new LinkedHashMap<>();
+        r.put("at", System.currentTimeMillis());
+        SpiderPool.Site site = pool.site(d.siteKey);
+        if (site == null) {
+            r.put("ok", false);
+            r.put("logged", false);
+            r.put("msg", "当前配置里没有「" + d.siteKey + "」这个站点（换个多仓配置可能就有）");
+            panVerifyCache.put(d.id, r);
+            return r;
+        }
+        long t0 = System.currentTimeMillis();
+        // 验活必须能进网盘类源：allowNetdisk=false 时 pool.get() 会直接抛
+        // 「网盘类源已排除」，那样永远测不出凭证到底有没有生效。
+        boolean prevAllow = pool.allowNetdisk;
+        pool.allowNetdisk = true;
+        try {
+            String raw = call(d.siteKey, () -> pool.get(d.siteKey).homeContent(false), 45);
+            Object parsed = tryParse(raw);
+            int nc = 0, nl = 0;
+            if (parsed instanceof Map) {
+                Object c = ((Map<?, ?>) parsed).get("class");
+                Object l = ((Map<?, ?>) parsed).get("list");
+                nc = c instanceof List ? ((List<?>) c).size() : 0;
+                nl = l instanceof List ? ((List<?>) l).size() : 0;
+            }
+            // 只按「分类数」判断会假阳性：网盘类 spider 的 homeContent 即使没登录也常返回
+            // 一份固定的分类列表（实测 115 用假 cookie 也能返回分类 1 个）→ 会骗用户说已登录。
+            // 所以只认「真的列出了条目」。
+            boolean logged = nl > 0;
+            r.put("ok", true);
+            r.put("logged", logged);
+            r.put("classes", nc);
+            r.put("list", nl);
+            r.put("msg", logged
+                    ? "凭证已生效：列出 " + nl + " 个条目（分类 " + nc + " 个）"
+                    : "调通了但一条都没列出来（分类 " + nc + "）—— 凭证多半无效/已过期，"
+                      + "或该网盘根目录是空的");
+        } catch (Exception e) {
+            r.put("ok", false);
+            r.put("logged", false);
+            r.put("msg", e.getMessage());
+        } finally {
+            pool.allowNetdisk = prevAllow;
+        }
+        r.put("ms", System.currentTimeMillis() - t0);
+        panVerifyCache.put(d.id, r);
+        return r;
+    }
+
+    // ══════════ 115 扫码登录 ══════════
+    /**
+     * 115 扫码登录：反射调 jar 里的 com.github.catvod.spider.Qr115。
+     *
+     * 为什么不自己拼 HTTP：115 的扫码接口要带 time+sign 签名，Qr115 里已经实现了；
+     * 我们只用它的 token/status/login 三个静态方法（都是 headless 的，不碰 Android UI）。
+     * Token 对象跨请求带不过去，按 uid 缓存在内存里。
+     *
+     * 状态码（从 class 常量读出来的）：WAIT=0 SCANNED=1 DONE=2 EXPIRED=-1 ERROR=-99
+     */
+    static final Map<String, Object> panQrTokens = new ConcurrentHashMap<>();
+
+    static Map<String, Object> panQr115(String action, Map<String, String> q) throws Exception {
+        ClassLoader ld = pool.loader();
+        if (ld == null) throw new IllegalStateException("spider 还没加载（先去「配置」填一个点播源）");
+        Class<?> qr;
+        try {
+            qr = Class.forName("com.github.catvod.spider.Qr115", true, ld);
+        } catch (Throwable t) {
+            throw new IllegalStateException("当前 spider jar 里没有 Qr115（这套配置不支持 115 扫码）");
+        }
+
+        if ("start".equals(action)) {
+            Object token = qr.getMethod("token").invoke(null);
+            if (token == null) throw new IllegalStateException("115 没有返回二维码（接口风控或网络不通）");
+            Class<?> tc = token.getClass();
+            String uid = (String) tc.getField("uid").get(token);
+            String content = (String) tc.getField("qrcode").get(token);
+            panQrTokens.clear();
+            panQrTokens.put(uid, token);
+            Map<String, Object> m = ok("二维码已生成，用 115 App 扫码");
+            m.put("uid", uid);
+            m.put("content", content);
+            m.put("imgUrl", "https://qrcodeapi.115.com/api/1.0/web/1.0/qrcode?uid=" + uid);
+            m.put("expireSec", 180);
+            return m;
+        }
+
+        String uid = str(q.get("uid"));
+        Object token = uid == null ? null : panQrTokens.get(uid);
+        if (token == null) throw new IllegalStateException("二维码已失效，请重新生成");
+        Class<?> tc = token.getClass();
+        int st = (Integer) qr.getMethod("status", tc).invoke(null, token);
+
+        Map<String, Object> m = ok("");
+        m.put("uid", uid);
+        m.put("status", st);
+        if (st == 2) {                       // DONE：Qr115.login 会把 cookie 写进 115.txt
+            Object cookie = qr.getMethod("login", tc).invoke(null, token);
+            panQrTokens.remove(uid);
+            PanAccounts.Drive d = PanAccounts.drive("115");
+            PanAccounts.updateVault(d);
+            m.put("logged", true);
+            m.put("msg", cookie == null ? "已登录（cookie 已写入）" : "已登录");
+            if (d != null) m.put("verify", verifyPan(d));
+        } else if (st == 1) {
+            m.put("logged", false);
+            m.put("msg", "已扫码，请在手机上点「确认登录」");
+        } else if (st == 0) {
+            m.put("logged", false);
+            m.put("msg", "等待扫码…");
+        } else if (st == -1) {
+            panQrTokens.remove(uid);
+            m.put("logged", false);
+            m.put("msg", "二维码已过期，请重新生成");
+        } else {
+            panQrTokens.remove(uid);
+            m.put("logged", false);
+            m.put("msg", "扫码状态异常（" + st + "）");
+        }
+        return m;
+    }
+
+    /** 取最内层异常信息，反射抛 InvocationTargetException 时不然只能看到空壳。 */
+    static String panRootMsg(Throwable t) {
+        Throwable c = t;
+        while (c.getCause() != null && c.getCause() != c) c = c.getCause();
+        String msg = c.getMessage();
+        return (msg == null || msg.isBlank()) ? c.getClass().getSimpleName() : msg;
     }
 
     /**

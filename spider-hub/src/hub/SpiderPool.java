@@ -414,6 +414,11 @@ public class SpiderPool {
         return m;
     }
 
+    /** 全局 spider ClassLoader（给反射调 jar 内工具类用，比如 Qr115 扫码登录）。 */
+    public ClassLoader loader() {
+        return spiderLoader;
+    }
+
     /**
      * 该站点可用的 ClassLoader 列表：站点自带 jar 优先，全局 jar 兜底。
      * 父加载器是全局 spiderLoader，所以基类（Spider / android stub）都能解析。

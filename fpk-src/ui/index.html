@@ -535,6 +535,29 @@
     html[data-theme="light"] .dlg-head{border-bottom-color:#dde6f4}
     html[data-theme="light"] .dlg-body img{background:#eef3fb}
     html[data-theme="light"] .spon-box{border-color:#c3d1e4}
+
+  /* ══════════ 网盘账号 ══════════ */
+  .pan-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:12px}
+  .pan-card{border:1px solid var(--line);border-radius:var(--r);padding:13px 15px;background:var(--surface-2);transition:border-color var(--t-fast)}
+  .pan-card.on{border-color:var(--ok)}
+  .pan-card .hd{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+  .pan-card .nm{font-weight:600;font-size:14px}
+  .pan-card .sp{font-size:11px;color:var(--dim);font-family:var(--mono)}
+  .pan-card .stt{margin-left:auto;font-size:11px;padding:2px 9px;border-radius:var(--r-full);white-space:nowrap}
+  .pan-card .stt.on{background:var(--ok-soft);color:var(--ok-text)}
+  .pan-card .stt.off{background:var(--accent-soft);color:var(--dim)}
+  .pan-card .stt.warn{background:rgba(255,192,0,.16);color:var(--warn-text)}
+  .pan-card .stt.bad{background:var(--bad-soft);color:var(--bad-text)}
+  .pan-card textarea{width:100%;min-height:62px;font-family:var(--mono);font-size:12px;margin-top:8px}
+  .pan-card .hint2{font-size:11.5px;color:var(--dim);margin-top:6px;line-height:1.55}
+  .pan-card .acts{display:flex;gap:8px;margin-top:9px;flex-wrap:wrap}
+  .pan-card .files{font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:7px;word-break:break-all;line-height:1.6}
+  .pan-card .vmsg{font-size:11.5px;margin-top:6px;line-height:1.5}
+  .pan-card .vmsg.ok{color:var(--ok-text)} .pan-card .vmsg.bad{color:var(--bad-text)} .pan-card .vmsg.warn{color:var(--warn-text)}
+  .pan-qr{display:flex;gap:14px;align-items:flex-start;margin-top:10px;padding:10px;border:1px dashed var(--line);border-radius:var(--r-sm)}
+  .pan-qr canvas{background:#fff;border-radius:6px;padding:6px}
+  .pan-qr .qinfo{font-size:12px;color:var(--text-2);line-height:1.7;flex:1}
+  .pan-mini{font-size:11px;padding:2px 8px;border-radius:var(--r-full);background:var(--accent-soft);color:var(--brand)}
 </style>
 </head>
 <body>
@@ -547,6 +570,7 @@
       <div class="tab active" data-pane="overview" onclick="switchTab('overview',this)"><span class="ico">📊</span><span class="lb">概览</span></div>
       <div class="tab" data-pane="guide" onclick="switchTab('guide',this)"><span class="ico">📖</span><span class="lb">使用说明</span></div>
       <div class="tab" data-pane="sites" onclick="switchTab('sites',this)"><span class="ico">🌐</span><span class="lb">站点</span><span class="n" id="tabSiteCount">0</span></div>
+      <div class="tab" data-pane="pan" onclick="switchTab('pan',this)"><span class="ico">🗂️</span><span class="lb">我的网盘</span><span class="n" id="tabPanCount" style="display:none">0</span></div>
       <div class="tab" data-pane="search" onclick="switchTab('search',this)"><span class="ico">🔍</span><span class="lb">搜索</span></div>
       <div class="tab" data-pane="sync" onclick="switchTab('sync',this)"><span class="ico">🔄</span><span class="lb">同步</span><span class="n" id="tabSyncDot" style="display:none">●</span></div>
       <div class="tab" data-pane="config" onclick="switchTab('config',this)"><span class="ico">⚙️</span><span class="lb">配置</span></div>
@@ -708,6 +732,36 @@
     <div class="panel">
       <h2>探测结果</h2>
       <div id="resultBox" class="empty">点站点行里的「首页 / 分类 / 采集」看返回</div>
+    </div>
+  </div>
+
+  <!-- ══════════ 我的网盘 ══════════ -->
+  <div class="pane" id="pane-pan">
+    <div class="panel">
+      <h2>我的网盘 <span class="pill" id="panEnabledPill">未启用</span> <span class="pill" id="panVaultPill">—</span></h2>
+      <div class="hint" style="margin-bottom:12px">
+        登录一次，凭证就存在 <code id="panDir">—</code> 里（重启不丢，另有 AES 加密备份 <code>pan-vault.enc</code>）。
+        保存后会立刻调一次该网盘的首页验证凭证是否真的生效 —— 不是「文件写了就算成功」。
+      </div>
+      <div class="row" style="margin-bottom:12px;gap:8px;flex-wrap:wrap">
+        <button class="primary" id="btnPanEnable" onclick="panEnable(true)">启用网盘源并加入同步</button>
+        <button class="danger" onclick="panEnable(false)">关闭网盘源</button>
+        <button onclick="loadPan()">刷新</button>
+        <span class="hint" style="margin:0" id="panSummary">—</span>
+      </div>
+      <div id="panCards" class="pan-grid"><div class="empty">加载中…</div></div>
+    </div>
+
+    <div class="panel">
+      <h2>高级：直接编辑凭证文件</h2>
+      <div class="hint">
+        spider 真正读到的就是这些文件。万一某个网盘的实际格式和预期不同，可以在这里直接看/改原文（保存后同样会自动验活）。
+      </div>
+      <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+        <select id="panRawDrive" onchange="panRawLoad()" style="min-width:150px"></select>
+        <button onclick="panRawLoad()">读取</button>
+      </div>
+      <div id="panRawBox" style="margin-top:10px"></div>
     </div>
   </div>
 
@@ -2054,6 +2108,7 @@ function switchTab(name, el) {
   if (pane) pane.classList.add('active');
   if (name === 'guide') guideCheck();
   if (name === 'logs') loadLogs();
+  if (name === 'pan') loadPan();
   if (name === 'overview') loadRecent();
   if (name === 'emby' && !document.getElementById('embyList').dataset.loaded) detectEmby();
   if (name === 'sync') { syncFeedStart(); refreshSyncStatus(); }
@@ -3399,6 +3454,271 @@ function shorten(s, n) {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
+// ══════════ 我的网盘 ══════════
+// 凭证以文件形式落地是这套 TVBox spider 的原生机制（<panDir>/lzxw/*），
+// 我们做的只是「界面 + 持久化 + 验活」——不碰 spider 代码。
+var panState = { drives: [], allowNetdisk: false, vault: false, loading: false };
+
+function panEsc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+function loadPan() {
+  var box = document.getElementById('panCards');
+  if (box && !panState.drives.length) box.innerHTML = '<div class="empty">加载中…</div>';
+  return api('api/pan').then(function (d) {
+    if (!d || !d.ok) { if (box) box.innerHTML = '<div class="empty">读取失败：' + panEsc(d && d.msg) + '</div>'; return; }
+    panState.drives = d.drives || [];
+    panState.allowNetdisk = !!d.allowNetdisk;
+    panState.vault = !!d.vault;
+    document.getElementById('panDir').textContent = d.panDir || '—';
+    var ep = document.getElementById('panEnabledPill');
+    ep.textContent = panState.allowNetdisk ? '已启用' : '未启用';
+    ep.className = 'pill' + (panState.allowNetdisk ? ' ok' : '');
+    var vp = document.getElementById('panVaultPill');
+    vp.textContent = panState.vault ? 'AES 备份已开' : 'AES 备份未开';
+    vp.className = 'pill' + (panState.vault ? ' ok' : '');
+    var logged = panState.drives.filter(function (x) { return x.configured; }).length;
+    document.getElementById('panSummary').textContent =
+      '已配置 ' + logged + ' / ' + panState.drives.length + ' 个网盘 · 配置里共 ' + (d.netdiskCount || 0) + ' 个网盘类源';
+    var tab = document.getElementById('tabPanCount');
+    if (tab) { tab.textContent = logged; tab.style.display = logged ? '' : 'none'; }
+    renderPan();
+    var sel = document.getElementById('panRawDrive');
+    if (sel && !sel.options.length) {
+      sel.innerHTML = panState.drives.map(function (x) {
+        return '<option value="' + panEsc(x.id) + '">' + panEsc(x.label) + '</option>';
+      }).join('');
+    }
+  }).catch(function (e) {
+    if (box) box.innerHTML = '<div class="empty">读取失败：' + panEsc(e.message) + '</div>';
+  });
+}
+
+function panVerifyCls(v) {
+  if (!v) return 'off';
+  if (v.logged) return 'on';
+  if (v.ok) return 'warn';
+  return 'bad';
+}
+
+function renderPan() {
+  var box = document.getElementById('panCards');
+  if (!box) return;
+  if (!panState.drives.length) { box.innerHTML = '<div class="empty">没有网盘条目</div>'; return; }
+  box.innerHTML = panState.drives.map(function (d) {
+    var v = d.verify || null;
+    var stCls = d.configured ? panVerifyCls(v) : 'off';
+    var stTxt = d.configured
+      ? (v ? (v.logged ? '已登录' : (v.ok ? '无数据' : '检测失败')) : '已保存·未检测')
+      : '未登录';
+    var vmsg = '';
+    if (v && v.msg) {
+      vmsg = '<div class="vmsg ' + (stCls === 'on' ? 'ok' : stCls === 'warn' ? 'warn' : 'bad') + '">'
+        + panEsc(v.msg) + (v.ms != null ? '（' + v.ms + 'ms）' : '') + '</div>';
+    }
+    var files = (d.files || []).map(function (f) {
+      var has = (d.present || []).indexOf(f) >= 0;
+      return '<span style="color:' + (has ? 'var(--ok-text)' : 'var(--muted)') + '">'
+        + (has ? '✓ ' : '· ') + panEsc(f) + '</span>';
+    }).join('　');
+    var inSync = d.inSync ? '<span class="pan-mini on">已加入同步</span>' : '';
+    return '<div class="pan-card' + (d.configured ? ' on' : '') + '" id="pan-card-' + panEsc(d.id) + '">'
+      + '<div class="hd"><span class="nm">' + panEsc(d.label) + '</span>'
+      + '<span class="sp">' + panEsc(d.spider) + '</span>'
+      + '<span class="stt ' + stCls + '">' + panEsc(stTxt) + '</span></div>'
+      + '<div class="hint2">' + panEsc(d.hint) + '</div>'
+      + '<textarea id="pan-in-' + panEsc(d.id) + '" placeholder="粘贴 cookie / token / refresh_token'
+      + (d.id === 'uc' ? '（UC 另可填 device_id 在下一格）' : '') + '"></textarea>'
+      + (d.id === 'uc' ? '<textarea id="pan-sub-' + panEsc(d.id) + '" style="min-height:34px" placeholder="device_id（可选，留空自动生成）"></textarea>' : '')
+      + (d.id === 'tianyi' ? '<textarea id="pan-sub-' + panEsc(d.id) + '" style="min-height:34px" placeholder="密码（可选）"></textarea>' : '')
+      + (d.id === 'xunlei' || d.id === 'guangya' ? '<textarea id="pan-sub-' + panEsc(d.id) + '" style="min-height:34px" placeholder="refresh_token（可选，留空则与 access_token 相同）"></textarea>' : '')
+      + vmsg
+      + '<div class="files">' + files + '</div>'
+      + '<div class="acts">'
+      + '<button class="primary tiny" onclick="panSave(\'' + panEsc(d.id) + '\')">保存并验证</button>'
+      + '<button class="tiny" onclick="panVerify(\'' + panEsc(d.id) + '\')">检测</button>'
+      + (d.configured ? '<button class="danger tiny" onclick="panLogout(\'' + panEsc(d.id) + '\')">退出登录</button>' : '')
+      + (d.qr ? '<button class="tiny" onclick="panQr(\'' + panEsc(d.id) + '\')">扫码登录</button>' : '')
+      + inSync
+      + '</div></div>';
+  }).join('');
+}
+
+function panSetMsg(id, html, cls) {
+  var card = document.getElementById('pan-card-' + id);
+  if (!card) return;
+  var old = card.querySelector('.vmsg');
+  if (old) old.remove();
+  var div = document.createElement('div');
+  div.className = 'vmsg ' + (cls || '');
+  div.innerHTML = html;
+  var acts = card.querySelector('.acts');
+  card.insertBefore(div, acts);
+}
+
+function panSave(id) {
+  var main = (document.getElementById('pan-in-' + id) || {}).value || '';
+  var sub = (document.getElementById('pan-sub-' + id) || {}).value || '';
+  if (!main.trim()) { toast('请先粘贴凭证', 'warn'); return; }
+  panSetMsg(id, '⏳ 保存中，随后会自动验证一次…', 'warn');
+  api('api/pan/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ drive: id, main: main.trim(), sub: sub.trim() })
+  }).then(function (d) {
+    if (!d || !d.ok) { panSetMsg(id, '✗ ' + panEsc(d && d.msg), 'bad'); return; }
+    var v = d.verify || {};
+    var ok = !!v.logged;
+    panSetMsg(id, (ok ? '✓ ' : '⚠ ') + panEsc(v.msg || '已保存') + (v.ms != null ? '（' + v.ms + 'ms）' : ''),
+      ok ? 'ok' : (v.ok ? 'warn' : 'bad'));
+    toast(ok ? '凭证已生效' : '已保存，但验证未通过', ok ? 'ok' : 'warn');
+    var inp = document.getElementById('pan-in-' + id); if (inp) inp.value = '';
+    loadPan();
+  }).catch(function (e) { panSetMsg(id, '✗ ' + panEsc(e.message), 'bad'); });
+}
+
+function panVerify(id) {
+  panSetMsg(id, '⏳ 检测中…', 'warn');
+  api('api/pan/verify?drive=' + encodeURIComponent(id)).then(function (d) {
+    if (!d || !d.ok) { panSetMsg(id, '✗ ' + panEsc(d && d.msg), 'bad'); return; }
+    var v = d.verify || {};
+    panSetMsg(id, (v.logged ? '✓ ' : '⚠ ') + panEsc(v.msg || ''), v.logged ? 'ok' : (v.ok ? 'warn' : 'bad'));
+    loadPan();
+  }).catch(function (e) { panSetMsg(id, '✗ ' + panEsc(e.message), 'bad'); });
+}
+
+function panLogout(id) {
+  if (!confirm('确定清除这个网盘的凭证？文件会移到 .trash 备份目录，不会删除。')) return;
+  api('api/pan/logout', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ drive: id })
+  }).then(function (d) {
+    if (!d || !d.ok) { toast((d && d.msg) || '清除失败', 'bad'); return; }
+    toast('已清除凭证', 'ok');
+    loadPan();
+  }).catch(function (e) { toast(e.message, 'bad'); });
+}
+
+function panEnable(on) {
+  var btn = document.getElementById('btnPanEnable');
+  if (btn) btn.disabled = true;
+  api('api/pan/enable', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ on: !!on })
+  }).then(function (d) {
+    if (!d || !d.ok) { toast((d && d.msg) || '操作失败', 'bad'); return; }
+    var extra = (d.added && d.added.length) ? '，新加入 ' + d.added.length + ' 个站点' : '';
+    var miss = (d.missing && d.missing.length) ? '；配置里没有：' + d.missing.join('、') : '';
+    toast((d.msg || 'ok') + extra + miss, 'ok');
+    loadPan();
+    if (typeof loadSites === 'function') loadSites();
+  }).catch(function (e) { toast(e.message, 'bad'); })
+    .then(function () { if (btn) btn.disabled = false; });
+}
+
+function panRawLoad() {
+  var sel = document.getElementById('panRawDrive');
+  var id = sel ? sel.value : '';
+  var box = document.getElementById('panRawBox');
+  if (!id || !box) return;
+  box.innerHTML = '<div class="empty">读取中…</div>';
+  api('api/pan/raw?drive=' + encodeURIComponent(id)).then(function (d) {
+    if (!d || !d.ok) { box.innerHTML = '<div class="empty">' + panEsc(d && d.msg) + '</div>'; return; }
+    var files = d.files || {};
+    var names = Object.keys(files);
+    if (!names.length) { box.innerHTML = '<div class="empty">这个网盘没有可编辑的文件</div>'; return; }
+    box.innerHTML = '<div class="hint" style="margin-bottom:8px">目录：<code>' + panEsc(d.root) + '</code></div>'
+      + names.map(function (n) {
+        return '<div style="margin-bottom:10px"><div style="font-family:var(--mono);font-size:12px;color:var(--dim);margin-bottom:4px">'
+          + panEsc(n) + ' ' + (files[n] == null ? '<span style="color:var(--bad-text)">（不存在）</span>' : '')
+          + '</div><textarea id="pan-raw-' + panEsc(n) + '" style="width:100%;min-height:70px;font-family:var(--mono);font-size:12px">'
+          + panEsc(files[n] == null ? '' : files[n]) + '</textarea>'
+          + '<button class="tiny" style="margin-top:5px" onclick="panRawSave(\'' + panEsc(id) + '\',\'' + panEsc(n) + '\')">写入并验证</button></div>';
+      }).join('');
+  }).catch(function (e) { box.innerHTML = '<div class="empty">' + panEsc(e.message) + '</div>'; });
+}
+
+function panRawSave(id, name) {
+  var ta = document.getElementById('pan-raw-' + name);
+  if (!ta) return;
+  api('api/pan/raw', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ drive: id, file: name, content: ta.value })
+  }).then(function (d) {
+    if (!d || !d.ok) { toast((d && d.msg) || '写入失败', 'bad'); return; }
+    var v = d.verify || {};
+    toast((v.logged ? '✓ ' : '⚠ ') + (v.msg || '已写入'), v.logged ? 'ok' : 'warn');
+    loadPan();
+  }).catch(function (e) { toast(e.message, 'bad'); });
+}
+
+// ══════════ 网盘扫码登录（各网盘实现在 hub 的 PanQr） ══════════
+var panQrTimer = null;
+
+function panQrStop() {
+  if (panQrTimer) { clearInterval(panQrTimer); panQrTimer = null; }
+}
+
+function panQr(driveId) {
+  panQrStop();
+  var card = document.getElementById('pan-card-' + driveId);
+  if (!card) return;
+  panSetMsg(driveId, '⏳ 正在申请二维码…', 'warn');
+  api('api/pan/qr?action=start&drive=' + encodeURIComponent(driveId)).then(function (d) {
+    if (!d || !d.ok) {
+      panSetMsg(driveId, '✗ ' + panEsc(d && d.msg) + '（可改用「粘贴凭证」）', 'bad');
+      return;
+    }
+    var old = card.querySelector('.pan-qr');
+    if (old) old.remove();
+    var wrap = document.createElement('div');
+    wrap.className = 'pan-qr';
+    var img = d.imgUrl
+      ? '<img alt="登录二维码" style="width:150px;height:150px;background:#fff;border-radius:6px;padding:4px" src="' + panEsc(d.imgUrl) + '">'
+      : '<div style="width:150px;font-size:12px;color:var(--dim);text-align:center">该网盘不返图，请用下面这串内容生成二维码</div>';
+    wrap.innerHTML = img
+      + '<div class="qinfo"><div id="pan-qr-state-' + panEsc(driveId) + '">等待扫码…</div>'
+      + '<div style="margin-top:6px;color:var(--dim)">' + panEsc(d.hint || '') + '</div>'
+      + (d.content ? '<div style="margin-top:4px;font-family:var(--mono);font-size:11px;word-break:break-all;user-select:all">' + panEsc(d.content) + '</div>' : '')
+      + '<div style="margin-top:8px"><button class="tiny" onclick="panQrStop();panQr(\'' + panEsc(driveId) + '\')">换一张</button></div></div>';
+    var acts = card.querySelector('.acts');
+    card.insertBefore(wrap, acts);
+
+    var rounds = 0;
+    panQrTimer = setInterval(function () {
+      rounds++;
+      if (rounds > 72) { panQrStop(); panSetMsg(driveId, '⚠ 二维码等待超时，请重新生成', 'warn'); return; }
+      api('api/pan/qr?action=poll&drive=' + encodeURIComponent(driveId) + '&sid=' + encodeURIComponent(d.sid)).then(function (r) {
+        var st = document.getElementById('pan-qr-state-' + driveId);
+        if (!r || !r.ok) {
+          panQrStop();
+          panSetMsg(driveId, '✗ ' + panEsc(r && r.msg) + '（可改用「粘贴凭证」）', 'bad');
+          return;
+        }
+        if (st) st.textContent = r.msg || '';
+        if (r.logged) {
+          panQrStop();
+          var v = r.verify || {};
+          var good = !!v.logged;
+          panSetMsg(driveId, (good ? '✓ ' : '⚠ ') + panEsc(v.msg || '登录成功'), good ? 'ok' : 'warn');
+          var q = card.querySelector('.pan-qr'); if (q) q.remove();
+          toast('扫码登录成功', 'ok');
+          loadPan();
+        } else if (r.status === -1) {
+          panQrStop();
+          panSetMsg(driveId, '⚠ 二维码已过期，请重新生成', 'warn');
+        }
+      }).catch(function () { /* 单次轮询失败不致命，下一轮再试 */ });
+    }, 2500);
+  }).catch(function (e) { panSetMsg(driveId, '✗ ' + panEsc(e.message), 'bad'); });
+}
+
 // ══════════ 启动 ══════════
 status();
 loadSites();
@@ -3413,7 +3733,7 @@ try {
 
 // ══════════ 外壳：顶栏标题 + 主题切换 ══════════
 (function () {
-  var TITLES = {overview:'概览', guide:'使用说明', sites:'站点', search:'搜索', sync:'同步', config:'配置', emby:'Emby 插件', logs:'操作记录'};
+  var TITLES = {overview:'概览', guide:'使用说明', sites:'站点', pan:'我的网盘', search:'搜索', sync:'同步', config:'配置', emby:'Emby 插件', logs:'操作记录'};
 
   function setPaneTitle(name) {
     var el = document.getElementById('paneTitle');

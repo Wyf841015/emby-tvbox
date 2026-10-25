@@ -70,6 +70,7 @@ while true; do
         -XX:MinHeapFreeRatio=15 -XX:MaxHeapFreeRatio=40 -XX:ReservedCodeCacheSize=48m \
         -XX:TieredStopAtLevel=1 -XX:MaxMetaspaceSize=176m -Dfile.encoding=UTF-8 \
         -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 \
+        -Dtvbox.panDir="${VARDIR}/data/pan" \
         -cp "${APP}/ui/hub.jar:${APP}/ui/lib/*" hub.Hub \
         --port "$PORT" --socket "$SOCK" --prefix /app/tvboxhub \
         --config "${VARDIR}/hub.json" --jar-dir "${APP}/ui/lib" \
