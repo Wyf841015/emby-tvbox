@@ -38,6 +38,9 @@ public final class PanQr {
     private static final HttpClient HTTP = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(12))
             .followRedirects(HttpClient.Redirect.NORMAL)
+            // 必须带 cookie：阿里 generate.do 和 query.do 是两次独立请求，
+            // 浏览器靠 cookie 把两次串起来；不带就立刻回 EXPIRED。
+            .cookieHandler(new java.net.CookieManager())
             .build();
 
     private PanQr() {}
@@ -48,6 +51,9 @@ public final class PanQr {
         public final Map<String, String> vars = new LinkedHashMap<>();
         /** 115 专用：反射拿到的 Token 对象（不能序列化成字符串，只能留在内存里）。 */
         public final Map<String, Object> tokens = new ConcurrentHashMap<>();
+        /** 加载 Qr115 用的 ClassLoader —— 必须记住 start 时那个，
+         *  轮询时用 Thread.contextClassLoader 会拿到 ClassNotFoundException。 */
+        public ClassLoader loader;
         Session(String drive) { this.drive = drive; }
     }
 
@@ -74,6 +80,7 @@ public final class PanQr {
     // ══════════════════════════════════════════════════════════
     public static Map<String, Object> start(String driveId, ClassLoader spiderLoader) throws Exception {
         Session s = new Session(driveId);
+        s.loader = spiderLoader;
         Map<String, Object> r;
         switch (driveId) {
             case "115":   r = start115(s, spiderLoader); break;
@@ -137,11 +144,13 @@ public final class PanQr {
     }
 
     private static Map<String, Object> poll115(Session s) throws Exception {
-        Class<?> qr = qr115(Thread.currentThread().getContextClassLoader());
+        Class<?> qr = qr115(s.loader);
         Object token = s.tokens.get(s.vars.get("sid"));
         if (token == null) throw new IllegalStateException("二维码会话已失效");
         Class<?> tc = token.getClass();
-        Object stObj = qr.getMethod("status", tc).invoke(null, token);
+        // status() 走的是 115 的长轮询接口，被网络拦掉时会一直挂着 —— 加个硬超时，
+        // 否则界面看起来就是「扫了没反应」。
+        Object stObj = callWithTimeout(() -> qr.getMethod("status", tc).invoke(null, token), 40000);
         int st = stObj instanceof Integer ? (Integer) stObj : ERROR;
         // 常量：WAIT=0 SCANNED=1 DONE=2 EXPIRED=-1 ERROR=-99（与我们的语义一致）
         if (st == DONE) {
@@ -152,7 +161,8 @@ public final class PanQr {
             return m;
         }
         return baseState(st, st == SCANNED ? "已扫码，请在手机上确认" : st == WAIT ? "等待扫码…"
-                : st == EXPIRED ? "二维码已过期" : "扫码状态异常(" + st + ")");
+                : st == EXPIRED ? "二维码已过期"
+                : "115 的状态接口无响应（本机网络把它掐了）—— 扫码登录在这台机器走不通，请改用「粘贴 cookie」");
     }
 
     // ══════════════════════════════════════════════════════════
@@ -248,21 +258,25 @@ public final class PanQr {
         Map<String, Object> j = jsonObj(raw);
         int errno = (int) num(j.get("errno"));
         String v = str(j.get("v"));
-        if (errno == 1 && !v.isEmpty()) {
-            // v 是一段 base64，解出来是 {"bduss":"..."}
-            String decoded = new String(Base64.getDecoder().decode(v), StandardCharsets.UTF_8);
-            Map<String, Object> d = jsonObj(decoded);
-            String bduss = str(d.get("bduss"));
+        // 百度 unicast 是长轮询：没扫到时 30s 后返回 {"errno":1}（这是正常，不是错误）；
+        // 扫到了才带 v，v 是 base64 的 {"bduss":"..."}。
+        if (!v.isEmpty()) {
+            String bduss = "";
+            try {
+                String decoded = new String(Base64.getDecoder().decode(v), StandardCharsets.UTF_8);
+                bduss = str(jsonObj(decoded).get("bduss"));
+            } catch (Exception ignore) {
+                // 解不出来就往下走，交给下面报原文
+            }
             if (!bduss.isEmpty()) {
                 PanAccounts.save(PanAccounts.drive("baidu"), "BDUSS=" + bduss, null);
                 Map<String, Object> m = baseState(DONE, "登录成功，凭证已保存");
                 m.put("logged", true);
                 return m;
             }
+            return baseState(WAIT, "拿到回调但解不出 BDUSS：" + cut(v));
         }
-        if (errno == 2) return baseState(WAIT, "等待扫码…");
-        if (errno == 0) return baseState(WAIT, "等待扫码…");
-        return baseState(WAIT, "等待扫码…（errno=" + errno + "）");
+        return baseState(WAIT, "等待扫码…");
     }
 
     // ══════════════════════════════════════════════════════════
@@ -351,7 +365,10 @@ public final class PanQr {
         if ("SCANED".equalsIgnoreCase(qrStatus) || "SCANNED".equalsIgnoreCase(qrStatus)) {
             return baseState(SCANNED, "已扫码，请在手机上确认");
         }
-        if ("EXPIRED".equalsIgnoreCase(qrStatus)) return baseState(EXPIRED, "二维码已过期");
+        if ("EXPIRED".equalsIgnoreCase(qrStatus)) {
+            return baseState(EXPIRED, "阿里返回「二维码已过期」—— 上游这条链接要在浏览器会话里才认，"
+                    + "扫码登录走不通，请改用「粘贴 refresh_token」");
+        }
         return baseState(WAIT, "等待扫码…（" + (qrStatus.isEmpty() ? "无状态" : qrStatus) + "）");
     }
 
@@ -398,7 +415,9 @@ public final class PanQr {
 
     private static String get(String url, String referer) throws Exception {
         HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url))
-                .timeout(Duration.ofSeconds(15))
+                // 百度的 unicast / 115 的 get-status 都是长轮询接口：没人扫码时会挂住几十秒，
+                // 超时设短了会一律报「request timed out」，看着像登录没反应。
+                .timeout(Duration.ofSeconds(45))
                 .header("User-Agent", UA)
                 .header("Accept", "application/json, text/plain, */*")
                 .GET();
@@ -419,6 +438,26 @@ public final class PanQr {
     }
 
     private static String enc(String s) { return URLEncoder.encode(s == null ? "" : s, StandardCharsets.UTF_8); }
+
+    /** 扫码轮询专用线程池（守护线程，不让它拖住退出）。 */
+    private static final java.util.concurrent.ExecutorService QR_POOL =
+            java.util.concurrent.Executors.newCachedThreadPool(r -> {
+                Thread t = new Thread(r, "pan-qr");
+                t.setDaemon(true);
+                return t;
+            });
+
+    /** 给反射调用（Qr115.status）加硬超时，避免长轮询把 HTTP 处理线程挂死。 */
+    private static Object callWithTimeout(java.util.concurrent.Callable<Object> c, long ms) throws Exception {
+        java.util.concurrent.Future<Object> f = QR_POOL.submit(c);
+        try {
+            return f.get(ms, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.TimeoutException te) {
+            f.cancel(true);
+            throw new IllegalStateException("上游扫码状态接口超时（" + (ms / 1000)
+                    + "s 无响应）—— 这台机器的网络可能会掐长轮询，先确认能正常访问该网盘官网");
+        }
+    }
 
     private static String cut(String s) {
         if (s == null) return "(空响应)";

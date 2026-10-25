@@ -4,8 +4,19 @@
 
 一个 fnOS 应用（`tvboxhub.fpk`）+ 一个 Emby 插件（`TvBox.dll`），装完在浏览器里点点鼠标就能用，不用碰命令行。
 
-> 当前版本 **v0.6.0**。
+> 当前版本 **v0.7.0**。
 > 内部迭代期（0.5.x）的逐条开发记录保留在 [docs/CHANGELOG-internal.md](docs/CHANGELOG-internal.md)。
+
+## v0.7.0 更新
+
+网盘登录：扫码 / 粘贴凭证 → 凭证持久化 → 启用网盘源 → 生成 strm → 用这份凭证播放。
+
+- 「我的网盘」页支持 9 个网盘（115 / 夸克 / UC / 百度 / 天翼 / 123 / 迅雷 / 光鸭 / 阿里）
+- 115 / 百度 / 阿里 可扫码登录；9 个网盘都能粘贴凭证
+- 凭证落在 `${PKGVAR}/data/pan/lzxw/`（**原来在 `/tmp`，重启就丢**，这是「记不住登录」的根因）
+- 另有 AES-256-GCM 加密备份 `pan-vault.enc`，重启/换机可还原
+- 保存后立刻验活（调 homeContent 看真实条目数），每 6 小时自动巡检失效
+- 退出登录走 `.trash`，不删文件
 
 ## v0.6.0 更新
 
@@ -183,6 +194,78 @@ http://<你的Emby>/TvBox/Stream?...   →  插件补 Referer / User-Agent  → 
 
 ---
 
+## 网盘登录
+
+侧边栏「**我的网盘**」。凭证本来就是这套 spider 的原生机制（所有网盘客户端都走
+`Init.context().getFilesDir()/lzxw/` 读文件），本应用只是提供了界面 + 持久化 + 验活，
+**没有改动一行 spider 代码**。
+
+### 支持矩阵
+
+| 网盘 | 扫码登录 | 粘贴凭证 | 凭证文件 |
+|---|---|---|---|
+| 115 | ✅ | ✅ | `115.txt` |
+| 百度 | ✅ | ✅ | `baidu.txt` |
+| 阿里云盘 | ✅ | ✅ | `aliyun`（无扩展名，JSON） |
+| 夸克 | — | ✅ | `quark_cookie.txt` |
+| UC | — | ✅ | `uc_cookie.txt` + `uc_token.txt` + `uc_machine_code.txt` |
+| 天翼 | — | ✅ | `cloud189.txt` |
+| 123 | — | ✅ | `cloud123.txt` |
+| 迅雷 | — | ✅ | `xunlei.txt` |
+| 光鸭 | — | ✅ | `guangya.txt` |
+
+### 扫码登录的真实情况（别踩坑）
+
+三家都能生成**官方**二维码，但「扫完能不能落地」取决于各家接口在这台机器上通不通：
+
+- **115**：二维码来自 jar 自带的 `Qr115`。但 `get/status/` 带上 `time` 参数后会被
+  风控黑洞（只带 `sign` 返 200，加 `time` 就 20s 无响应），所以扫完状态查不到 ——
+  **115 建议直接用粘贴 cookie**。
+- **百度**：`getqrcode` 的 `imgurl` 补 `https://` 就是 245×245 PNG；轮询 `unicast`
+  是长轮询，没扫到时 30s 后返回 `{"errno":1}`（这是正常）。扫到后 `v` 里是 base64 的
+  `bduss`。**这条路是完整的**。
+- **阿里云盘**：`generate.do` 只返回 `codeContent`（官方内容），上游不给图片，
+  所以二维码由前端 `qrcode-generator` **本地生成**（token 不出这台机器）。
+  但 `query.do` 立刻回 `EXPIRED`（上游要求浏览器会话），**扫码落地走不通，请粘贴
+  `refresh_token`**。
+
+夸克 / UC / 天翼不给扫码按钮是故意的：夸克 uop 现在只回 token 不回 `qrcode_url`，
+UC 的 `uop.uc.cn` 在本机解析不了，天翼 189 要 `date`+HMAC 签名 —— 与其给一个扫不动的码，
+不如让人直接走粘贴。
+
+### 凭证怎么存
+
+```
+${PKGVAR}/data/pan/            ← <PKGVAR> = /vol3/@appdata/tvboxhub
+├── lzxw/                      ← spider 真正读的目录（0600，仅应用可读）
+│   ├── 115.txt
+│   ├── baidu.txt
+│   └── aliyun
+├── pan-vault.enc              ← AES-256-GCM 加密备份（密钥在 hub.json 的 panKey）
+└── pan-vault.log              ← 备份操作记录
+```
+
+- 明文是**必须**的：spider 直接读文件，不解密。所以用 `0600` + 应用私有目录兜底。
+- `pan-vault.enc` 用于重启恢复 / 换机迁移 / 连同备份带走；`panKey` 丢了就解不开。
+- 「退出登录」把文件移进 `.trash/`，**不删**。
+
+### 验活不是「文件写了就算成功」
+
+保存后会立刻调一次该网盘的 `homeContent`，**只认「真的列出了条目」**：
+
+> 调通了但一条都没列出来（分类 1）—— 凭证多半无效/已过期，或该网盘根目录是空的
+
+为什么不用「分类数」判断：实测 115 用**假 cookie** 也能返回「分类 1 个」，
+只看分类会把无效凭证误报成已登录。
+
+### 启用之后
+
+「启用网盘源并加入同步」= 打开 `allowNetdisk` + 把这 9 个网盘站加进 `syncSites`，
+之后在「站点」页就能看到它们参与同步。
+
+> **STRM 落盘由 Emby 插件负责**，hub 只提供 `/api/push`。
+> 「只同步指定目录」需要在插件侧扩展，**当前版本未实现**。
+
 ## HTTP API 概览
 
 hub 44 个路由（完整列表见 `spider-hub/src/hub/Hub.java`）：
@@ -229,6 +312,15 @@ cd ../fpk-src && fnpack build .
 ---
 
 ## 版本历史
+
+### v0.7.0 (2026-10-25)
+
+- 新增「我的网盘」：9 个网盘登录（115/百度/阿里 扫码；9 家均可粘贴凭证）
+- 凭证持久化到 `${PKGVAR}/data/pan/lzxw`，修掉原来落在 `/tmp` 重启即丢的问题
+- AES-256-GCM 加密备份 `pan-vault.enc`；退出登录走 `.trash` 不删文件
+- 保存即验活（只认真实条目数），6 小时自动巡检凭证失效
+- 新增 API：`/api/pan`、`/api/pan/login`、`/api/pan/logout`、`/api/pan/raw`、
+  `/api/pan/verify`、`/api/pan/enable`、`/api/pan/qr`（均需令牌/网关头）
 
 ### v0.6.0 (2026-10-24)
 

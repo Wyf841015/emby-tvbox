@@ -2836,9 +2836,45 @@ public class Hub {
             PanAccounts.materializeFromVault();
             System.out.println("[pan] 凭证目录 " + PanAccounts.root()
                     + "  vault=" + (Files.isRegularFile(PanAccounts.vaultFile()) ? "有" : "无"));
+            startPanExpiryWatch();
         } catch (Exception e) {
             System.out.println("[pan] 初始化失败: " + e.getMessage());
         }
+    }
+
+    /**
+     * 凭证失效巡检：每 6 小时把「已配置」的网盘验活一遍，结果进 panVerifyCache，
+     * 界面上就能看到「登录已失效」而不是等用户点了才发现。
+     * 守护线程 + 单次只跑一家、间隔 8s，避免同时压 9 个网盘。
+     */
+    static void startPanExpiryWatch() {
+        Thread t = new Thread(() -> {
+            try { Thread.sleep(90_000); } catch (InterruptedException ie) { return; }   // 启动后先缓 90s，别和首屏抢资源
+            while (true) {
+                try {
+                    for (PanAccounts.Drive d : PanAccounts.DRIVES) {
+                        if (Thread.currentThread().isInterrupted()) return;
+                        try {
+                            if (!PanAccounts.configured(d)) continue;
+                            Map<String, Object> v = verifyPan(d);
+                            boolean ok = Boolean.TRUE.equals(v.get("logged"));
+                            if (!ok) {
+                                System.out.println("[pan] 凭证疑似失效: " + d.label + " → " + v.get("msg"));
+                                record("网盘凭证巡检", d.label, false, String.valueOf(v.get("msg")), 0);
+                            }
+                        } catch (Exception e) {
+                            System.out.println("[pan] 巡检 " + d.label + " 失败: " + e.getMessage());
+                        }
+                        try { Thread.sleep(8_000); } catch (InterruptedException ie) { return; }
+                    }
+                } catch (Throwable th) {
+                    System.out.println("[pan] 巡检异常: " + th.getMessage());
+                }
+                try { Thread.sleep(6 * 3600_000L); } catch (InterruptedException ie) { return; }
+            }
+        }, "pan-expiry-watch");
+        t.setDaemon(true);
+        t.start();
     }
 
     /** 宽松解析 body：空串/坏 JSON 都当作「没有内容」，别让 /api/pan/enable 因为空 body 报错。 */
@@ -2905,79 +2941,6 @@ public class Hub {
         r.put("ms", System.currentTimeMillis() - t0);
         panVerifyCache.put(d.id, r);
         return r;
-    }
-
-    // ══════════ 115 扫码登录 ══════════
-    /**
-     * 115 扫码登录：反射调 jar 里的 com.github.catvod.spider.Qr115。
-     *
-     * 为什么不自己拼 HTTP：115 的扫码接口要带 time+sign 签名，Qr115 里已经实现了；
-     * 我们只用它的 token/status/login 三个静态方法（都是 headless 的，不碰 Android UI）。
-     * Token 对象跨请求带不过去，按 uid 缓存在内存里。
-     *
-     * 状态码（从 class 常量读出来的）：WAIT=0 SCANNED=1 DONE=2 EXPIRED=-1 ERROR=-99
-     */
-    static final Map<String, Object> panQrTokens = new ConcurrentHashMap<>();
-
-    static Map<String, Object> panQr115(String action, Map<String, String> q) throws Exception {
-        ClassLoader ld = pool.loader();
-        if (ld == null) throw new IllegalStateException("spider 还没加载（先去「配置」填一个点播源）");
-        Class<?> qr;
-        try {
-            qr = Class.forName("com.github.catvod.spider.Qr115", true, ld);
-        } catch (Throwable t) {
-            throw new IllegalStateException("当前 spider jar 里没有 Qr115（这套配置不支持 115 扫码）");
-        }
-
-        if ("start".equals(action)) {
-            Object token = qr.getMethod("token").invoke(null);
-            if (token == null) throw new IllegalStateException("115 没有返回二维码（接口风控或网络不通）");
-            Class<?> tc = token.getClass();
-            String uid = (String) tc.getField("uid").get(token);
-            String content = (String) tc.getField("qrcode").get(token);
-            panQrTokens.clear();
-            panQrTokens.put(uid, token);
-            Map<String, Object> m = ok("二维码已生成，用 115 App 扫码");
-            m.put("uid", uid);
-            m.put("content", content);
-            m.put("imgUrl", "https://qrcodeapi.115.com/api/1.0/web/1.0/qrcode?uid=" + uid);
-            m.put("expireSec", 180);
-            return m;
-        }
-
-        String uid = str(q.get("uid"));
-        Object token = uid == null ? null : panQrTokens.get(uid);
-        if (token == null) throw new IllegalStateException("二维码已失效，请重新生成");
-        Class<?> tc = token.getClass();
-        int st = (Integer) qr.getMethod("status", tc).invoke(null, token);
-
-        Map<String, Object> m = ok("");
-        m.put("uid", uid);
-        m.put("status", st);
-        if (st == 2) {                       // DONE：Qr115.login 会把 cookie 写进 115.txt
-            Object cookie = qr.getMethod("login", tc).invoke(null, token);
-            panQrTokens.remove(uid);
-            PanAccounts.Drive d = PanAccounts.drive("115");
-            PanAccounts.updateVault(d);
-            m.put("logged", true);
-            m.put("msg", cookie == null ? "已登录（cookie 已写入）" : "已登录");
-            if (d != null) m.put("verify", verifyPan(d));
-        } else if (st == 1) {
-            m.put("logged", false);
-            m.put("msg", "已扫码，请在手机上点「确认登录」");
-        } else if (st == 0) {
-            m.put("logged", false);
-            m.put("msg", "等待扫码…");
-        } else if (st == -1) {
-            panQrTokens.remove(uid);
-            m.put("logged", false);
-            m.put("msg", "二维码已过期，请重新生成");
-        } else {
-            panQrTokens.remove(uid);
-            m.put("logged", false);
-            m.put("msg", "扫码状态异常（" + st + "）");
-        }
-        return m;
     }
 
     /** 取最内层异常信息，反射抛 InvocationTargetException 时不然只能看到空壳。 */

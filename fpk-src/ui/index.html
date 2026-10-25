@@ -592,7 +592,7 @@
         <div class="brand-text">
           <div class="brand-line">
             <h1>TvBox For Emby</h1>
-            <span class="ver">v0.6.0</span>
+            <span class="ver">v0.7.0</span>
           </div>
           <div class="sub"><span id="paneTitle">概览</span></div>
         </div>
@@ -3708,7 +3708,12 @@ function panRenderQr(box, text) {
 var panQrTimer = null;
 
 function panQrStop() {
-  if (panQrTimer) { clearInterval(panQrTimer); panQrTimer = null; }
+  if (!panQrTimer) return;
+  try {
+    if (typeof panQrTimer.stop === 'function') panQrTimer.stop();
+    else clearInterval(panQrTimer);
+  } catch (e) { /* 停不下来也不该挡住界面 */ }
+  panQrTimer = null;
 }
 
 function panQr(driveId) {
@@ -3738,32 +3743,43 @@ function panQr(driveId) {
     // 只给文本的网盘（阿里/夸克）在本地画二维码，token 不出这台机器
     if (!d.imgUrl && d.content) panRenderQr(document.getElementById(boxId), d.content);
 
-    var rounds = 0;
-    panQrTimer = setInterval(function () {
+    // 逐个串行轮询（不能用 setInterval：上一轮最长会挂 40s，定时器会把请求堆起来）
+    var rounds = 0, stopped = false;
+    function panQrTick() {
+      if (stopped || !panQrTimer) return;
       rounds++;
-      if (rounds > 72) { panQrStop(); panSetMsg(driveId, '⚠ 二维码等待超时，请重新生成', 'warn'); return; }
-      api('api/pan/qr?action=poll&drive=' + encodeURIComponent(driveId) + '&sid=' + encodeURIComponent(d.sid)).then(function (r) {
-        var st = document.getElementById('pan-qr-state-' + driveId);
-        if (!r || !r.ok) {
-          panQrStop();
-          panSetMsg(driveId, '✗ ' + panEsc(r && r.msg) + '（可改用「粘贴凭证」）', 'bad');
-          return;
-        }
-        if (st) st.textContent = r.msg || '';
-        if (r.logged) {
-          panQrStop();
-          var v = r.verify || {};
-          var good = !!v.logged;
-          panSetMsg(driveId, (good ? '✓ ' : '⚠ ') + panEsc(v.msg || '登录成功'), good ? 'ok' : 'warn');
-          var q = card.querySelector('.pan-qr'); if (q) q.remove();
-          toast('扫码登录成功', 'ok');
-          loadPan();
-        } else if (r.status === -1) {
-          panQrStop();
-          panSetMsg(driveId, '⚠ 二维码已过期，请重新生成', 'warn');
-        }
-      }).catch(function () { /* 单次轮询失败不致命，下一轮再试 */ });
-    }, 2500);
+      if (rounds > 90) { panQrStop(); panSetMsg(driveId, '⚠ 二维码等待超时，请重新生成', 'warn'); return; }
+      api('api/pan/qr?action=poll&drive=' + encodeURIComponent(driveId) + '&sid=' + encodeURIComponent(d.sid))
+        .then(function (r) {
+          if (stopped || !panQrTimer) return;
+          var st = document.getElementById('pan-qr-state-' + driveId);
+          if (!r || !r.ok) {
+            panQrStop();
+            panSetMsg(driveId, '✗ ' + panEsc(r && r.msg) + '（可改用「粘贴凭证」）', 'bad');
+            return;
+          }
+          if (st) st.textContent = r.msg || '';
+          if (r.logged) {
+            panQrStop();
+            var v = r.verify || {};
+            var good = !!v.logged;
+            panSetMsg(driveId, (good ? '✓ ' : '⚠ ') + panEsc(v.msg || '登录成功'), good ? 'ok' : 'warn');
+            var q = card.querySelector('.pan-qr'); if (q) q.remove();
+            toast('扫码登录成功', 'ok');
+            loadPan();
+            return;
+          }
+          if (r.status === -1) {
+            panQrStop();
+            panSetMsg(driveId, '⚠ 二维码已过期，请重新生成', 'warn');
+            return;
+          }
+          setTimeout(panQrTick, r.status === 1 ? 1500 : 2500);   // 已扫码就快一点
+        })
+        .catch(function () { if (!stopped && panQrTimer) setTimeout(panQrTick, 3000); });
+    }
+    panQrTimer = { drive: driveId, stop: function () { stopped = true; } };
+    setTimeout(panQrTick, 2000);
   }).catch(function (e) { panSetMsg(driveId, '✗ ' + panEsc(e.message), 'bad'); });
 }
 
