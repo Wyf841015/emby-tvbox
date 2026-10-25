@@ -558,6 +558,20 @@
   .pan-qr canvas{background:#fff;border-radius:6px;padding:6px}
   .pan-qr .qinfo{font-size:12px;color:var(--text-2);line-height:1.7;flex:1}
   .pan-mini{font-size:11px;padding:2px 8px;border-radius:var(--r-full);background:var(--accent-soft);color:var(--brand)}
+
+  /* 目录选择弹窗 */
+  .pan-modal{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:200;display:flex;align-items:center;justify-content:center;padding:16px}
+  .pan-modal-box{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);width:min(760px,100%);max-height:82vh;display:flex;flex-direction:column;box-shadow:0 18px 50px rgba(0,0,0,.4)}
+  .pan-modal-hd{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px;border-bottom:1px solid var(--line)}
+  .pan-crumb{padding:8px 14px;font-size:12px;color:var(--dim);font-family:var(--mono);word-break:break-all}
+  .pan-modal-body{overflow:auto;padding:6px 8px 10px;flex:1;min-height:120px}
+  .pan-modal-ft{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;border-top:1px solid var(--line)}
+  .pan-row{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:var(--r-sm)}
+  .pan-row:hover{background:var(--surface-2)}
+  .pan-row .rnm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
+  .pan-row .rtag{font-size:11px;color:var(--dim);white-space:nowrap}
+  .pan-dirs{margin-top:8px;font-size:11.5px;color:var(--dim);line-height:1.7}
+  .pan-chip{font-size:11.5px;padding:2px 8px;border-radius:var(--r-full);background:var(--accent-soft);color:var(--brand);display:inline-block;margin:0 4px 4px 0}
 </style>
 </head>
 <body>
@@ -732,6 +746,25 @@
     <div class="panel">
       <h2>探测结果</h2>
       <div id="resultBox" class="empty">点站点行里的「首页 / 分类 / 采集」看返回</div>
+    </div>
+  </div>
+
+  <!-- ══════════ 目录选择弹窗（网盘同步目录） ══════════ -->
+  <div id="panDirModal" class="pan-modal" style="display:none">
+    <div class="pan-modal-box">
+      <div class="pan-modal-hd">
+        <b id="panDirTitle">选择同步目录</b>
+        <button class="tiny" onclick="panDirClose()">关闭</button>
+      </div>
+      <div class="pan-crumb" id="panDirCrumb">/</div>
+      <div class="pan-modal-body" id="panDirBody"><div class="empty">加载中…</div></div>
+      <div class="pan-modal-ft">
+        <span class="hint" style="margin:0" id="panDirPicked">已选 0 个目录</span>
+        <span>
+          <button class="tiny" onclick="panDirRoot()">回到根目录</button>
+          <button class="primary tiny" onclick="panDirSave()">保存这些目录</button>
+        </span>
+      </div>
     </div>
   </div>
 
@@ -3486,6 +3519,7 @@ function loadPan() {
     var tab = document.getElementById('tabPanCount');
     if (tab) { tab.textContent = logged; tab.style.display = logged ? '' : 'none'; }
     renderPan();
+    panDirsLoad();
     var sel = document.getElementById('panRawDrive');
     if (sel && !sel.options.length) {
       sel.innerHTML = panState.drives.map(function (x) {
@@ -3542,9 +3576,13 @@ function renderPan() {
       + '<button class="tiny" onclick="panVerify(\'' + panEsc(d.id) + '\')">检测</button>'
       + (d.configured ? '<button class="danger tiny" onclick="panLogout(\'' + panEsc(d.id) + '\')">退出登录</button>' : '')
       + (d.qr ? '<button class="tiny" onclick="panQr(\'' + panEsc(d.id) + '\')">扫码登录</button>' : '')
+      + '<button class="tiny" onclick="panPickDir(\'' + panEsc(d.id) + '\')">同步目录…</button>'
       + inSync
-      + '</div></div>';
+      + '</div>'
+      + '<div class="pan-dirs" id="pan-dirs-' + panEsc(d.id) + '"></div>'
+      + '</div>';
   }).join('');
+  renderPanDirLists();
 }
 
 function panSetMsg(id, html, cls) {
@@ -3702,6 +3740,162 @@ function panRenderQr(box, text) {
         + '</div><div style="font-family:var(--mono);font-size:11px;word-break:break-all;user-select:all">' + panEsc(text) + '</div>';
     }
   });
+}
+
+// ══════════ 同步目录（只同步指定目录，整盘仍交给插件） ══════════
+var panDirState = { drive: null, tid: '', items: [], hint: '', stack: [], picked: [], all: {} };
+
+/** 卡片底部渲染：已保存目录 + 同步/试运行按钮。 */
+function renderPanDirLists() {
+  panState.drives.forEach(function (dr) {
+    var box = document.getElementById('pan-dirs-' + dr.id);
+    if (!box) return;
+    var list = panDirState.all[dr.id] || [];
+    if (!list.length) {
+      box.innerHTML = '同步范围：<b>整盘</b>（由 Emby 插件枚举）';
+      return;
+    }
+    box.innerHTML = '同步范围：'
+      + list.map(function (x) { return '<span class="pan-chip">' + panEsc(x.name || x.id) + '</span>'; }).join('')
+      + '<div style="margin-top:4px;display:flex;gap:8px;flex-wrap:wrap">'
+      + '<button class="primary tiny" onclick="panRunDirs(\'' + panEsc(dr.id) + '\',false)">同步这些目录</button>'
+      + '<button class="tiny" onclick="panRunDirs(\'' + panEsc(dr.id) + '\',true)">试运行</button>'
+      + '</div>';
+  });
+}
+
+function panDirsLoad() {
+  return api('api/pan/dirs').then(function (d) {
+    panDirState.all = (d && d.all) || {};
+    renderPanDirLists();
+  }).catch(function () { /* 读不到就按整盘显示，不弹错 */ });
+}
+
+/** onclick 里拼字符串用的转义（防止名字里带引号把 html 拼断）。 */
+function panQ(s) {
+  return String(s == null ? '' : s)
+    .replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+    .replace(/</g, '&lt;').replace(/"/g, '&quot;');
+}
+
+function panPickDir(drive) {
+  panDirState.drive = drive;
+  panDirState.picked = (panDirState.all[drive] || []).slice();
+  panDirState.stack = [];
+  var dr = panState.drives.filter(function (x) { return x.id === drive; })[0] || {};
+  document.getElementById('panDirTitle').textContent = '选择同步目录 · ' + (dr.label || drive);
+  document.getElementById('panDirModal').style.display = 'flex';
+  panDirUpdatePicked();
+  panTreeGo('');
+}
+
+function panDirClose() { document.getElementById('panDirModal').style.display = 'none'; }
+
+function panDirRoot() { panDirState.stack = []; panTreeGo(''); }
+
+function panDirUpdatePicked() {
+  var el = document.getElementById('panDirPicked');
+  if (el) el.textContent = '已选 ' + panDirState.picked.length + ' 个目录';
+}
+
+function panDirRenderCrumb() {
+  var parts = ['根目录'].concat(panDirState.stack.map(function (s) { return s.name || s.id; }));
+  document.getElementById('panDirCrumb').textContent = parts.join(' / ');
+}
+
+function panDirRenderItems() {
+  var body = document.getElementById('panDirBody');
+  if (!panDirState.items.length) {
+    body.innerHTML = '<div class="empty">' + (panDirState.hint
+      ? panEsc(panDirState.hint)
+      : '这个位置没有子项 —— 可能它是个文件，不是目录') + '</div>';
+    return;
+  }
+  body.innerHTML = panDirState.items.map(function (it) {
+    var picked = panDirState.picked.some(function (p) { return p.id === it.id; });
+    var ico = it.kind === 'folder' ? '📁' : it.kind === 'file' ? '🎬' : '❔';
+    return '<div class="pan-row">'
+      + '<span class="rnm" onclick="panTreeGo(\'' + panQ(it.id) + '\',\'' + panQ(it.name) + '\')">'
+      + ico + ' ' + panEsc(it.name) + '</span>'
+      + '<span class="rtag">' + panEsc(it.remarks || '') + '</span>'
+      + '<button class="tiny" onclick="panPickToggle(\'' + panQ(it.id) + '\',\'' + panQ(it.name) + '\')">'
+      + (picked ? '✓ 已选' : '选为目录') + '</button>'
+      + '</div>';
+  }).join('');
+}
+
+/** id 空 = 根；点目录名进来时把当前层压栈。 */
+function panTreeGo(tid, name) {
+  var body = document.getElementById('panDirBody');
+  body.innerHTML = '<div class="empty">读取中…（网盘接口慢，可能要十几秒）</div>';
+  if (name) {
+    // 只在「往下走」时压栈；回根时由 panDirRoot 清空
+    if (!panDirState.stack.length || panDirState.stack[panDirState.stack.length - 1].id !== tid) {
+      panDirState.stack.push({ id: tid, name: name });
+    }
+  }
+  api('api/pan/tree?drive=' + encodeURIComponent(panDirState.drive) + '&id=' + encodeURIComponent(tid || ''))
+    .then(function (d) {
+      if (!d || !d.ok) {
+        panDirState.items = [];
+        panDirState.hint = '';
+        body.innerHTML = '<div class="empty">' + panEsc((d && d.msg) || '读取失败') + '</div>';
+        return;
+      }
+      panDirState.tid = tid || '';
+      panDirState.items = d.items || [];
+      panDirState.hint = d.hint || '';
+      panDirRenderCrumb();
+      panDirRenderItems();
+    })
+    .catch(function (e) {
+      panDirState.items = [];
+      body.innerHTML = '<div class="empty">' + panEsc(e.message) + '</div>';
+    });
+}
+
+function panPickToggle(id, name) {
+  var i = -1;
+  for (var k = 0; k < panDirState.picked.length; k++) {
+    if (panDirState.picked[k].id === id) { i = k; break; }
+  }
+  if (i >= 0) panDirState.picked.splice(i, 1);
+  else panDirState.picked.push({ id: id, name: name });
+  panDirUpdatePicked();
+  panDirRenderItems();      // 用缓存重画，不再打网盘接口
+}
+
+function panDirSave() {
+  api('api/pan/dirs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ drive: panDirState.drive, dirs: panDirState.picked })
+  }).then(function (d) {
+    if (!d || !d.ok) { toast((d && d.msg) || '保存失败', 'bad'); return; }
+    toast(panDirState.picked.length ? '已保存 ' + panDirState.picked.length + ' 个同步目录' : '已清空，回到整盘同步', 'ok');
+    panDirClose();
+    panDirsLoad();
+  }).catch(function (e) { toast(e.message, 'bad'); });
+}
+
+function panRunDirs(drive, dry) {
+  panSetMsg(drive, dry ? '⏳ 试运行中…（只统计，不推送）' : '⏳ 同步中…（逐条写 STRM，可能较久）', 'warn');
+  api('api/pan/dirs/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ drive: drive, dry: dry ? 1 : 0, max: 300 })
+  }).then(function (d) {
+    if (!d || !d.ok) { panSetMsg(drive, '✗ ' + panEsc((d && d.msg) || '失败'), 'bad'); return; }
+    var lines = (d.dirs || []).map(function (x) {
+      return panEsc(x.dir || x.id) + '：' + (x.found || 0) + ' 条' + (x.error ? '（' + panEsc(x.error) + '）' : '');
+    }).join('；');
+    var head = dry
+      ? '试运行：发现 ' + ((d.pushed || []).length) + ' 条可推'
+      : '成功 ' + (d.ok || 0) + ' 条 / 失败 ' + (d.failed || 0) + ' 条';
+    var bad = !dry && d.failed > 0;
+    panSetMsg(drive, (bad ? '⚠ ' : '✓ ') + head
+      + '<div style="color:var(--dim);margin-top:4px">' + lines + '</div>', bad ? 'warn' : 'ok');
+  }).catch(function (e) { panSetMsg(drive, '✗ ' + panEsc(e.message), 'bad'); });
 }
 
 // ══════════ 网盘扫码登录（各网盘实现在 hub 的 PanQr） ══════════

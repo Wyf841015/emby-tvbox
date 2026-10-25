@@ -406,7 +406,8 @@ public class Hub {
             "/api/emby/probe-as-emby", "/api/save", "/api/reload", "/api/cache/clear",
             "/api/sync/purge",
             // 网盘凭证：会写/移用户账号凭据，按破坏性接口对待（必须带令牌或网关头）
-            "/api/pan/login", "/api/pan/logout", "/api/pan/raw", "/api/pan/enable", "/api/pan/qr");
+            "/api/pan/login", "/api/pan/logout", "/api/pan/raw", "/api/pan/enable", "/api/pan/qr",
+            "/api/pan/tree", "/api/pan/dirs", "/api/pan/dirs/run");
 
     /** 本地令牌：首次启动生成，注入到页面 <meta>，用于挡住「本机别的进程」和跨站 CSRF。 */
     static String localToken() {
@@ -1126,6 +1127,74 @@ public class Hub {
                     m.put("fallback", "cookie");
                     m.put("action", action);
                     sendJson(ex, 200, m);
+                }
+                return;
+            }
+            case "/api/pan/tree": {          // 列网盘目录（id 空 = 根），给「选择同步目录」用
+                try {
+                    Map<String, Object> m = panTree(str(q.get("drive")), str(q.get("id")));
+                    sendJson(ex, 200, m);
+                } catch (Throwable t) {
+                    sendJson(ex, 200, fail("列目录失败：" + panRootMsg(t)));
+                }
+                return;
+            }
+            case "/api/pan/dirs": {          // GET=读已保存的同步目录；POST=保存
+                if ("POST".equalsIgnoreCase(ex.getRequestMethod())) {
+                    Object ob = spiderJsonOrEmpty(readBody(ex));
+                    if (!(ob instanceof Map)) { sendJson(ex, 200, fail("需要 JSON body")); return; }
+                    String drive = str(((Map<?, ?>) ob).get("drive"));
+                    PanAccounts.Drive d = PanAccounts.drive(drive);
+                    if (d == null) { sendJson(ex, 200, fail("未知网盘：" + drive)); return; }
+                    Object dirs = ((Map<?, ?>) ob).get("dirs");
+                    Map<String, Object> all = panSyncDirs();
+                    if (dirs instanceof List && !((List<?>) dirs).isEmpty()) {
+                        List<Object> clean = new ArrayList<>();
+                        for (Object o : (List<?>) dirs) {
+                            if (!(o instanceof Map)) continue;
+                            String id = str(((Map<?, ?>) o).get("id"));
+                            String name = str(((Map<?, ?>) o).get("name"));
+                            if (id.isBlank()) continue;
+                            Map<String, Object> row = new LinkedHashMap<>();
+                            row.put("id", id);
+                            row.put("name", name);
+                            clean.add(row);
+                        }
+                        all.put(d.id, clean);
+                    } else {
+                        all.remove(d.id);        // 传空数组 = 清空这个网盘的同步目录
+                    }
+                    panSyncDirsSave(all);
+                    Map<String, Object> m = ok("已保存");
+                    m.put("dirs", all.get(d.id));
+                    sendJson(ex, 200, m);
+                } else {
+                    Map<String, Object> all = panSyncDirs();
+                    Map<String, Object> m = ok("");
+                    m.put("all", all);
+                    sendJson(ex, 200, m);
+                }
+                return;
+            }
+            case "/api/pan/dirs/run": {      // 只同步已保存的目录（逐条推给插件写 STRM）
+                if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { sendJson(ex, 200, fail("需要 POST")); return; }
+                Object ob = spiderJsonOrEmpty(readBody(ex));
+                String drive = "";
+                int max = 300;
+                boolean dry = false;
+                if (ob instanceof Map) {
+                    Map<?, ?> bm = (Map<?, ?>) ob;
+                    drive = str(bm.get("drive"));
+                    String ms = str(bm.get("max"));
+                    if (!ms.isBlank()) {
+                        try { max = Math.max(1, Math.min(2000, Integer.parseInt(ms))); } catch (Exception ignore) { }
+                    }
+                    dry = "1".equals(str(bm.get("dry"))) || "true".equalsIgnoreCase(str(bm.get("dry")));
+                }
+                try {
+                    sendJson(ex, 200, panSyncRun(drive, max, dry));
+                } catch (Throwable t) {
+                    sendJson(ex, 200, fail("目录同步失败：" + panRootMsg(t)));
                 }
                 return;
             }
@@ -2958,6 +3027,256 @@ public class Hub {
         while (c.getCause() != null && c.getCause() != c) c = c.getCause();
         String msg = c.getMessage();
         return (msg == null || msg.isBlank()) ? c.getClass().getSimpleName() : msg;
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  网盘「只同步指定目录」
+    //
+    //  架构约束：整盘同步由 Emby 插件自己枚举（hub 只负责 /TvBox/Sync 转发），
+    //  所以「只同步某个目录」必须在 hub 侧自己做：自己列目录 → 自己逐条
+    //  调插件的 /TvBox/PushItem 写 STRM。这样插件代码一行都不用改。
+    //
+    //  目录/文件怎么区分：不猜字段。先看 vod_tag / type（catvod 网盘实现常用），
+    //  没有就看点进去有没有子项 —— 点得进去就是目录，点不进去就是文件。
+    // ══════════════════════════════════════════════════════════
+
+    /** 已保存的同步目录：{ driveId: [ {id, name} ] }，落在 settings.panSyncDirs。 */
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> panSyncDirs() {
+        Object v = settings.get("panSyncDirs");
+        return v instanceof Map ? new LinkedHashMap<>((Map<String, Object>) v) : new LinkedHashMap<>();
+    }
+
+    static void panSyncDirsSave(Map<String, Object> all) {
+        settings.put("panSyncDirs", all);
+        saveSettings();
+    }
+
+    /**
+     * 列一个网盘目录。tid 为空 = 根目录。
+     * 返回归一化条目 + 原始 JSON（原始的一起给，字段对不上时看得到真东西）。
+     */
+    static Map<String, Object> panTree(String driveId, String tid) throws Exception {
+        PanAccounts.Drive d = PanAccounts.drive(driveId);
+        if (d == null) throw new IllegalArgumentException("未知网盘：" + driveId);
+        if (pool.site(d.siteKey) == null) throw new IllegalStateException("当前配置里没有「" + d.siteKey + "」这个源");
+        String raw = panCall(d, tid, 1);
+        return panTreeResult(tid, raw);
+    }
+
+    /** 用 60s 超时调 spider 的 homeContent / categoryContent（网盘接口慢，别用默认 45s）。 */
+    static String panCall(PanAccounts.Drive d, String tid, int page) throws Exception {
+        boolean prev = pool.allowNetdisk;
+        pool.allowNetdisk = true;   // 网盘类源必须放行，否则 pool.get 直接抛「已排除」
+        try {
+            if (tid == null || tid.isBlank()) {
+                return call(d.siteKey, () -> pool.get(d.siteKey).homeContent(false), 60);
+            }
+            final String fTid = tid;
+            return call(d.siteKey, () -> pool.get(d.siteKey).categoryContent(fTid, String.valueOf(page), false, new HashMap<>()), 60);
+        } finally {
+            pool.allowNetdisk = prev;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> panTreeResult(String tid, String raw) {
+        Object parsed = tryParse(raw);
+        List<Map<String, Object>> items = new ArrayList<>();
+        if (parsed instanceof Map) {
+            Object l = ((Map<?, ?>) parsed).get("list");
+            if (l instanceof List) {
+                for (Object o : (List<?>) l) {
+                    if (!(o instanceof Map)) continue;
+                    Map<?, ?> it = (Map<?, ?>) o;
+                    String id = str(it.get("vod_id"));
+                    if (id.isBlank()) id = str(it.get("id"));
+                    String name = str(it.get("vod_name"));
+                    if (name.isBlank()) name = str(it.get("name"));
+                    if (id.isBlank() && name.isBlank()) continue;
+                    String kind = panKind(str(it.get("vod_tag")), str(it.get("type")));
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("id", id);
+                    row.put("name", name);
+                    row.put("kind", kind);                       // folder / file / ""（不确定）
+                    row.put("remarks", str(it.get("vod_remarks")));
+                    items.add(row);
+                }
+            }
+        }
+        Map<String, Object> m = ok("");
+        m.put("tid", tid == null ? "" : tid);
+        m.put("count", items.size());
+        m.put("items", items);
+        // 网盘 spider 经常把「没登录 / 凭证过期」写在 class[0].type_name 里
+        // （实测 115：「还未登录115账号,请前往【配置中心】登录」），
+        // 这是最有用的提示，直接提到顶层给界面显示。
+        String hint = "";
+        if (items.isEmpty() && parsed instanceof Map) {
+            Object c = ((Map<?, ?>) parsed).get("class");
+            if (c instanceof List) {
+                for (Object o : (List<?>) c) {
+                    if (o instanceof Map) {
+                        String tn = str(((Map<?, ?>) o).get("type_name"));
+                        if (!tn.isBlank()) { hint = tn; break; }
+                    }
+                }
+            }
+        }
+        m.put("hint", hint);
+        m.put("raw", raw == null ? "" : (raw.length() > 4000 ? raw.substring(0, 4000) + "…" : raw));
+        return m;
+    }
+
+    /** 尽量从 tag/type 判断目录还是文件；判断不了就留空，由「点进去试试」来定。 */
+    static String panKind(String tag, String type) {
+        if (tag.matches("(?i)folder|dir|dirs|directory")) return "folder";
+        if (tag.matches("(?i)file")) return "file";
+        if (type.matches("(?i)folder|dir")) return "folder";
+        if (type.matches("(?i)file")) return "file";
+        return "";
+    }
+
+    /** 点进去看有没有子项：有 = 目录，没有 = 文件。用于 kind 判不出来的情况。 */
+    static boolean panIsFolder(PanAccounts.Drive d, String id) {
+        try {
+            String raw = panCall(d, id, 1);
+            Object parsed = tryParse(raw);
+            if (!(parsed instanceof Map)) return false;
+            Object l = ((Map<?, ?>) parsed).get("list");
+            return l instanceof List && !((List<?>) l).isEmpty();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 从 spider 返回里挖「没登录/凭证过期」这类提示（写在 class[0].type_name）。 */
+    static String panHintFrom(Object parsed) {
+        if (!(parsed instanceof Map)) return "";
+        Object c = ((Map<?, ?>) parsed).get("class");
+        if (c instanceof List) {
+            for (Object o : (List<?>) c) {
+                if (o instanceof Map) {
+                    String tn = str(((Map<?, ?>) o).get("type_name"));
+                    if (!tn.isBlank()) return tn;
+                }
+            }
+        }
+        return "";
+    }
+
+    /**
+     * 跑一次「目录同步」：把保存的目录逐条推给 Emby 插件写 STRM。
+     * 只走已保存的目录 —— 整盘同步仍然交给插件，这里不碰。
+     */
+    static Map<String, Object> panSyncRun(String driveId, int maxItems, boolean dryRun) throws Exception {
+        PanAccounts.Drive d = PanAccounts.drive(driveId);
+        if (d == null) throw new IllegalArgumentException("未知网盘：" + driveId);
+        Object v = panSyncDirs().get(d.id);
+        if (!(v instanceof List) || ((List<?>) v).isEmpty()) {
+            throw new IllegalStateException("这个网盘还没保存同步目录");
+        }
+        String base = embyBase();
+        if (base == null && !dryRun) throw new IllegalStateException("还没连上 Emby");
+        String siteName = "";
+        SpiderPool.Site site = pool.site(d.siteKey);
+        if (site != null && site.name != null) siteName = site.name;
+
+        List<Map<String, Object>> pushed = new ArrayList<>();
+        List<Map<String, Object>> failed = new ArrayList<>();
+        List<Map<String, Object>> scanned = new ArrayList<>();
+        int okCount = 0, failCount = 0;
+
+        for (Object od : (List<?>) v) {
+            if (!(od instanceof Map)) continue;
+            Map<?, ?> dir = (Map<?, ?>) od;
+            String dirId = str(dir.get("id"));
+            String dirName = str(dir.get("name"));
+            Map<String, Object> st = new LinkedHashMap<>();
+            st.put("dir", dirName);
+            st.put("id", dirId);
+            int found = 0;
+            try {
+                // 最多翻 12 页，避免一个超大目录把整台机器拖住
+                for (int page = 1; page <= 12 && pushed.size() + failed.size() < maxItems; page++) {
+                    String raw = panCall(d, dirId, page);
+                    Object parsed = tryParse(raw);
+                    if (!(parsed instanceof Map)) break;
+                    Object l = ((Map<?, ?>) parsed).get("list");
+                    if (!(l instanceof List) || ((List<?>) l).isEmpty()) {
+                        // 一条都没列出来时，spider 通常把原因写在 class[0].type_name，
+                        // 直接带出去，否则用户只看到 found=0 不知道为什么。
+                        if (page == 1 && found == 0) {
+                            String hint = panHintFrom(parsed);
+                            if (!hint.isBlank()) st.put("error", hint);
+                        }
+                        break;
+                    }
+                    int before = found;
+                    for (Object o : (List<?>) l) {
+                        if (!(o instanceof Map)) continue;
+                        Map<?, ?> it = (Map<?, ?>) o;
+                        String id = str(it.get("vod_id"));
+                        if (id.isBlank()) id = str(it.get("id"));
+                        String name = str(it.get("vod_name"));
+                        if (name.isBlank()) name = str(it.get("name"));
+                        if (id.isBlank()) continue;
+                        String kind = panKind(str(it.get("vod_tag")), str(it.get("type")));
+                        if ("folder".equals(kind)) continue;          // 子目录下一轮再说，别无限递归
+                        if (kind.isEmpty() && panIsFolder(d, id)) continue;   // 判不出来就点一下试试
+                        found++;
+                        if (pushed.size() + failed.size() >= maxItems) break;
+                        if (dryRun) {
+                            Map<String, Object> row = new LinkedHashMap<>();
+                            row.put("id", id);
+                            row.put("name", name);
+                            pushed.add(row);
+                            continue;
+                        }
+                        try {
+                            Map<String, Object> payload = new LinkedHashMap<>();
+                            payload.put("site", d.siteKey);
+                            payload.put("id", id);
+                            payload.put("siteName", siteName);
+                            String body = embyHttpJson("POST", base + "/TvBox/PushItem?token=" + embyToken(),
+                                    SpiderPool.Json.stringify(payload), 240);
+                            Object r = SpiderPool.Json.parse(body);
+                            boolean ok1 = r instanceof Map && "true".equalsIgnoreCase(str(((Map<?, ?>) r).get("Ok")));
+                            Map<String, Object> row = new LinkedHashMap<>();
+                            row.put("id", id);
+                            row.put("name", name);
+                            if (ok1) { pushed.add(row); okCount++; }
+                            else { row.put("resp", body == null ? "" : (body.length() > 160 ? body.substring(0, 160) : body)); failed.add(row); failCount++; }
+                        } catch (Exception e) {
+                            Map<String, Object> row = new LinkedHashMap<>();
+                            row.put("id", id);
+                            row.put("name", name);
+                            row.put("err", panRootMsg(e));
+                            failed.add(row);
+                            failCount++;
+                        }
+                    }
+                    if (found == before) break;   // 这一页没有新东西，别再翻
+                }
+            } catch (Exception e) {
+                st.put("error", panRootMsg(e));
+            }
+            st.put("found", found);
+            scanned.add(st);
+        }
+
+        Map<String, Object> m = ok(dryRun ? "试运行完成（没有真的推送）" : "目录同步完成");
+        m.put("drive", d.label);
+        m.put("dryRun", dryRun);
+        m.put("dirs", scanned);
+        m.put("ok", okCount);
+        m.put("failed", failCount);
+        m.put("pushed", pushed.size() > 50 ? pushed.subList(0, 50) : pushed);
+        m.put("failedList", failed.size() > 50 ? failed.subList(0, 50) : failed);
+        m.put("truncated", pushed.size() > 50 || failed.size() > 50);
+        if (!dryRun) record("网盘目录同步", d.label, failCount == 0,
+                "成功 " + okCount + " 条，失败 " + failCount + " 条", 0);
+        return m;
     }
 
     /**
