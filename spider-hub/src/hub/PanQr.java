@@ -55,13 +55,15 @@ public final class PanQr {
 
     /** 该网盘是否支持扫码（界面据此显示「扫码登录」按钮）。 */
     public static boolean supports(String driveId) {
+        // 只保留「能拿到官方二维码」的三家：
+        //   115 → Qr115（jar 自带签名）
+        //   百度 → passport getqrcode，imgurl 补 https 就是 PNG（实测 245x245）
+        //   阿里 → generate.do 返回 codeContent 官方内容，前端本地画码
+        // 夸克：uop 只回 token，不再回 qrcode_url，猜出来的码扫不动 → 不给假按钮
+        // UC：uop.uc.cn 本机解析不了；天翼：189 要 date/signature HMAC 签名
         switch (driveId) {
-            // 实测能生成二维码的：115（Qr115）、百度（passport getqrcode）、阿里（generate.do）、
-            // 夸克（uop 返回 token，部分时段不返 qrcode_url，失败会把上游原文透出来）
-            case "115": case "quark": case "baidu": case "ali":
+            case "115": case "baidu": case "ali":
                 return true;
-            // UC：uop.uc.cn 在本机解析不了；天翼：189 的接口要 date/signature HMAC 签名。
-            // 这两家不给假按钮，直接让用户走「粘贴凭证」。
             default:
                 return false;
         }
@@ -232,7 +234,8 @@ public final class PanQr {
         s.vars.put("sign", sign);
         s.vars.put("gid", gid);
         Map<String, Object> m = baseOk(sid, null);
-        m.put("imgUrl", "https://passport.baidu.com/capi/qrcodeimage?imgurl=" + enc(imgurl));
+        // imgurl 本身就是二维码图片地址（不带 scheme）；走 capi/qrcodeimage?imgurl= 会 302 空响应
+        m.put("imgUrl", "https://" + imgurl);
         m.put("hint", "用百度网盘 App 扫码");
         return m;
     }

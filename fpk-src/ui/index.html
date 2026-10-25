@@ -3658,6 +3658,52 @@ function panRawSave(id, name) {
   }).catch(function (e) { toast(e.message, 'bad'); });
 }
 
+// ══════════ 二维码渲染（本地生成，不把登录 token 发给任何第三方） ══════════
+// 115/百度 直接给图片 URL，夸克/阿里 只给文本 → 后者在前端用 qrcode-generator 现画。
+var panQrLib = { loading: false, failed: false, queue: [] };
+
+function panQrLoad(cb) {
+  if (window.qrcode) { cb(); return; }
+  if (panQrLib.failed) { cb(); return; }
+  if (panQrLib.loading) { panQrLib.queue.push(cb); return; }
+  panQrLib.loading = true;
+  panQrLib.queue.push(cb);
+  var s = document.createElement('script');
+  s.src = 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js';
+  s.onload = function () {
+    panQrLib.loading = false;
+    var q = panQrLib.queue; panQrLib.queue = [];
+    q.forEach(function (f) { try { f(); } catch (e) { console.error(e); } });
+  };
+  s.onerror = function () {
+    panQrLib.loading = false;
+    panQrLib.failed = true;
+    var q = panQrLib.queue; panQrLib.queue = [];
+    q.forEach(function (f) { try { f(); } catch (e) { console.error(e); } });
+  };
+  document.head.appendChild(s);
+}
+
+/** 把 text 画成二维码放进容器；失败就退化成可选中的原文。 */
+function panRenderQr(box, text) {
+  if (!text) { box.textContent = ''; return; }
+  panQrLoad(function () {
+    if (typeof window.qrcode !== 'function') {
+      box.innerHTML = '<div style="font-family:var(--mono);font-size:11px;word-break:break-all;user-select:all">' + panEsc(text) + '</div>';
+      return;
+    }
+    try {
+      var qr = window.qrcode(0, 'M');
+      qr.addData(text);
+      qr.make();
+      box.innerHTML = qr.createImgTag(4, 4);
+    } catch (e) {
+      box.innerHTML = '<div style="font-size:11px;color:var(--bad-text)">二维码生成失败：' + panEsc(e.message)
+        + '</div><div style="font-family:var(--mono);font-size:11px;word-break:break-all;user-select:all">' + panEsc(text) + '</div>';
+    }
+  });
+}
+
 // ══════════ 网盘扫码登录（各网盘实现在 hub 的 PanQr） ══════════
 var panQrTimer = null;
 
@@ -3679,16 +3725,18 @@ function panQr(driveId) {
     if (old) old.remove();
     var wrap = document.createElement('div');
     wrap.className = 'pan-qr';
+    var boxId = 'pan-qr-box-' + driveId;
     var img = d.imgUrl
       ? '<img alt="登录二维码" style="width:150px;height:150px;background:#fff;border-radius:6px;padding:4px" src="' + panEsc(d.imgUrl) + '">'
-      : '<div style="width:150px;font-size:12px;color:var(--dim);text-align:center">该网盘不返图，请用下面这串内容生成二维码</div>';
+      : '<div id="' + boxId + '" style="width:150px;min-height:150px;background:#fff;border-radius:6px;padding:4px;display:flex;align-items:center;justify-content:center;font-size:11px;color:#666">生成中…</div>';
     wrap.innerHTML = img
       + '<div class="qinfo"><div id="pan-qr-state-' + panEsc(driveId) + '">等待扫码…</div>'
       + '<div style="margin-top:6px;color:var(--dim)">' + panEsc(d.hint || '') + '</div>'
-      + (d.content ? '<div style="margin-top:4px;font-family:var(--mono);font-size:11px;word-break:break-all;user-select:all">' + panEsc(d.content) + '</div>' : '')
       + '<div style="margin-top:8px"><button class="tiny" onclick="panQrStop();panQr(\'' + panEsc(driveId) + '\')">换一张</button></div></div>';
     var acts = card.querySelector('.acts');
     card.insertBefore(wrap, acts);
+    // 只给文本的网盘（阿里/夸克）在本地画二维码，token 不出这台机器
+    if (!d.imgUrl && d.content) panRenderQr(document.getElementById(boxId), d.content);
 
     var rounds = 0;
     panQrTimer = setInterval(function () {
