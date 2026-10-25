@@ -959,6 +959,8 @@ public class Hub {
                 String v = q.get("allow");
                 if (v != null) {
                     pool.allowNetdisk = "1".equals(v) || "true".equalsIgnoreCase(v);
+                    settings.put("allowNetdisk", pool.allowNetdisk ? "1" : "0");   // 落盘，重启仍生效
+                    saveSettings();
                     record("网盘源开关", pool.allowNetdisk ? "开启" : "关闭", true, "", 0);
                 }
                 Map<String, Object> m = ok("");
@@ -1079,12 +1081,16 @@ public class Hub {
                     on = v == null || "1".equals(String.valueOf(v)) || "true".equalsIgnoreCase(String.valueOf(v));
                 }
                 pool.allowNetdisk = on;
+                // 必须落盘：原来只在内存里，重启就回退成 false，界面还显示「已启用」
+                settings.put("allowNetdisk", on ? "1" : "0");
                 java.util.LinkedHashSet<String> set = syncSiteKeys();
                 java.util.List<String> added = new ArrayList<>();
                 java.util.List<String> missing = new ArrayList<>();
                 for (PanAccounts.Drive d : PanAccounts.DRIVES) {
                     if (pool.site(d.siteKey) == null) { missing.add(d.label); continue; }
-                    if (on && set.add(d.siteKey)) added.add(d.siteKey);
+                    // 启用就加进同步名单，关闭就撤掉 —— 两头对称，别留下用户没要的站点
+                    if (on) { if (set.add(d.siteKey)) added.add(d.siteKey); }
+                    else set.remove(d.siteKey);
                 }
                 settings.put("syncSites", new ArrayList<>(set));
                 saveSettings();
@@ -2823,6 +2829,9 @@ public class Hub {
             if (cur == null || cur.isBlank()) {
                 System.setProperty("tvbox.panDir", dataDir.resolve("pan").toString());
             }
+            // 恢复网盘源开关（原来只活在内存里，重启就静默回退成关）
+            String allow = str(settings.get("allowNetdisk"));
+            pool.allowNetdisk = "1".equals(allow) || "true".equalsIgnoreCase(allow);
             String key = str(settings.get("panKey"));
             if (key == null || key.length() < 64 || !key.matches("[0-9a-fA-F]+")) {
                 StringBuilder sb = new StringBuilder();
