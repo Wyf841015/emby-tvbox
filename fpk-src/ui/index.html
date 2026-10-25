@@ -3610,9 +3610,12 @@ function panSave(id) {
     if (!d || !d.ok) { panSetMsg(id, '✗ ' + panEsc(d && d.msg), 'bad'); return; }
     var v = d.verify || {};
     var ok = !!v.logged;
-    panSetMsg(id, (ok ? '✓ ' : '⚠ ') + panEsc(v.msg || '已保存') + (v.ms != null ? '（' + v.ms + 'ms）' : ''),
-      ok ? 'ok' : (v.ok ? 'warn' : 'bad'));
-    toast(ok ? '凭证已生效' : '已保存，但验证未通过', ok ? 'ok' : 'warn');
+    var head = (ok ? '✓ ' : '⚠ ') + panEsc(v.msg || '已保存') + (v.ms != null ? '（' + v.ms + 'ms）' : '');
+    // 保存前的字段校验提示（例：粘贴的不是网盘 cookie、缺 BDUSS）
+    if (d.warn) head = '<b>' + panEsc(d.warn) + '</b><br>' + head;
+    panSetMsg(id, head, ok ? 'ok' : (d.warn ? 'bad' : (v.ok ? 'warn' : 'bad')));
+    toast(d.warn ? '已保存，但字段不对' : (ok ? '凭证已生效' : '已保存，但验证未通过'),
+      ok ? 'ok' : 'warn');
     var inp = document.getElementById('pan-in-' + id); if (inp) inp.value = '';
     loadPan();
   }).catch(function (e) { panSetMsg(id, '✗ ' + panEsc(e.message), 'bad'); });

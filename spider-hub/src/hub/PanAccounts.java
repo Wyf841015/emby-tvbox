@@ -139,6 +139,41 @@ public final class PanAccounts {
     }
 
     /**
+     * 保存前的基本校验：缺了关键字段就给出提示（只警告，不拦着保存）。
+     *
+     * 为什么需要：用户很容易粘错域名的 cookie。实测有人把 www.baidu.com 的
+     * BIDUPSID/BAIDUID/PSTM 当成「百度网盘 cookie」贴进来 —— 那些跟网盘登录
+     * 完全无关，spider 只认 BDUSS。不提示的话表现就是「保存成功但一条都列不出来」，
+     * 极难自己看出问题在哪。
+     */
+    public static String warnFor(Drive d, String main) {
+        String s = main == null ? "" : main;
+        switch (d.id) {
+            case "115":
+                if (!s.contains("UID=") || !(s.contains("CID=") || s.contains("SEID=")))
+                    return "没找到 UID / CID —— 115 需要 UID、CID、SEID、KID 四个值";
+                break;
+            case "baidu":
+                if (!s.contains("BDUSS"))
+                    return "没找到 BDUSS —— 这多半是百度网页 cookie，不是网盘登录 cookie。"
+                            + "请登录 pan.baidu.com，从该域名下复制 BDUSS（顺手带上 STOKEN）";
+                break;
+            case "ali":
+                if (!s.contains("refresh_token"))
+                    return "没找到 refresh_token —— 阿里云盘要的是浏览器 localStorage 里的 refresh_token";
+                break;
+            case "xunlei":
+            case "guangya":
+                if (!s.contains("access_token") && !s.contains("refresh_token"))
+                    return "没找到 access_token —— 请粘贴 token 或完整的 token JSON";
+                break;
+            default:
+                break;
+        }
+        return "";
+    }
+
+    /**
      * 保存凭证。
      *
      * @param d    网盘

@@ -1005,9 +1005,13 @@ public class Hub {
                     Map<String, Object> v = verifyPan(d);
                     record("网盘登录", d.label, Boolean.TRUE.equals(v.get("logged")),
                             "写入 " + String.join(",", written), System.currentTimeMillis() - t0);
-                    Map<String, Object> m = ok("凭证已保存");
+                    // 粘错域名是最常见的坑（把 www.baidu.com 的 cookie 当网盘 cookie），
+                    // 保存时就提示，别等用户看到「保存成功但一条都列不出来」再猜。
+                    String warn = PanAccounts.warnFor(d, str(b.get("main")));
+                    Map<String, Object> m = ok(warn.isBlank() ? "凭证已保存" : "凭证已保存（但可能不对）");
                     m.put("drive", PanAccounts.status(d));
                     m.put("written", written);
+                    m.put("warn", warn);
                     m.put("verify", v);
                     sendJson(ex, 200, m);
                 } catch (Exception e) {
