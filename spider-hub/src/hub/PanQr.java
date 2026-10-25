@@ -54,6 +54,17 @@ public final class PanQr {
         /** 加载 Qr115 用的 ClassLoader —— 必须记住 start 时那个，
          *  轮询时用 Thread.contextClassLoader 会拿到 ClassNotFoundException。 */
         public ClassLoader loader;
+        /**
+         * 后台轮询的最新快照。
+         *
+         * 为什么要有它：百度的 unicast 是 30 秒长轮询（实测三次都是 30.2~30.3s 才返回
+         * {"errno":1}）。如果让浏览器每轮直接挂着这个请求，一旦穿过 fnOS 网关/浏览器
+         * 自己的超时边界（30s 左右），用户确认扫码那一刻的响应就正好被掐掉 ——
+         * 表现就是「扫了确认了，应用一直说等待扫码」。
+         * 改成服务端后台线程常驻轮询、把结果存快照，浏览器只读快照，秒回、不怕超时。
+         */
+        public volatile Map<String, Object> bg = null;
+        public volatile boolean stop = false;
         Session(String drive) { this.drive = drive; }
     }
 
@@ -83,7 +94,7 @@ public final class PanQr {
         s.loader = spiderLoader;
         Map<String, Object> r;
         switch (driveId) {
-            case "115":   r = start115(s, spiderLoader); break;
+            case "115":   r = start115(s); break;
             case "quark": r = startAliyunFamily(s, "quark"); break;
             case "uc":    r = startAliyunFamily(s, "uc"); break;
             case "baidu": r = startBaidu(s); break;
@@ -91,6 +102,7 @@ public final class PanQr {
             case "ali":   r = startAli(s); break;
             default: throw new IllegalArgumentException("这个网盘不支持扫码，请用「粘贴凭证」");
         }
+        for (Session old : SESSIONS.values()) old.stop = true;
         SESSIONS.clear();
         SESSIONS.put(s.vars.get("sid"), s);
         return r;
@@ -101,12 +113,24 @@ public final class PanQr {
         Session s = sid == null ? null : SESSIONS.get(sid);
         if (s == null) throw new IllegalStateException("二维码会话已失效，请重新生成");
         if (!s.drive.equals(driveId)) throw new IllegalStateException("会话与网盘不匹配");
+        // 后台已在轮询 → 直接返回最新快照（秒回）。浏览器不再碰长轮询接口，
+        // 避免 30s 边界上被网关/浏览器掐断而丢掉「已确认」那一帧。
+        Map<String, Object> snap = s.bg;
+        if (snap != null) {
+            Map<String, Object> r = new LinkedHashMap<>(snap);
+            r.put("sid", sid);
+            if (Boolean.TRUE.equals(r.get("logged")) || Integer.valueOf(EXPIRED).equals(r.get("status"))) {
+                SESSIONS.remove(sid);
+                s.stop = true;
+            }
+            return r;
+        }
         Map<String, Object> r;
         switch (driveId) {
-            case "115":   r = poll115(s); break;
+            case "115":   r = poll115Once(s); break;
             case "quark":
             case "uc":    r = pollAliyunFamily(s); break;
-            case "baidu": r = pollBaidu(s); break;
+            case "baidu": r = pollBaiduOnce(s); break;
             case "tianyi":r = pollTianyi(s); break;
             case "ali":   r = pollAli(s); break;
             default: throw new IllegalArgumentException("不支持");
@@ -119,50 +143,121 @@ public final class PanQr {
     }
 
     // ══════════════════════════════════════════════════════════
-    //  115 —— 用 jar 里的 Qr115（自带签名，别自己拼）
+    //  115 —— 直连 HTTP（不再用 jar 里的 Qr115）
+    //
+    //  为什么不用 jar 的类：Qr115.status() 内部 HTTP 客户端超时约 30s，
+    //  而 115 的 /get/status/ **本身就是 30s 长轮询** —— 每次都擦边超时，
+    //  于是永远返回 -99(ERROR)。实测直连、超时放到 45s 就正常：
+    //    {"state":1,"code":0,"message":"","data":{}}   ← 空 data = 还没人扫，不是错误
+    //
+    //  接口照抄 jar 字节码：
+    //    token  GET qrcodeapi.115.com/api/1.0/qandroid/1.0/token/
+    //    status GET qrcodeapi.115.com/get/status/?uid=&time=&sign=&_=0
+    //    login  GET passportapi.115.com/app/1.0/qandroid/1.0/login/qrcode/?account=<uid>&app=qandroid
+    //           → data.cookie = {UID, CID, SEID, KID}
     // ══════════════════════════════════════════════════════════
-    private static Class<?> qr115(ClassLoader ld) throws Exception {
-        if (ld == null) throw new IllegalStateException("spider 还没加载（先去「配置」填一个点播源）");
-        return Class.forName("com.github.catvod.spider.Qr115", true, ld);
-    }
+    private static final String UA_115DISK = "Mozilla/5.0 115disk/30.1.0";
 
-    private static Map<String, Object> start115(Session s, ClassLoader ld) throws Exception {
-        Class<?> qr = qr115(ld);
-        Object token = qr.getMethod("token").invoke(null);
-        if (token == null) throw new IllegalStateException("115 没有返回二维码（接口风控或网络不通）");
-        Class<?> tc = token.getClass();
-        String uid = (String) tc.getField("uid").get(token);
-        String content = (String) tc.getField("qrcode").get(token);
-        s.vars.put("sid", uid);
-        s.vars.put("token", "1");            // 占位，真正的 token 对象另存
-        SESSIONS.put(uid, s);
-        s.tokens.put(uid, token);
-        Map<String, Object> m = baseOk(uid, content);
-        m.put("imgUrl", "https://qrcodeapi.115.com/api/1.0/web/1.0/qrcode?uid=" + uid);
+    private static Map<String, Object> start115(Session s) throws Exception {
+        String raw = getUa("https://qrcodeapi.115.com/api/1.0/qandroid/1.0/token/?_=0", null, UA_115DISK);
+        Map<String, Object> j = jsonObj(raw);
+        Map<?, ?> data = asMap(j.get("data"));
+        String uid = str(data.get("uid"));
+        if (uid.isEmpty()) throw new IllegalStateException("115 没返回二维码：" + cut(raw));
+        String sid = UUID.randomUUID().toString();
+        s.vars.put("sid", sid);
+        s.vars.put("uid", uid);
+        s.vars.put("time", str(data.get("time")));
+        s.vars.put("sign", str(data.get("sign")));
+        Map<String, Object> m = baseOk(sid, str(data.get("qrcode")));
+        m.put("imgUrl", "https://qrcodeapi.115.com/api/1.0/web/1.0/qrcode?uid=" + enc(uid));
         m.put("hint", "用 115 App 扫码");
+        startBg(s, "115", () -> poll115Once(s));
         return m;
     }
 
-    private static Map<String, Object> poll115(Session s) throws Exception {
-        Class<?> qr = qr115(s.loader);
-        Object token = s.tokens.get(s.vars.get("sid"));
-        if (token == null) throw new IllegalStateException("二维码会话已失效");
-        Class<?> tc = token.getClass();
-        // status() 走的是 115 的长轮询接口，被网络拦掉时会一直挂着 —— 加个硬超时，
-        // 否则界面看起来就是「扫了没反应」。
-        Object stObj = callWithTimeout(() -> qr.getMethod("status", tc).invoke(null, token), 40000);
-        int st = stObj instanceof Integer ? (Integer) stObj : ERROR;
-        // 常量：WAIT=0 SCANNED=1 DONE=2 EXPIRED=-1 ERROR=-99（与我们的语义一致）
-        if (st == DONE) {
-            qr.getMethod("login", tc).invoke(null, token);   // 自己把 cookie 写进 <panDir>/lzxw/115.txt
-            PanAccounts.updateVault(PanAccounts.drive("115"));
-            Map<String, Object> m = baseState(st, "登录成功，凭证已保存");
+    private static Map<String, Object> poll115Once(Session s) throws Exception {
+        String url = "https://qrcodeapi.115.com/get/status/?uid=" + enc(s.vars.get("uid"))
+                + "&time=" + enc(s.vars.get("time")) + "&sign=" + enc(s.vars.get("sign")) + "&_=0";
+        String raw = getUa(url, "https://115.com", UA_115DISK);
+        Map<String, Object> j = jsonObj(raw);
+        if (j.isEmpty()) return baseState(WAIT, "等待扫码…（上游返回空）");
+        String state = str(j.get("state"));
+        if (!("1".equals(state) || "true".equalsIgnoreCase(state))) {
+            return baseState(EXPIRED, "115 说这个码失效了（" + str(j.get("message")) + "）");
+        }
+        Map<?, ?> data = asMap(j.get("data"));
+        int st = (int) num(data.get("status"));      // 0 等扫 / 1 已扫 / 2 已确认
+        if (st == 2) {
+            String cookie = login115(s);
+            if (cookie.isEmpty()) {
+                Map<String, Object> m = baseState(SCANNED, "手机上已确认，但换 cookie 失败 —— 请改用「粘贴 cookie」");
+                m.put("raw", cut(raw));
+                return m;
+            }
+            PanAccounts.save(PanAccounts.drive("115"), cookie, null);
+            Map<String, Object> m = baseState(DONE, "登录成功，凭证已保存");
             m.put("logged", true);
             return m;
         }
-        return baseState(st, st == SCANNED ? "已扫码，请在手机上确认" : st == WAIT ? "等待扫码…"
-                : st == EXPIRED ? "二维码已过期"
-                : "115 的状态接口无响应（本机网络把它掐了）—— 扫码登录在这台机器走不通，请改用「粘贴 cookie」");
+        if (st == 1) return baseState(SCANNED, "已扫码，请在手机上确认");
+        return baseState(WAIT, "等待扫码…");
+    }
+
+    /** 确认后用 uid 换 cookie：data.cookie = {UID, CID, SEID, KID}。 */
+    private static String login115(Session s) throws Exception {
+        String url = "https://passportapi.115.com/app/1.0/qandroid/1.0/login/qrcode/?account="
+                + enc(s.vars.get("uid")) + "&app=qandroid";
+        String raw = getUa(url, "https://115.com", UA_115DISK);
+        Map<String, Object> j = jsonObj(raw);
+        Map<?, ?> ck = asMap(asMap(j.get("data")).get("cookie"));
+        String uid = str(first(ck, "UID", "uid"));
+        String cid = str(first(ck, "CID", "cid"));
+        String seid = str(first(ck, "SEID", "seid"));
+        String kid = str(first(ck, "KID", "kid"));
+        System.out.println("[qr] 115 换 cookie → uid=" + (uid.isEmpty() ? "无" : "有")
+                + " cid=" + (cid.isEmpty() ? "无" : "有") + " seid=" + (seid.isEmpty() ? "无" : "有")
+                + " kid=" + (kid.isEmpty() ? "无" : "有") + " 原文=" + cut(raw));
+        if (uid.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder("UID=" + uid);
+        if (!cid.isEmpty()) sb.append("; CID=").append(cid);
+        if (!seid.isEmpty()) sb.append("; SEID=").append(seid);
+        if (!kid.isEmpty()) sb.append("; KID=").append(kid);
+        return sb.toString();
+    }
+
+    /**
+     * 通用的「服务端后台轮询」。
+     *
+     * 长轮询接口（115 的 get/status、百度的 channel/unicast）一律挂在后台线程里，
+     * 结果写进 session 快照；浏览器只读快照，毫秒级返回。
+     * 这样既不会被 fnOS 网关/浏览器的 30s 超时边界掐掉真正的那一帧，
+     * 也不会把 HTTP 处理线程占住。
+     */
+    private static void startBg(Session s, String tag, java.util.concurrent.Callable<Map<String, Object>> once) {
+        s.bg = baseState(WAIT, "等待扫码…");
+        Thread t = new Thread(() -> {
+            int rounds = 0;
+            while (!s.stop && rounds < 480) {
+                rounds++;
+                try {
+                    Map<String, Object> r = once.call();
+                    s.bg = r;
+                    System.out.println("[qr] " + tag + " 第 " + rounds + " 轮 → status=" + r.get("status")
+                            + " " + r.get("msg"));
+                    if (Boolean.TRUE.equals(r.get("logged"))
+                            || Integer.valueOf(EXPIRED).equals(r.get("status"))
+                            || Integer.valueOf(ERROR).equals(r.get("status"))) break;
+                } catch (Exception e) {
+                    System.out.println("[qr] " + tag + " 轮询异常: " + cut(e.getMessage()));
+                    s.bg = baseState(WAIT, "轮询出错，重试中：" + cut(e.getMessage()));
+                    try { Thread.sleep(3000); } catch (InterruptedException ie) { return; }
+                }
+            }
+            System.out.println("[qr] " + tag + " 后台轮询结束（" + rounds + " 轮）");
+        }, "pan-qr-" + tag);
+        t.setDaemon(true);
+        t.start();
     }
 
     // ══════════════════════════════════════════════════════════
@@ -247,36 +342,114 @@ public final class PanQr {
         // imgurl 本身就是二维码图片地址（不带 scheme）；走 capi/qrcodeimage?imgurl= 会 302 空响应
         m.put("imgUrl", "https://" + imgurl);
         m.put("hint", "用百度网盘 App 扫码");
+
+        // 起后台轮询：unicast 每次要挂 30s，绝不能交给浏览器直连
+        startBg(s, "baidu", () -> pollBaiduOnce(s));
         return m;
     }
 
-    private static Map<String, Object> pollBaidu(Session s) throws Exception {
+
+    /**
+     * 从百度 unicast 的 v 里抠 BDUSS。
+     *
+     * v 的形态各版本不统一：可能是 base64 的 JSON（{"bduss":"xxx"}）、
+     * base64 的 query（bduss=xxx&stoken=yyy），也可能就是明文。
+     * 所以不猜格式 —— 原样找一遍，解不出来就 base64/base64url 各解一层再找。
+     */
+    private static String findBduss(String v) { return findToken(v, "bduss"); }
+
+    private static String findStoken(String v) { return findToken(v, "stoken"); }
+
+    private static String findToken(String v, String key) {
+        if (v == null || v.isBlank()) return "";
+        String cand = v;
+        for (int i = 0; i < 3; i++) {
+            String hit = matchToken(cand, key);
+            if (!hit.isEmpty()) return hit;
+            String next = null;
+            try {
+                next = new String(Base64.getDecoder().decode(cand), StandardCharsets.UTF_8);
+            } catch (Exception e1) {
+                try {
+                    next = new String(Base64.getUrlDecoder().decode(cand), StandardCharsets.UTF_8);
+                } catch (Exception e2) {
+                    return "";
+                }
+            }
+            if (next.equals(cand)) return "";
+            cand = next;
+        }
+        return matchToken(cand, key);
+    }
+
+    /** 同时兼容 {"bduss":"x"} / bduss=x / BDUSS=x; 三种写法。 */
+    private static String matchToken(String s, String key) {
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("(?i)\\b" + key + "\\b\"?\\s*[=:]\\s*\"?([^\"'&;,}\\s]+)")
+                .matcher(s);
+        return m.find() ? m.group(1) : "";
+    }
+
+    private static Map<String, Object> pollBaiduOnce(Session s) throws Exception {
         String sign = s.vars.get("sign"), gid = s.vars.get("gid");
         String url = "https://passport.baidu.com/channel/unicast?channel_id=" + enc(sign)
                 + "&tpl=netdisk&gid=" + enc(gid) + "&apiver=v3&tt=" + System.currentTimeMillis();
         String raw = get(url, "https://pan.baidu.com");
-        Map<String, Object> j = jsonObj(raw);
+                return parseBaiduUnicast(raw);
+    }
+
+    /**
+     * 解析百度 unicast 的返回。抽成 public 是为了能单独跑测试 ——
+     * 这里的结构是整件事最容易错的地方（载荷藏在 channel_v 里的 JSON 字符串中）。
+     */
+    public static Map<String, Object> parseBaiduUnicast(String raw) throws Exception {
+Map<String, Object> j = jsonObj(raw);
         int errno = (int) num(j.get("errno"));
-        String v = str(j.get("v"));
+
+        // ── 关键：载荷不在顶层 v 里 ──────────────────────────────────
+        // 实测百度确认真实返回（扫码成功后）：
+        //   {"errno":0,"channel_id":"ef2dc9de...",
+        //    "channel_v":"{\"status\":0,\"v\":\"bebcca622bdadd...\"}"}
+        // 也就是说：channel_v 是一个「JSON 字符串」，里头再套一层，
+        // 真正的 base64 载荷是内层的 v。原来只读顶层 v，所以永远拿不到，
+        // 表现就是「扫了、确认了，应用一直说等待扫码」。
+        String payload = str(j.get("channel_v"));
+        if (payload.isBlank()) payload = str(j.get("v"));      // 兼容返回顶层 v 的版本
+        int inner = -1;
+        String v = payload;
+        Map<String, Object> pj = jsonObj(payload);
+        if (!pj.isEmpty()) {
+            inner = (int) num(pj.get("status"));
+            Object iv = pj.get("v");
+            v = iv == null ? "" : str(iv);
+        }
         // 百度 unicast 是长轮询：没扫到时 30s 后返回 {"errno":1}（这是正常，不是错误）；
         // 扫到了才带 v，v 是 base64 的 {"bduss":"..."}。
         if (!v.isEmpty()) {
-            String bduss = "";
-            try {
-                String decoded = new String(Base64.getDecoder().decode(v), StandardCharsets.UTF_8);
-                bduss = str(jsonObj(decoded).get("bduss"));
-            } catch (Exception ignore) {
-                // 解不出来就往下走，交给下面报原文
-            }
+            String bduss = findBduss(v);
+            String stoken = findStoken(v);
+            System.out.println("[qr] baidu 收到回调 v=" + v.length() + "B → bduss="
+                    + (bduss.isEmpty() ? "解不出" : bduss.length() + "字符")
+                    + " stoken=" + (stoken.isEmpty() ? "无" : "有"));
             if (!bduss.isEmpty()) {
-                PanAccounts.save(PanAccounts.drive("baidu"), "BDUSS=" + bduss, null);
+                String cookie = "BDUSS=" + bduss + (stoken.isEmpty() ? "" : "; STOKEN=" + stoken);
+                PanAccounts.save(PanAccounts.drive("baidu"), cookie, null);
                 Map<String, Object> m = baseState(DONE, "登录成功，凭证已保存");
                 m.put("logged", true);
                 return m;
             }
-            return baseState(WAIT, "拿到回调但解不出 BDUSS：" + cut(v));
+            // 有载荷但没 BDUSS：多半是「已扫码、手机还没点确认」
+            Map<String, Object> m = baseState(SCANNED, inner >= 0
+                    ? "已扫码，请在手机上点「确认登录」（status=" + inner + "）"
+                    : "已扫码，请在手机上点「确认登录」");
+            m.put("raw", cut(payload));          // 此时还没有凭证，带出原文便于诊断
+            return m;
         }
-        return baseState(WAIT, "等待扫码…");
+        // errno=1 = 还没人扫（长轮询到点自然返回，属正常）；!=1 就把原文带出来
+        Map<String, Object> m = baseState(WAIT, errno == 1 ? "等待扫码…"
+                : "上游返回 errno=" + errno + (inner >= 0 ? " status=" + inner : ""));
+        m.put("raw", cut(raw));
+        return m;
     }
 
     // ══════════════════════════════════════════════════════════
@@ -345,9 +518,13 @@ public final class PanQr {
         String url = "https://passport.aliyundrive.com/newlogin/qrcode/query.do"
                 + "?appName=aliyun_drive&fromSite=52&appEntrance=web&isMobile=false&lang=zh_CN"
                 + "&returnUrl=&bizParams=&_bx-v=2.5.3&navlanguage=zh-CN&navPlatform=MacIntel"
-                + "&ck=" + enc(s.vars.get("ck")) + "&t=" + enc(s.vars.get("t"))
-                + "&_directive=refresh&tt=" + System.currentTimeMillis();
-        String raw = get(url, "https://www.aliyundrive.com");
+                + "&tt=" + System.currentTimeMillis();
+        // 关键：ck/t 必须放 POST body。
+        // 放 query string 会一律返回 qrCodeStatus=EXPIRED（GET 实测 3/3 全 EXPIRED），
+        // 换成 POST form body 立刻变成 {"qrCodeStatus":"NEW","status":0,"success":true}。
+        String raw = postForm(url,
+                "ck=" + enc(s.vars.get("ck")) + "&t=" + enc(s.vars.get("t")) + "&_directive=refresh",
+                "https://www.aliyundrive.com");
         Map<String, Object> j = jsonObj(raw);
         Map<?, ?> content = asMap(j.get("content"));
         Map<?, ?> data = asMap(content.get("data"));
@@ -419,6 +596,18 @@ public final class PanQr {
                 // 超时设短了会一律报「request timed out」，看着像登录没反应。
                 .timeout(Duration.ofSeconds(45))
                 .header("User-Agent", UA)
+                .header("Accept", "application/json, text/plain, */*")
+                .GET();
+        if (referer != null) b.header("Referer", referer);
+        HttpResponse<String> r = HTTP.send(b.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        return r.body() == null ? "" : r.body();
+    }
+
+    /** 指定 UA 的 GET（115 的 qandroid 接口认 115disk UA）。 */
+    private static String getUa(String url, String referer, String ua) throws Exception {
+        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url))
+                .timeout(Duration.ofSeconds(45))
+                .header("User-Agent", ua == null ? UA : ua)
                 .header("Accept", "application/json, text/plain, */*")
                 .GET();
         if (referer != null) b.header("Referer", referer);

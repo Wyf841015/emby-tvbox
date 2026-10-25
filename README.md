@@ -204,9 +204,9 @@ http://<你的Emby>/TvBox/Stream?...   →  插件补 Referer / User-Agent  → 
 
 | 网盘 | 扫码登录 | 粘贴凭证 | 凭证文件 |
 |---|---|---|---|
-| 115 | ✅ | ✅ | `115.txt` |
+| 115 | ✅ 直连 HTTP | ✅ | `115.txt` |
 | 百度 | ✅ | ✅ | `baidu.txt` |
-| 阿里云盘 | ✅ | ✅ | `aliyun`（无扩展名，JSON） |
+| 阿里云盘 | ✅ 本地画码 | ✅ | `aliyun`（无扩展名，JSON） |
 | 夸克 | — | ✅ | `quark_cookie.txt` |
 | UC | — | ✅ | `uc_cookie.txt` + `uc_token.txt` + `uc_machine_code.txt` |
 | 天翼 | — | ✅ | `cloud189.txt` |
@@ -216,22 +216,36 @@ http://<你的Emby>/TvBox/Stream?...   →  插件补 Referer / User-Agent  → 
 
 ### 扫码登录的真实情况（别踩坑）
 
-三家都能生成**官方**二维码，但「扫完能不能落地」取决于各家接口在这台机器上通不通：
+三家都能生成**官方**二维码，而且都能落地。踩过的坑和修法都记在这里：
 
-- **115**：二维码来自 jar 自带的 `Qr115`。但 `get/status/` 带上 `time` 参数后会被
-  风控黑洞（只带 `sign` 返 200，加 `time` 就 20s 无响应），所以扫完状态查不到 ——
-  **115 建议直接用粘贴 cookie**。
-- **百度**：`getqrcode` 的 `imgurl` 补 `https://` 就是 245×245 PNG；轮询 `unicast`
-  是长轮询，没扫到时 30s 后返回 `{"errno":1}`（这是正常）。扫到后 `v` 里是 base64 的
-  `bduss`。**这条路是完整的**。
-- **阿里云盘**：`generate.do` 只返回 `codeContent`（官方内容），上游不给图片，
-  所以二维码由前端 `qrcode-generator` **本地生成**（token 不出这台机器）。
-  但 `query.do` 立刻回 `EXPIRED`（上游要求浏览器会话），**扫码落地走不通，请粘贴
-  `refresh_token`**。
+- **115**：不用 jar 里的 `Qr115` 了 —— 它内部 HTTP 超时约 30s，而
+  `qrcodeapi.115.com/get/status/` **本身就是 30s 长轮询**，每次都擦边超时，
+  永远返回 `-99`。现在直连三个接口（照抄 jar 字节码）：
+  `qandroid/1.0/token/` → `get/status/?uid=&time=&sign=` →
+  `login/qrcode/?account=<uid>&app=qandroid`（换 `data.cookie` 的 UID/CID/SEID/KID）。
+  超时放到 45s，并且挂在后台线程里轮询。
+- **百度**：`getqrcode` 的 `imgurl` 补 `https://` 就是 245×245 PNG。
+  轮询 `channel/unicast` 是 30s 长轮询，没扫到时返回 `{"errno":1}`。
+  **确认后载荷藏在 `channel_v` 里，还套了一层 JSON 字符串**：
+  `{"errno":0,"channel_v":"{\"status\":0,\"v\":\"<base64>\"}"}` ——
+  只读顶层 `v` 永远拿不到，这是「扫了确认了却一直等待扫码」的真因。
+- **阿里云盘**：`generate.do` 只给 `codeContent`，图片由前端 `qrcode-generator`
+  本地画（token 不出这台机器）。轮询 `query.do` **必须把 `ck`/`t` 放 POST body**，
+  放 query string 会一律返回 `qrCodeExpired`（GET 实测 3/3 全 EXPIRED）。
 
-夸克 / UC / 天翼不给扫码按钮是故意的：夸克 uop 现在只回 token 不回 `qrcode_url`，
-UC 的 `uop.uc.cn` 在本机解析不了，天翼 189 要 `date`+HMAC 签名 —— 与其给一个扫不动的码，
-不如让人直接走粘贴。
+> **长轮询一律挂后台**：115 的 `get/status`、百度的 `channel/unicast` 都是 30 秒才回。
+> 如果让浏览器直接挂着这个请求，穿过 fnOS 网关时很容易在 30s 边界被掐掉，
+> 正好丢掉「已确认」那一帧。所以这两家改成服务端后台线程常驻轮询、结果存快照，
+> 浏览器只读快照（实测 20ms 返回）。
+
+夸克 / UC / 天翼仍然只有粘贴，不给扫码按钮 —— 这不是偷懒：
+
+- **夸克**：`getTokenForQrcodeLogin` 只回 token，没有任何接口给二维码图；
+  `su.quark.cn/4_eMHBJ?token=` 会 302 到 `b.quark.cn` 的落地页，不是码。
+- **UC**：`uop.uc.cn` 在本机解析不了。
+- **天翼**：189 要 `date`+HMAC 签名。
+
+与其给一个扫不动的码，不如让人直接粘贴。
 
 ### 凭证怎么存
 

@@ -86,6 +86,14 @@ while true; do
         log "正常退出，supervisor 结束"
         exit 0
     fi
+    # 130=SIGINT 143=SIGTERM：这是「有人让它停」，不是崩溃。
+    # 热更新（覆盖 jar 后 kill 一次）走的就是这条路，以前算成异常退出，
+    # 累计 8 次后 supervisor 直接放弃自动重启 —— 应用就静默停了。
+    if [ "$code" -eq 130 ] || [ "$code" -eq 143 ]; then
+        log "收到停止信号（exit=$code），立即重启且不计失败"
+        [ -S "$SOCK" ] && rm -f "$SOCK"
+        continue
+    fi
     # 崩溃后重启前把残留 socket 清掉，否则新进程 bind 会失败
     [ -S "$SOCK" ] && rm -f "$SOCK"
     # 指数退避 + 连续失败上限：以前固定 5 秒无限重启，包损坏时会把 info.log 刷满并白烧 CPU

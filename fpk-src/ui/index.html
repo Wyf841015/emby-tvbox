@@ -3945,7 +3945,8 @@ function panQr(driveId) {
     function panQrTick() {
       if (stopped || !panQrTimer) return;
       rounds++;
-      if (rounds > 90) { panQrStop(); panSetMsg(driveId, '⚠ 二维码等待超时，请重新生成', 'warn'); return; }
+      // 服务端已改成后台轮询、这里只读快照（毫秒级），所以可以放心多等一会儿
+      if (rounds > 400) { panQrStop(); panSetMsg(driveId, '⚠ 二维码等待超时，请重新生成', 'warn'); return; }
       api('api/pan/qr?action=poll&drive=' + encodeURIComponent(driveId) + '&sid=' + encodeURIComponent(d.sid))
         .then(function (r) {
           if (stopped || !panQrTimer) return;
