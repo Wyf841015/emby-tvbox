@@ -589,7 +589,9 @@
       <div class="tab active" data-pane="overview" onclick="switchTab('overview',this)"><span class="ico">📊</span><span class="lb">概览</span></div>
       <div class="tab" data-pane="guide" onclick="switchTab('guide',this)"><span class="ico">📖</span><span class="lb">使用说明</span></div>
       <div class="tab" data-pane="sites" onclick="switchTab('sites',this)"><span class="ico">🌐</span><span class="lb">站点</span><span class="n" id="tabSiteCount">0</span></div>
+      <!-- 我的网盘：功能暂停开发，菜单项先隐藏（不移除 DOM，恢复时取消注释即可）
       <div class="tab" data-pane="pan" onclick="switchTab('pan',this)"><span class="ico">🗂️</span><span class="lb">我的网盘</span><span class="n" id="tabPanCount" style="display:none">0</span></div>
+      -->
       <div class="tab" data-pane="search" onclick="switchTab('search',this)"><span class="ico">🔍</span><span class="lb">搜索</span></div>
       <div class="tab" data-pane="sync" onclick="switchTab('sync',this)"><span class="ico">🔄</span><span class="lb">同步</span><span class="n" id="tabSyncDot" style="display:none">●</span></div>
       <div class="tab" data-pane="config" onclick="switchTab('config',this)"><span class="ico">⚙️</span><span class="lb">配置</span></div>
@@ -2146,6 +2148,9 @@ function switchTab(name, el) {
   if (pane) pane.classList.add('active');
   if (name === 'guide') guideCheck();
   if (name === 'logs') loadLogs();
+  // 网盘功能暂停：菜单已隐藏，但 localStorage 里可能还留着 tvboxhub.tab='pan'，
+  // 老的深链也可能带过来 —— 这里兜底改道概览，避免落到一个看不见的面板。
+  if (name === 'pan') name = 'overview';
   if (name === 'pan') loadPan();
   if (name === 'overview') loadRecent();
   if (name === 'emby' && !document.getElementById('embyList').dataset.loaded) detectEmby();
@@ -4019,6 +4024,7 @@ setInterval(status, 15000);
 // 恢复上次所在 tab（默认概览）
 try {
   var last = localStorage.getItem('tvboxhub.tab');
+  if (last === 'pan') last = 'overview';   // 网盘暂停，旧记录作废
   if (last && document.getElementById('pane-' + last)) goto(last);
 } catch (e) {}
 
