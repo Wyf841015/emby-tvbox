@@ -225,15 +225,6 @@ public class Hub {
             System.out.println("spider classpath 加载失败: " + e);
         }
 
-        String cfgUrl = str(settings.get("configUrl"));
-        if (cfgUrl != null && !cfgUrl.isEmpty()) {
-            try {
-                reload(cfgUrl);
-            } catch (Exception e) {
-                System.out.println("启动时加载配置失败: " + e.getMessage());
-            }
-        }
-
         // TCP 绑定失败绝不能弄死进程：fnOS 的正门是 Unix socket，
         // 端口被占（比如残留实例）时如果直接抛异常退出，socket 也不会建，
         // 网关就会报 502 Bad Gateway。这里顺延端口，实在不行也继续跑。
@@ -310,6 +301,60 @@ public class Hub {
             } catch (Exception e) {
                 System.out.println("Unix socket 监听失败: " + e.getMessage());
             }
+        }
+
+        // ── 配置加载放在 socket 建好之后 ──
+        // fnOS 启动器只在 15 秒内等 <app>.sock 出现，等不到就把应用判成启动失败
+        //（进程其实还在跑，只是「已失败」状态）。而多仓配置要并发拉十几个子仓，
+        // 叠加加壳站判定后实测能超过 15 秒 —— 以前顺序是「先拉配置再建 socket」，
+        // 一慢就直接栽在这上面。先把服务挂起来，再慢慢装站点。
+        final String cfgUrl = str(settings.get("configUrl"));
+        if (cfgUrl != null && !cfgUrl.isEmpty()) {
+            // 后台加载 + 失败重试：多仓要并发拉十几个子仓，每个子仓走 4~6 个镜像，
+            // 上游一抖就能耗掉几分钟。放主线程会把「启动完成」也一起拖住，
+            // 期间 /api/sites 一直是空列表，看着像应用坏了。
+            // 进程已经能服务了，站点慢点填进来没关系。
+            Thread cfgLoader = new Thread(() -> {
+                for (int attempt = 1; attempt <= 8; attempt++) {
+                    try {
+                        long t0 = System.currentTimeMillis();
+                        int n = reload(cfgUrl);
+                        System.out.println("配置加载完成：用时 " + (System.currentTimeMillis() - t0) + " ms");
+                        if (n > 0) {
+                            int best = bestLoadedCount;
+                            // 多仓里只要有几个子仓抽风，站点数就会断崖式下跌
+                            // （实测 190 → 33）。这时保留上次的完整结果，
+                            // 否则用户一重启就少一大半站点。
+                            if (best >= 50 && n < best * 0.6 && bestLoadedBody != null) {
+                                // 真的用上次那份把站点装回来，不能只在日志里说一句
+                                try {
+                                    pool.loadFromConfig(bestLoadedBody, cfgUrl);
+                                    System.out.println("本次只拿到 " + n + " 站（源站大面积失败），"
+                                            + "已回退到上次的 " + pool.size() + " 站；60 秒后再试");
+                                } catch (Exception re) {
+                                    System.out.println("回退失败: " + brief(re));
+                                }
+                            } else {
+                                bestLoadedCount = n;
+                                bestLoadedBody = lastLoadedBody;
+                                return;
+                            }
+                        } else {
+                            System.out.println("配置加载回来 0 个站点（第 " + attempt + " 次），稍后重试");
+                        }
+                    } catch (Exception e) {
+                        System.out.println("配置加载第 " + attempt + " 次失败: " + brief(e));
+                    }
+                    try {
+                        Thread.sleep(60_000L);
+                    } catch (InterruptedException ie) {
+                        return;
+                    }
+                }
+                System.out.println("配置加载连续 8 次失败，放弃自动重试（可用「重新加载」按钮手动再试）");
+            }, "config-loader");
+            cfgLoader.setDaemon(true);
+            cfgLoader.start();
         }
 
         System.out.println("spider-hub 已启动");
@@ -2632,10 +2677,38 @@ public class Hub {
         }
     }
 
+    /** 本次成功加载用的（已展开多仓的）配置正文，供「部分失败时回退」使用。 */
+    static volatile String lastLoadedBody = null;
+    /** 本进程内见过的最大站点数，用来识别「本次只拉到一部分」。 */
+    static volatile int bestLoadedCount = 0;
+    /** 取得最大站点数那次的配置正文（部分失败时用它把站点装回来）。 */
+    static volatile String bestLoadedBody = null;
+
+    /** 上次成功拉到的配置（网络抖动兜底，避免重启后站点变 0）。 */
+    static Path configCacheFile() {
+        return dataDir == null ? null : dataDir.resolve("config-cache.json");
+    }
+
     static int reload(String url) throws Exception {
         String body;
+        boolean fromCache = false;
         if (url.startsWith("http://") || url.startsWith("https://")) {
-            body = fetch(url);
+            try {
+                body = fetch(url);
+            } catch (Exception fe) {
+                // 上游是 raw.githubusercontent + 各种 gh 镜像，实测经常整体不可用
+                //（超时 / 403 / 域名失效）。以前这里一失败，重启后站点直接变 0 个，
+                // 界面看着像应用坏了。现在退上次成功拉到的正文。
+                Path cf = configCacheFile();
+                if (cf != null && Files.isRegularFile(cf)) {
+                    body = Files.readString(cf, StandardCharsets.UTF_8);
+                    fromCache = true;
+                    System.out.println("配置拉取失败（" + brief(fe) + "），已退回本地缓存 " + cf
+                            + "（上次成功于 " + new java.util.Date(Files.getLastModifiedTime(cf).toMillis()) + "）");
+                } else {
+                    throw fe;
+                }
+            }
         } else {
             // 本地文件只允许读 PKGVAR/data 下的内容。本进程是 root，
             // 原来这里裸 Path.of(url) 等于一个任意文件读取原语（/etc/shadow 都能读）。
@@ -2656,7 +2729,21 @@ public class Hub {
         // 多仓：{urls:[...]} → 全部子仓展开合并（和 Emby 插件侧行为一致）
         body = expandMultiRepo(body);
         pool.loadFromConfig(body, url);
-        System.out.println("已加载 " + pool.size() + " 个 spider 站点");
+        int loadedNow = pool.size();
+        lastLoadedBody = body;
+        // 只在不比历史最好成绩更差时才写缓存 —— 否则源站大面积失败时会把
+        // 一份残缺配置（实测 190 站 → 33 站）覆盖掉可用缓存。
+        if (!fromCache && dataDir != null && loadedNow >= bestLoadedCount) {
+            try {
+                Path cf = configCacheFile();
+                Path tmp = dataDir.resolve("config-cache.json.tmp");
+                Files.write(tmp, body.getBytes(StandardCharsets.UTF_8));
+                Files.move(tmp, cf, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } catch (Exception ce) {
+                System.out.println("配置缓存写入失败（不影响本次加载）: " + ce);
+            }
+        }
+        System.out.println("已加载 " + pool.size() + " 个 spider 站点" + (fromCache ? "（来自本地缓存）" : ""));
         int fastOk = pool.judgeClassesFast();
         System.out.println("类预判：全局 classpath 直接命中 " + fastOk + " 站"
                 + "，其余 " + (pool.size() - fastOk) + " 站等探测时带站点自带 jar 再判"
