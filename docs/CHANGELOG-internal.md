@@ -1,5 +1,73 @@
 # emby-tvbox
 
+## 站点探测 100% 失败的根因（2026-10-29 实测）
+
+**现象**：站点页「批量探测当前」100 个站点全部失败，`lastError` 一律是
+`ClassNotFoundException: com.github.catvod.spider.XxxGuard`。
+
+### 根因 1：加密配置被当成非 JSON 丢掉（已修，commit 540ac9d）
+
+TVBox 多仓的第 1 子仓 `8815.kstore.vip/tvbox/wmz` 返回的是：
+
+```
+YmFzZTY0**eyJzcGlkZXIiOiJodHRwczovL3Jhdy5naXRjb2RlLmNvbS8...
+```
+
+前缀 `YmFzZTY0` **本身就是 base64 编码的 "base64"**。`expandMultiRepo` 直接
+`Json.parse` → 判「不是 JSON 对象」→ 整个子仓 95 个站点全丢。
+
+而这 95 站用的全是 `csp_Bili` / `csp_PanWebShare` / `csp_4KZhinan` / `csp_App99`
+这类**内置 jar 里已经有**的类 —— 白丢 88 个可用站。
+
+修法：`Hub.decodeConfigBody()`，主配置与子仓解析前都过一遍。
+**坑**：标记要先取原文再 base64 解码，不能先 `toLowerCase()`
+（base64 大小写敏感，小写后 tag 变成 `ymfzzty0` 永远匹配不上）。
+
+实测：`8815.kstore.vip → 95 站`；合并站点 100 → 190；已加载 183 站。
+
+### 根因 2：`*Guard` 类来自加壳 APK，JVM 根本加载不了（无法修）
+
+另一批 89 个站点（`9280.kstore.vip/aiwex.json`，即 `王二小` 仓）需要
+`WexAppV7Guard` / `BiliGuard` / `NewDouBanGuard` 等类。
+
+该仓的 `spider` 字段是 `http://oss4liview.moji.com/.../xxx.jpg;md5;722d5c1b...`
+—— 不是假地址，是**把 APK 改名成 .jpg**（md5 与配置一致，1,010,202 B）。
+包内结构：
+
+| 文件 | 大小 | 作用 |
+|---|---|---|
+| `classes.dex` | 39,628 B | 壳，只含类名引用 + `DexNative` / `NativeFile` |
+| `assets/wexguard_v7.so` / `v8.so` | 48 KB×2 | 原生解密器（OLLVM/StringFog 混淆） |
+| `assets/wexshinidie.guard` | 946,288 B | **真正的 spider 字节码，已加密** |
+
+`wexshinidie.guard` 实测熵 **7.99 bits/byte**（≈8.0 = 完全加密），
+运行时由 native 库解密后交给 Android 的 `DexClassLoader`。
+**JVM 无法加载加壳 dex**，这条路在本项目里走不通，不是配置问题。
+
+`ui/spiders/lmw-classes.jar`（3227 个类）也来自同一批 lmw 产物，同样没有 Guard 类。
+
+### 结论与现状
+
+全量探测 146 站（修复后）：
+
+| 结果 | 数量 |
+|---|---|
+| ✅ 有数据（分类或列表 > 0） | 41 |
+| 其中列表明细也 > 0（真能出内容） | 9 |
+| 🎬 实测可播 | 8 |
+| ⚪ 调用成功但完全空 | 8 |
+| ❌ 失败：ClassNotFoundException（Guard 加壳） | 89 |
+| ❌ 失败：spider 超时 45s | 8 |
+
+**可选方向**（未实施，等决策）：
+
+1. 把 `configUrl` 直接指向 `https://8815.kstore.vip/tvbox/wmz`（现在能解 base64 了）
+   —— 95 站里 88 个类齐全，比现在 41 个可用更多，代价是丢掉其它子仓的少量站
+2. 载入时校验「站点 class 是否在 spider classpath 里」，不在就标成
+   `unsupported: spider 为加壳 dex` 并跳过，别让它们每轮探测刷 45s 超时
+3. 保留现状
+
+
 ## v0.6.2 — 同步进度「看着慢」的根因与体感修复
 
 **诊断**：SSE 直连 hub 实测每 2.0 秒准时推一次，传输没问题。「慢」的真实原因是
