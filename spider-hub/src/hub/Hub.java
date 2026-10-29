@@ -2620,6 +2620,11 @@ public class Hub {
             body = Files.readString(p, StandardCharsets.UTF_8);
         }
         body = body.trim();
+        // TVBox 生态常见「加密配置」：正文前加 "base64**" 标记，后面才是 base64 的 JSON。
+        // 不解这一层，整个子仓会被判成「不是 JSON 对象」直接丢掉。
+        // 实测 tushen6/Tomorrow/lmw.json 的第 1 子仓（8815.kstore.vip）就是这个格式，
+        // 里面 95 个站全是 hub 认得的 csp_*，因为解析失败白丢。
+        body = decodeConfigBody(body);
         // 多仓：{urls:[...]} → 全部子仓展开合并（和 Emby 插件侧行为一致）
         body = expandMultiRepo(body);
         pool.loadFromConfig(body, url);
@@ -3604,6 +3609,67 @@ public class Hub {
      *
      * 子仓是并发拉的：很多子仓域名已失效，串行会把启动拖成分钟级。
      */
+    /**
+     * 解 TVBox 的「加密配置」。
+     *
+     * 生态里有两种写法（都不是标准 JSON，直接 parse 会失败）：
+     *   1) base64**&lt;base64 正文&gt;          —— 最常见的伪装
+     *   2) 纯 base64（没有标记，但原文不是以 { 开头）
+     * 解出来的内容若是 JSON 对象就采用，否则原样返回，绝不因为解不开就把配置丢掉。
+     */
+    static String decodeConfigBody(String body) {
+        if (body == null) return null;
+        String s = body.trim();
+        if (s.isEmpty()) return s;
+        // 已经是 JSON，直接走
+        if (s.startsWith("{") || s.startsWith("[")) return s;
+
+        String payload = null;
+        int mark = s.indexOf("**");
+        if (mark > 0 && mark <= 16) {
+            String tag = s.substring(0, mark).trim();   // 注意：先别 toLowerCase，base64 大小写敏感
+            // 标记本身也可能是 base64：实测 8815.kstore.vip 用的是 "YmFzZTY0**"
+            // （YmFzZTY0 = base64 编码的 "base64"），只认字面 base64 会全部漏掉。
+            String tagPlain = tag.toLowerCase(java.util.Locale.ROOT);
+            try {
+                int pad0 = tag.length() % 4;
+                String t = tag + (pad0 == 2 ? "==" : pad0 == 3 ? "=" : "");
+                if (pad0 != 1) {
+                    tagPlain = new String(java.util.Base64.getDecoder().decode(t),
+                            StandardCharsets.UTF_8).trim().toLowerCase(java.util.Locale.ROOT);
+                }
+            } catch (Exception ignore) { }
+            if ("base64".equals(tagPlain) || "base64url".equals(tagPlain) || "b64".equals(tagPlain)
+                    || "base64".equals(tag) || "b64".equals(tag)) {
+                payload = s.substring(mark + 2);
+            }
+        } else if (s.matches("^[A-Za-z0-9+/=\\s_-]+$") && s.length() > 64) {
+            payload = s;                       // 无标记，按纯 base64 试一次
+        }
+        if (payload == null) return s;
+
+        String b64 = payload.replaceAll("\\s", "");
+        for (java.util.Base64.Decoder d : new java.util.Base64.Decoder[] {
+                java.util.Base64.getDecoder(), java.util.Base64.getUrlDecoder() }) {
+            try {
+                // 补齐 padding：有些仓把 = 去掉，标准 decoder 会直接抛
+                String padded = b64;
+                int pad = padded.length() % 4;
+                if (pad == 2) padded = padded + "==";
+                else if (pad == 3) padded = padded + "=";
+                if (pad == 1) continue;
+                byte[] raw = d.decode(padded);
+                String out = new String(raw, StandardCharsets.UTF_8).trim();
+                if (out.startsWith("{") || out.startsWith("[")) {
+                    return out;
+                }
+            } catch (Exception ignore) {
+                // 换下一种 decoder
+            }
+        }
+        return s;
+    }
+
     static String expandMultiRepo(String body) throws Exception {
         Object root;
         try { root = SpiderPool.Json.parse(body); }
@@ -3632,7 +3698,7 @@ public class Hub {
         for (final String sub : subs) {
             futs.add(workers2.submit(() -> {
                 try {
-                    Object parsed = SpiderPool.Json.parse(fetch(sub));
+                    Object parsed = SpiderPool.Json.parse(decodeConfigBody(fetch(sub)));
                     if (!(parsed instanceof Map)) return new Object[] { sub, null, "不是 JSON 对象" };
                     Object sites = ((Map<?, ?>) parsed).get("sites");
                     if (!(sites instanceof List)) return new Object[] { sub, null, "没有 sites" };
