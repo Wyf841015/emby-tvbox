@@ -4,19 +4,25 @@
 
 一个 fnOS 应用（`tvboxhub.fpk`）+ 一个 Emby 插件（`TvBox.dll`），装完在浏览器里点点鼠标就能用，不用碰命令行。
 
-> 当前版本 **v0.7.0**。
+> 当前版本 **v0.8.0**。
 > 内部迭代期（0.5.x）的逐条开发记录保留在 [docs/CHANGELOG-internal.md](docs/CHANGELOG-internal.md)。
 
-## v0.7.0 更新
+## v0.8.0 更新
 
-网盘登录：扫码 / 粘贴凭证 → 凭证持久化 → 启用网盘源 → 生成 strm → 用这份凭证播放。
+站点可用性判定 + 启动健壮性。这一版没有新功能页，全部是把「站点明明在内置 jar 里有、却显示用不了」和「重启后站点莫名变少」两件事查到底。
 
-- 「我的网盘」页支持 9 个网盘（115 / 夸克 / UC / 百度 / 天翼 / 123 / 迅雷 / 光鸭 / 阿里）
-- 115 / 百度 / 阿里 可扫码登录；9 个网盘都能粘贴凭证
-- 凭证落在 `${PKGVAR}/data/pan/lzxw/`（**原来在 `/tmp`，重启就丢**，这是「记不住登录」的根因）
-- 另有 AES-256-GCM 加密备份 `pan-vault.enc`，重启/换机可还原
-- 保存后立刻验活（调 homeContent 看真实条目数），每 6 小时自动巡检失效
-- 退出登录走 `.trash`，不删文件
+- 🧩 **支持 `base64**` 加密配置**：TVBox 多仓里有子仓把 JSON 再套一层 base64（连 `base64` 这个标记本身都是编码过的），
+  以前直接判「不是 JSON 对象」把整个子仓丢掉 —— 实测一个子仓 95 个站点全丢，而它们要的 spider 类内置 jar 里本来就有
+- 🚫 **加壳源单独判一档**：有些站点把 spider 打进加密 APK（载荷熵 7.99，运行时由 native 库解密后交给 Android 的
+  `DexClassLoader`），JVM 不可能加载。现在载入即判类，判不通的标「不支持」并在批量探测里自动跳过 ——
+  单个站点从「每轮等 45 秒超时」变成 **毫秒级返回**，146 站全量探测从被超时拖长降到 **67 秒**
+- 🔒 这类站点也不允许「加入同步」了（以前加了每轮同步都是白撞，日志里只剩类加载失败，看不出是源本身不支持）
+- ⚡ **启动不再被配置拉取拖死**：socket / HTTP 服务提前到配置加载之前建立，配置改后台线程加载 + 失败自动重试。
+  以前多仓拉取一慢就撞上 fnOS 启动器的 15 秒等待窗口、被判「启动失败」（进程其实还活着）；
+  现在 **2~9 秒**就绪，打开就有界面
+- 💾 **配置本地缓存兜底**：上游镜像（raw.githubusercontent / 各种 gh 镜像）整体不可用时自动退上次成功拉到的配置，
+  不再重启后站点变 0 个；另外防「名单被冲小」——本次站点数掉到历史最好的 60% 以下时自动保留原结果，
+  避免源站抽风时把 190 站冲成 33 站
 
 ## v0.6.0 更新
 
@@ -194,108 +200,6 @@ http://<你的Emby>/TvBox/Stream?...   →  插件补 Referer / User-Agent  → 
 
 ---
 
-## 网盘登录
-
-侧边栏「**我的网盘**」。凭证本来就是这套 spider 的原生机制（所有网盘客户端都走
-`Init.context().getFilesDir()/lzxw/` 读文件），本应用只是提供了界面 + 持久化 + 验活，
-**没有改动一行 spider 代码**。
-
-### 支持矩阵
-
-| 网盘 | 扫码登录 | 粘贴凭证 | 凭证文件 |
-|---|---|---|---|
-| 115 | ✅ 直连 HTTP | ✅ | `115.txt` |
-| 百度 | ✅ | ✅ | `baidu.txt` |
-| 阿里云盘 | ✅ 本地画码 | ✅ | `aliyun`（无扩展名，JSON） |
-| 夸克 | — | ✅ | `quark_cookie.txt` |
-| UC | — | ✅ | `uc_cookie.txt` + `uc_token.txt` + `uc_machine_code.txt` |
-| 天翼 | — | ✅ | `cloud189.txt` |
-| 123 | — | ✅ | `cloud123.txt` |
-| 迅雷 | — | ✅ | `xunlei.txt` |
-| 光鸭 | — | ✅ | `guangya.txt` |
-
-### 扫码登录的真实情况（别踩坑）
-
-三家都能生成**官方**二维码，而且都能落地。踩过的坑和修法都记在这里：
-
-- **115**：不用 jar 里的 `Qr115` 了 —— 它内部 HTTP 超时约 30s，而
-  `qrcodeapi.115.com/get/status/` **本身就是 30s 长轮询**，每次都擦边超时，
-  永远返回 `-99`。现在直连三个接口（照抄 jar 字节码）：
-  `qandroid/1.0/token/` → `get/status/?uid=&time=&sign=` →
-  `login/qrcode/?account=<uid>&app=qandroid`（换 `data.cookie` 的 UID/CID/SEID/KID）。
-  超时放到 45s，并且挂在后台线程里轮询。
-- **百度**：`getqrcode` 的 `imgurl` 补 `https://` 就是 245×245 PNG。
-  轮询 `channel/unicast` 是 30s 长轮询，没扫到时返回 `{"errno":1}`。
-  **确认后载荷藏在 `channel_v` 里，还套了一层 JSON 字符串**：
-  `{"errno":0,"channel_v":"{\"status\":0,\"v\":\"<base64>\"}"}` ——
-  只读顶层 `v` 永远拿不到，这是「扫了确认了却一直等待扫码」的真因。
-- **阿里云盘**：`generate.do` 只给 `codeContent`，图片由前端 `qrcode-generator`
-  本地画（token 不出这台机器）。轮询 `query.do` **必须把 `ck`/`t` 放 POST body**，
-  放 query string 会一律返回 `qrCodeExpired`（GET 实测 3/3 全 EXPIRED）。
-
-> **长轮询一律挂后台**：115 的 `get/status`、百度的 `channel/unicast` 都是 30 秒才回。
-> 如果让浏览器直接挂着这个请求，穿过 fnOS 网关时很容易在 30s 边界被掐掉，
-> 正好丢掉「已确认」那一帧。所以这两家改成服务端后台线程常驻轮询、结果存快照，
-> 浏览器只读快照（实测 20ms 返回）。
-
-夸克 / UC / 天翼仍然只有粘贴，不给扫码按钮 —— 这不是偷懒：
-
-- **夸克**：`getTokenForQrcodeLogin` 只回 token，没有任何接口给二维码图；
-  `su.quark.cn/4_eMHBJ?token=` 会 302 到 `b.quark.cn` 的落地页，不是码。
-- **UC**：`uop.uc.cn` 在本机解析不了。
-- **天翼**：189 要 `date`+HMAC 签名。
-
-与其给一个扫不动的码，不如让人直接粘贴。
-
-### 凭证怎么存
-
-```
-${PKGVAR}/data/pan/            ← <PKGVAR> = /vol3/@appdata/tvboxhub
-├── lzxw/                      ← spider 真正读的目录（0600，仅应用可读）
-│   ├── 115.txt
-│   ├── baidu.txt
-│   └── aliyun
-├── pan-vault.enc              ← AES-256-GCM 加密备份（密钥在 hub.json 的 panKey）
-└── pan-vault.log              ← 备份操作记录
-```
-
-- 明文是**必须**的：spider 直接读文件，不解密。所以用 `0600` + 应用私有目录兜底。
-- `pan-vault.enc` 用于重启恢复 / 换机迁移 / 连同备份带走；`panKey` 丢了就解不开。
-- 「退出登录」把文件移进 `.trash/`，**不删**。
-
-### 验活不是「文件写了就算成功」
-
-保存后会立刻调一次该网盘的 `homeContent`，**只认「真的列出了条目」**：
-
-> 调通了但一条都没列出来（分类 1）—— 凭证多半无效/已过期，或该网盘根目录是空的
-
-为什么不用「分类数」判断：实测 115 用**假 cookie** 也能返回「分类 1 个」，
-只看分类会把无效凭证误报成已登录。
-
-### 启用之后
-
-「启用网盘源并加入同步」= 打开 `allowNetdisk` + 把这 9 个网盘站加进 `syncSites`，
-之后在「站点」页就能看到它们参与同步。
-
-### 只同步指定目录
-
-整盘同步是 Emby 插件自己枚举的（hub 只负责转发 `/TvBox/Sync`）。所以「只同步某个目录」
-做在 **hub 侧**：hub 自己列目录 → 自己逐条调插件的 `/TvBox/PushItem` 写 STRM，
-**插件代码一行都不用改**。
-
-操作：网盘卡片上点「**同步目录…**」→ 弹出目录浏览框 → 点目录名进去 → 点「选为目录」
-勾选（可多选）→「保存这些目录」→ 卡片底部出现「同步这些目录 / 试运行」。
-
-- 不选目录 = 整盘同步（默认，交给插件）
-- 选了目录 = 卡片底部显示这些目录，同步只走它们
-- 先点「试运行」只统计条数、不写文件，确认范围对了再真跑
-- 单次最多 300 条（可调），每个目录最多翻 12 页，避免一个超大目录把机器拖住
-- 目录/文件怎么区分：先看 `vod_tag` / `type`；判不出来就「点进去试试」——
-  能列出子项就是目录，列不出来就是文件。**不靠猜字段**
-
-> 注意：这一步依赖网盘凭证有效。没登录时目录框会直接显示 spider 的原话，
-> 例如「还未登录115账号,请前往【配置中心】登录」。
-
 ## HTTP API 概览
 
 hub 44 个路由（完整列表见 `spider-hub/src/hub/Hub.java`）：
@@ -303,7 +207,7 @@ hub 44 个路由（完整列表见 `spider-hub/src/hub/Hub.java`）：
 | 分组 | 代表接口 |
 |---|---|
 | 站点/配置 | `/api/sites`、`/api/sites/sync`、`/api/sync-sites`、`/api/config`、`/api/save`、`/api/reload`、`/api/prefs` |
-| 内容 | `/api/home`、`/api/category`、`/api/detail`、`/api/search`、`/api/search-all`、`/api/probe`、`/api/netdisk` |
+| 内容 | `/api/home`、`/api/category`、`/api/detail`、`/api/search`、`/api/search-all`、`/api/probe` |
 | 播放 | `/api/stream`、`/api/stream/seg`、`/api/play-resolve`、`/api/go` |
 | Emby | `/api/emby/detect`、`/api/emby/install`、`/api/emby/status`、`/api/emby/sync`、`/api/emby/self-update` |
 | 清理 | `/api/sync/purge-preview`、`/api/sync/purge` |
@@ -336,23 +240,19 @@ cd ../fpk-src && fnpack build .
 
 - **dex 内的 spider 类**：TVBox 配置里一部分源把 spider 打成 Android dex，纯 JVM 跑不起来（实验数据见 `spider-host/`），这类源在站点页会显示不可用
 - **需要登录的源**（B 站系等）要自备 cookie；**需要外部解析器**的源要自备解析接口模板
-- 网盘类源（继承 `Pan` 基类）没有账号拿不到直链，默认在解析阶段排除
+- 继承 `Pan` 基类的源需要账号才能取到直链，默认在解析阶段排除
 - 源站随时可能失效、改接口——这是第三方内容，不是本项目能修的
 
 ---
 
 ## 版本历史
 
-### v0.7.0 (2026-10-25)
+### v0.8.0 (2026-10-29)
 
-- 新增「我的网盘」：9 个网盘登录（115/百度/阿里 扫码；9 家均可粘贴凭证）
-- 凭证持久化到 `${PKGVAR}/data/pan/lzxw`，修掉原来落在 `/tmp` 重启即丢的问题
-- AES-256-GCM 加密备份 `pan-vault.enc`；退出登录走 `.trash` 不删文件
-- 保存即验活（只认真实条目数），6 小时自动巡检凭证失效
-- 新增 API：`/api/pan`、`/api/pan/login`、`/api/pan/logout`、`/api/pan/raw`、
-  `/api/pan/verify`、`/api/pan/enable`、`/api/pan/qr`、
-  `/api/pan/tree`、`/api/pan/dirs`、`/api/pan/dirs/run`（均需令牌/网关头）
-- 新增「只同步指定目录」：hub 侧列目录 + 逐条推 `/TvBox/PushItem`，插件无需改动
+- 支持 `base64**` 加密配置，救回被整仓丢弃的子仓（实测合并站点 100 → 190）
+- 站点可加载性判定：加壳 dex 源标「不支持」并自动跳过，探测从每站 45 秒超时降到毫秒级
+- 同步名单拒绝加壳源
+- 启动时序：先建 socket 再拉配置；配置后台加载 + 本地缓存兜底 + 部分失败保留原结果
 
 ### v0.6.0 (2026-10-24)
 
