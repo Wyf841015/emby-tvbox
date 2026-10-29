@@ -768,8 +768,24 @@ public class Hub {
                 boolean on = Boolean.TRUE.equals(in.get("sync"))
                         || "1".equals(str(in.get("sync"))) || "true".equalsIgnoreCase(str(in.get("sync")));
 
+                // 加壳源（JVM 加载不了的）不许加进同步：加了每轮同步也只是白撞，
+                // 而且同步日志里只会看到「类加载失败」，看不出是源本身不支持。
+                int blocked = 0;
                 for (String k : targets) {
-                    if (on) set.add(k); else set.remove(k);
+                    if (on) {
+                        SpiderPool.Site st = pool.site(k);
+                        if (st != null && Boolean.FALSE.equals(pool.judgeClass(st))) { blocked++; continue; }
+                        set.add(k);
+                    } else {
+                        set.remove(k);
+                    }
+                }
+                if (blocked > 0) {
+                    Map<String, Object> m = fail("有 " + blocked + " 个站是加壳源（JVM 无法加载），已跳过不加同步");
+                    m.put("blocked", blocked);
+                    if (blocked == targets.size()) { sendJson(ex, 200, m); return; }
+                    // 部分被拦：继续保存其余，但把跳过数回报给前端
+                    lastSyncBlocked = blocked;
                 }
                 settings.put("syncSites", new ArrayList<>(set));
                 saveSettings();
@@ -1693,6 +1709,18 @@ public class Hub {
                 String key = q.get("key");
                 if (key == null || key.isBlank()) { sendJson(ex, 200, fail("缺少 key 参数")); return; }
                 boolean rec = !"0".equals(q.getOrDefault("record", "1"));
+                // 先判类能不能加载：加壳 APK/dex 这类站在 JVM 里永远跑不了，
+                // 以前每次探测都要白等 45s 超时，界面还显示成「失败」。
+                SpiderPool.Site siteObj = pool.site(key);
+                if (siteObj != null && Boolean.FALSE.equals(pool.judgeClass(siteObj))) {
+                    Map<String, Object> m = fail(siteObj.classMsg);
+                    m.put("unsupported", true);
+                    m.put("classes", 0);
+                    m.put("list", 0);
+                    m.put("ms", 0);
+                    sendJson(ex, 200, m);
+                    return;
+                }
                 long t0 = System.currentTimeMillis();
                 try {
                     String raw = call(key, () -> pool.get(key).homeContent(false), 45);
@@ -2629,6 +2657,10 @@ public class Hub {
         body = expandMultiRepo(body);
         pool.loadFromConfig(body, url);
         System.out.println("已加载 " + pool.size() + " 个 spider 站点");
+        int fastOk = pool.judgeClassesFast();
+        System.out.println("类预判：全局 classpath 直接命中 " + fastOk + " 站"
+                + "，其余 " + (pool.size() - fastOk) + " 站等探测时带站点自带 jar 再判"
+                + "（其中判失败的不再重试）");
         restoreProbeState();
         pool.pin(syncSiteKeys());   // 同步名单常驻，避免冷启动撞插件超时
         return pool.size();
@@ -2636,6 +2668,8 @@ public class Hub {
 
     /** 上一次成功使用的地址（镜像回退后能看出走的是哪条）。 */
     static volatile String lastFetchedVia = null;
+    /** 上一次改同步名单时被拦下的加壳源数量（回报给前端用）。 */
+    static volatile int lastSyncBlocked = 0;
 
     /**
      * 取配置。国内直连 raw.githubusercontent.com 经常不通

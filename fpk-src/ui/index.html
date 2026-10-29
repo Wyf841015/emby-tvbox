@@ -225,6 +225,11 @@
   tbody tr{transition:background var(--t-fast)}
   tbody tr:nth-child(even) td{background:var(--surface-2);background:color-mix(in srgb, var(--surface-2) 55%, transparent)}
   tbody tr:hover td{background:var(--accent-soft)}
+  /* JVM 加载不了的加壳源：整行压暗，但首列（状态）保持醒目，
+     否则用户会以为是「失败」而不是「服务端根本不支持」。 */
+  tbody tr.row-off td{opacity:.5}
+  tbody tr.row-off td:first-child{opacity:1}
+  tbody tr.row-off code{text-decoration:line-through}
   code{
     font-family:var(--mono);font-size:12px;background:var(--bg-2);
     padding:2px 6px;border-radius:var(--r-xs);color:var(--brand-2);border:1px solid var(--line-soft);
@@ -2255,8 +2260,10 @@ function renderSites() {
   if (hint) {
     var playableN = sites.filter(function (s) { return s.playable === true; }).length;
     var untestedN = sites.filter(function (s) { return !s.netdisk && (s.playable === null || s.playable === undefined); }).length;
+    var unsupN = sites.filter(function (s) { return s.unsupported; }).length;
     hint.textContent = sites.length
       ? ('共 ' + sites.length + ' 个站点 · 可播 ' + playableN + ' 个'
+         + (unsupN ? ' · 🚫 不支持 ' + unsupN + ' 个（加壳源）' : '')
          + (untestedN ? ' · 未验证 ' + untestedN + ' 个（点「批量探测当前」）' : '')
          + ' · 已加入同步 ' + sites.filter(function (s) { return s.sync; }).length + ' 个')
       : '';
@@ -2264,6 +2271,19 @@ function renderSites() {
 
   function row(s) {
     var probed = !!s.probeTs;
+    // JVM 加载不了的站（加壳 APK/dex）单独一档：不是「失败」，是根本没可能在
+    // 服务端跑起来 —— 混在失败里会让人以为是临时故障、反复去重试。
+    if (s.unsupported) {
+      return '<tr class="row-off">' +
+        '<td title="' + esc(s.unsupportReason || '服务端无法加载该站的 spider 类') + '">'
+          + '<span class="st bad"></span>不支持</td>' +
+        '<td title="spider 跑不起来，谈不上可播">—</td>' +
+        '<td>' + (s.netdisk ? '<span class="pill bad">网盘</span>' : '<span class="pill ok">直连</span>') + '</td>' +
+        '<td>' + esc(s.name || '') + '</td>' +
+        '<td><code>' + esc(s.key) + '</code></td>' +
+        '<td><span class="pill bad" title="' + esc(s.unsupportReason || '') + '">加壳 dex</span></td>' +
+        '</tr>';
+    }
     var st = s.lastError ? 'bad'
       : (probed ? (s.data ? 'ok' : 'none') : (s.ok ? 'ok' : 'unk'));
     var label = s.lastError ? '失败'
@@ -2416,16 +2436,25 @@ function testCms(i) {
 }
 
 function probeAll() {
-  var list = filteredSites();
-  if (!list.length) { toast('当前筛选下没有站点可测', 'bad'); return; }
+  var all = filteredSites();
+  // 加壳站不可能跑起来，别让它们把每轮探测拖成 45s × N 的等待
+  var list = all.filter(function (s) { return !s.unsupported; });
+  var skipped = all.length - list.length;
+  if (!list.length) {
+    toast(skipped ? ('当前 ' + skipped + ' 个站都是服务端加载不了的加壳源，没有可测的')
+                  : '当前筛选下没有站点可测', 'bad');
+    return;
+  }
   var done = 0, ok = 0, t0 = Date.now();
   var box = document.getElementById('probeProgress');
   box.textContent = '0 / ' + list.length;
   function next(i) {
     if (i >= list.length) {
       var ms = Date.now() - t0;
-      box.textContent = '完成：' + ok + ' / ' + list.length + ' 有数据';
-      toast('探测完成：' + ok + ' / ' + list.length + ' 个站有数据（其余见测试列）', 'ok');
+      box.textContent = '完成：' + ok + ' / ' + list.length + ' 有数据'
+        + (skipped ? '（跳过 ' + skipped + ' 个不支持）' : '');
+      toast('探测完成：' + ok + ' / ' + list.length + ' 个站有数据（其余见测试列）'
+        + (skipped ? '；另跳过 ' + skipped + ' 个加壳源（服务端无法加载）' : ''), 'ok');
       api('api/history/add', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: '批量探测', target: list.length + ' 个站点（当前筛选）',
           ok: 1, detail: '可用 ' + ok + ' / ' + list.length, ms: ms }) }).then(loadLogs);

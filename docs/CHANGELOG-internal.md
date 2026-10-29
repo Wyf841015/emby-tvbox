@@ -59,13 +59,33 @@ YmFzZTY0**eyJzcGlkZXIiOiJodHRwczovL3Jhdy5naXRjb2RlLmNvbS8...
 | ❌ 失败：ClassNotFoundException（Guard 加壳） | 89 |
 | ❌ 失败：spider 超时 45s | 8 |
 
-**可选方向**（未实施，等决策）：
+### 已实施：载入时校验类 + 不可加载的直接跳过
 
-1. 把 `configUrl` 直接指向 `https://8815.kstore.vip/tvbox/wmz`（现在能解 base64 了）
-   —— 95 站里 88 个类齐全，比现在 41 个可用更多，代价是丢掉其它子仓的少量站
-2. 载入时校验「站点 class 是否在 spider classpath 里」，不在就标成
-   `unsupported: spider 为加壳 dex` 并跳过，别让它们每轮探测刷 45s 超时
-3. 保留现状
+`SpiderPool` 新增 `classOk` / `classMsg`，判定分两级，都不碰 spider 本身：
+
+1. **载入后快速预判**（`judgeClassesFast`）：只查全局 classpath，纯 zip 查询不联网。
+   命中 88 站立刻标记可跑。
+2. **探测时补判**（`judgeClass`）：带上站点自带 jar（`jarResolver` 会下载并缓存），
+   只做 `Class.forName(cls, false, loader)` —— 不初始化静态块、不实例化、不调 spider。
+   失败就永久记上原因，不再重试。
+
+配套：
+
+- `/api/probe` 入口先判类，命中 `classOk=false` 立刻返回
+  `{ok:false, unsupported:true, msg:"…加壳 APK/dex，JVM 无法加载…", ms:0}`
+- `/api/sites/sync` 拒绝把加壳源加进同步名单（部分被拦时会继续保存其余，并回报 `blocked` 数）
+- 前端：`unsupported` 单独一档显示「🚫 不支持 + 加壳 dex」徽章（不再混进「失败」），
+  批量探测自动跳过并回报「跳过 N 个加壳源」，汇总行显示不支持总数
+
+**实测对比**（146 站，10 线程全量探测）：
+
+| | 改前 | 改后 |
+|---|---|---|
+| 有数据 | 41 | 39~43（整轮波动，随站点可用性） |
+| 加壳源 | 89 个各等 45s 超时 | **95 个 ms=0 瞬时拒绝** |
+| 其它失败 | 8 个超时 | 0~5（网络抖动） |
+| 全量耗时 | 被超时拖长 | **67s** |
+
 
 
 ## v0.6.2 — 同步进度「看着慢」的根因与体感修复

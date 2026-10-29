@@ -62,6 +62,19 @@ public class SpiderPool {
         public volatile Boolean playable;
         public volatile String playMsg;
         public volatile long lastPlayAt;
+        /**
+         * spider 类到底能不能被 classpath 解析。
+         *   null  = 还没判过（探测时再带站点自带 jar 判一次）
+         *   true  = 能加载
+         *   false = 不能（加壳 APK/dex、或内置 jar 里压根没这个类）
+         *
+         * 为什么要单独记：TVBox 生态里有一批源把 spider 打成**加密 APK**
+         * （assets/xxx.guard 熵 7.99，运行时由 native 库解密交给 Android DexClassLoader），
+         * JVM 无论如何都加载不了。以前每个这样的站每轮探测都要白等 45s 超时，
+         * 界面上还显示成「失败」，看着像配置坏了。判定一次、永久跳过。
+         */
+        public volatile Boolean classOk;
+        public volatile String classMsg;
 
         public Map<String, Object> toMap() {
             Map<String, Object> m = new LinkedHashMap<>();
@@ -78,6 +91,8 @@ public class SpiderPool {
             m.put("lastOk", lastOk == 0 ? null : new java.util.Date(lastOk).toString());
             // 测试列三态：失败(lastError) / 可用(有数据) / 无数据(调通了但 0 条) / 未测(从没探测)
             m.put("data", hasData);
+            m.put("unsupported", Boolean.FALSE.equals(classOk));
+            m.put("unsupportReason", classMsg);
         m.put("playable", playable);          // null = 没测过
         m.put("playMsg", playMsg);
         m.put("lastPlayAt", lastPlayAt);
@@ -107,6 +122,80 @@ public class SpiderPool {
     private final Map<String, ClassLoader> jarLoaders = new ConcurrentHashMap<>();
     /** jar URL → 本地缓存文件；由 Hub 注入（负责下载 + 缓存 + 镜像回退）。 */
     public java.util.function.Function<String, File> jarResolver;
+
+    private static String shortCls(String cls) {
+        if (cls == null) return "?";
+        int i = cls.lastIndexOf('.');
+        return i > 0 ? cls.substring(i + 1) : cls;
+    }
+
+    /**
+     * 判这个站点的 spider 类能不能加载。只做 Class.forName(..., false, ...)，
+     * 不初始化静态块、不实例化、不调 spider 任何方法，所以不会触发 45s 超时。
+     *
+     * 站点自带 jar 会被这次判定顺手下载并缓存（jarResolver），之后的探测直接命中缓存。
+     */
+    public Boolean judgeClass(Site s) {
+        if (s == null) return Boolean.FALSE;
+        Boolean cached = s.classOk;
+        if (cached != null) return cached;
+        if (s.cls == null || s.cls.isBlank()) {
+            s.classMsg = "站点没有 class 字段，无法实例化";
+            s.classOk = Boolean.FALSE;
+            return Boolean.FALSE;
+        }
+        synchronized (s) {
+            if (s.classOk != null) return s.classOk;
+            Throwable lastErr = null;
+            for (ClassLoader ld : loadersFor(s)) {
+                if (ld == null) continue;
+                try {
+                    Class.forName(s.cls, false, ld);
+                    s.classOk = Boolean.TRUE;
+                    s.classMsg = null;
+                    return Boolean.TRUE;
+                } catch (Throwable t) {
+                    lastErr = t;
+                }
+            }
+            boolean hasOwnJar = s.jar != null && !s.jar.isBlank();
+            s.classMsg = hasOwnJar
+                    ? "站点自带 jar 提供不了 " + shortCls(s.cls)
+                      + "（多为加壳 APK/dex，JVM 无法加载；Android 端的 DexClassLoader 才能跑）"
+                    : "内置 spider jar 里没有 " + shortCls(s.cls) + "（发布方未开源该类）";
+            if (lastErr != null && !(lastErr instanceof ClassNotFoundException)) {
+                s.classMsg += " · " + rootMsg(lastErr);
+            }
+            s.classOk = Boolean.FALSE;
+            return Boolean.FALSE;
+        }
+    }
+
+    /**
+     * 载入后先做一次「只查全局 classpath」的快速预判（纯 zip 查询，不联网）。
+     * 命中的站点立刻知道能跑；没命的留 null，等探测时再带站点自带 jar 判一次。
+     */
+    public int judgeClassesFast() {
+        int ok = 0;
+        for (Site s : sites.values()) {
+            if (s.classOk != null || s.cls == null || s.cls.isBlank()) continue;
+            try {
+                Class.forName(s.cls, false, spiderLoader);
+                s.classOk = Boolean.TRUE;
+                ok++;
+            } catch (Throwable ignore) {
+                // 留给探测时带站点 jar 再判
+            }
+        }
+        return ok;
+    }
+
+    /** 已被判定为不可加载的站点数。 */
+    public int unsupportedCount() {
+        int n = 0;
+        for (Site s : sites.values()) if (Boolean.FALSE.equals(s.classOk)) n++;
+        return n;
+    }
 
     public Collection<Site> allSites() {
         return sites.values();
